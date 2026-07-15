@@ -28,7 +28,11 @@ A Capsule says:
 It does not request a warm worker. A Provider may satisfy the exact Capsule by
 starting cold or leasing compatible sterile prepared capacity. The choice may
 affect latency and Evidence, but not Program inputs, authority, runtime
-identity, limits, output contract, failure semantics, or observable result.
+identity, limits, output contract, or failure semantics. A deterministic input
+profile must produce equivalent observable results on both paths. When a
+Capsule explicitly admits live time, randomness, or another nondeterministic
+input, only values delivered through that declared profile may differ; warm or
+cold acquisition cannot introduce another difference.
 
 If warm capacity is absent, the Provider may construct the same runtime cold.
 It may not choose another runtime or weaken isolation. If neither path can
