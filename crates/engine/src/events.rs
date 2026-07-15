@@ -1,5 +1,6 @@
 //! Deterministic lifecycle events and observers.
 
+use crate::CredentialTaint;
 use runtrue_lifecycle::{JobState, RunState, StepState};
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,9 @@ pub struct StepStateObservation {
     pub job_attempt: u32,
     pub from: Option<StepState>,
     pub to: StepState,
+    /// Credential taint observed while executing this step. Non-terminal
+    /// observations carry [`CredentialTaint::None`].
+    pub credential_taint: CredentialTaint,
 }
 
 /// Observer for real-time step lifecycle transitions.

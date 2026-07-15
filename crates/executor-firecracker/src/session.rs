@@ -329,6 +329,7 @@ fn observe_step(
                 job_attempt: 1,
                 from,
                 to,
+                credential_taint: runtrue_engine::CredentialTaint::None,
             })
         })
         .transpose()

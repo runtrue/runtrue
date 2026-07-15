@@ -229,6 +229,10 @@ fn durable_completion_objects_replay_exactly_and_reject_substitution() {
             &exact_claims,
         )
         .unwrap();
+    assert_eq!(
+        control.run_credential_taint("run-objects").unwrap(),
+        CredentialTaintState::Unknown
+    );
     for substituted_claims in [
         vec![("artifact-1".to_owned(), "wrong-name".to_owned())],
         vec![(
@@ -256,6 +260,7 @@ fn durable_completion_objects_replay_exactly_and_reject_substitution() {
             lease.installation_fencing_epoch,
             &digest,
             JobState::Succeeded,
+            CredentialTaintState::None,
             1,
             &[],
             &caches,
@@ -272,6 +277,7 @@ fn durable_completion_objects_replay_exactly_and_reject_substitution() {
             lease.installation_fencing_epoch,
             &digest,
             JobState::Succeeded,
+            CredentialTaintState::None,
             1,
             &artifacts,
             &caches,
@@ -279,6 +285,12 @@ fn durable_completion_objects_replay_exactly_and_reject_substitution() {
             NOW + 7,
         )
         .unwrap();
+    drop(control);
+    let control = ControlPlane::open(&path, "completion-objects", NOW + 8).unwrap();
+    assert_eq!(
+        control.run_credential_taint("run-objects").unwrap(),
+        CredentialTaintState::None
+    );
     control
         .validate_runner_completion_artifact_claims(
             &lease.id,
@@ -335,6 +347,7 @@ fn durable_completion_objects_replay_exactly_and_reject_substitution() {
             lease.installation_fencing_epoch,
             &digest,
             JobState::Succeeded,
+            CredentialTaintState::None,
             1,
             &artifacts,
             &caches,
@@ -350,6 +363,7 @@ fn durable_completion_objects_replay_exactly_and_reject_substitution() {
             lease.installation_fencing_epoch,
             &digest,
             JobState::Succeeded,
+            CredentialTaintState::None,
             1,
             &["artifact-substitution".to_owned()],
             &caches,
@@ -366,6 +380,7 @@ fn durable_completion_objects_replay_exactly_and_reject_substitution() {
             lease.installation_fencing_epoch,
             &digest,
             JobState::Succeeded,
+            CredentialTaintState::None,
             2,
             &artifacts,
             &caches,
@@ -631,6 +646,97 @@ fn durable_completion_objects_replay_exactly_and_reject_substitution() {
             .unwrap()
             .state,
         "retired"
+    );
+
+    control
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE artifacts_catalog SET state = 'available' WHERE artifact_id = 'artifact-1'",
+            [],
+        )
+        .unwrap();
+    let late_ticket = ArtifactDownloadTicketRecord {
+        token_hash: ContentDigest::sha256(b"late-upgrade-download"),
+        artifact_id: catalog.artifact_id.clone(),
+        tenant_id: catalog.tenant_id.clone(),
+        principal_id: "late-reader".to_owned(),
+        classification: catalog.classification.clone(),
+        manifest_digest: catalog.manifest_digest.clone(),
+        issued_unix_ms: NOW + 27,
+        expires_unix_ms: NOW + 60_000,
+        used_unix_ms: None,
+    };
+    control
+        .issue_artifact_download_ticket(&late_ticket)
+        .unwrap();
+    let late_cache = CacheTrustGenerationRecord {
+        cache_entry_id: "cache-1".to_owned(),
+        tenant_id: "tenant-1".to_owned(),
+        repository_id: "repo-1".to_owned(),
+        identity_digest: ContentDigest::sha256(b"late cache identity"),
+        key_material_digest: ContentDigest::sha256(b"late cache key"),
+        key_material: serde_json::json!({"scope":"late-upgrade"}),
+        trust_domain: serde_json::json!({"kind":"verified"}),
+        generation: 1,
+        manifest_digest: ContentDigest::sha256(b"late cache manifest"),
+        tree_manifest_digest: ContentDigest::sha256(b"late cache tree"),
+        fencing_generation: lease.fencing_generation,
+        source_cache_entry_id: None,
+        promotion_evidence_digest: None,
+        created_unix_ms: NOW + 27,
+    };
+    control
+        .record_cache_trust_generation(&late_cache, None)
+        .unwrap();
+
+    assert!(matches!(
+        control.complete_lease_with_objects(
+            &lease.id,
+            "runner-1",
+            lease.fencing_generation,
+            lease.installation_fencing_epoch,
+            &digest,
+            JobState::Succeeded,
+            CredentialTaintState::CredentialReleased,
+            1,
+            &artifacts,
+            &caches,
+            &required,
+            NOW + 28,
+        ),
+        Err(ControlPlaneError::RunnerBrokerBindingMismatch)
+    ));
+    assert_eq!(
+        control
+            .artifact_for_tenant("tenant-1", "artifact-1")
+            .unwrap()
+            .state,
+        "quarantined"
+    );
+    assert!(matches!(
+        control.consume_artifact_download_ticket(
+            &late_ticket.token_hash,
+            Some("tenant-1"),
+            "late-reader",
+            NOW + 29,
+        ),
+        Err(ControlPlaneError::NotFound { .. })
+    ));
+    let cache_heads: u64 = control
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM cache_trust_current_heads
+             WHERE cache_entry_id = 'cache-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cache_heads, 0);
+    assert_eq!(
+        control.run_credential_taint("run-objects").unwrap(),
+        CredentialTaintState::CredentialReleased
     );
 }
 

@@ -8,6 +8,7 @@ use crate::runtrue::action::host::{
     DirectoryAccess as WitDirectoryAccess, DirectoryHandle as WitDirectoryHandle, Host,
     OidcHandle as WitOidcHandle, SecretHandle as WitSecretHandle,
 };
+use runtrue_engine::CredentialTaint;
 use runtrue_model::SecretReference;
 use runtrue_workflow_ir::NetworkPermission;
 use serde_json::Value;
@@ -30,6 +31,7 @@ pub(crate) struct HostState {
     pub(super) secrets: BTreeMap<u64, SecretReference>,
     pub(super) oidc_audiences: BTreeMap<u64, String>,
     sensitive_log_values: Vec<Zeroizing<Vec<u8>>>,
+    credential_taint: CredentialTaint,
     pub store_limits: AggregateStoreLimits,
     wasi_ctx: WasiCtx,
     wasi_resources: ResourceTable,
@@ -65,6 +67,7 @@ impl HostState {
             secrets: invocation.secrets,
             oidc_audiences: invocation.oidc_audiences,
             sensitive_log_values: Vec::new(),
+            credential_taint: CredentialTaint::None,
             store_limits: invocation.store_limits,
             wasi_ctx: wasi.build(),
             wasi_resources: ResourceTable::new(),
@@ -72,10 +75,24 @@ impl HostState {
     }
 
     pub(crate) fn output(&self) -> HostOutput {
+        let suppress_guest_material = self.credential_taint.is_tainted();
         HostOutput {
-            output: self.output.as_ref().map(|value| value.to_vec()),
-            stdout: String::from_utf8_lossy(&self.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&self.stderr).into_owned(),
+            output: if suppress_guest_material {
+                None
+            } else {
+                self.output.as_ref().map(|value| value.to_vec())
+            },
+            stdout: if suppress_guest_material {
+                String::new()
+            } else {
+                String::from_utf8_lossy(&self.stdout).into_owned()
+            },
+            stderr: if suppress_guest_material {
+                String::new()
+            } else {
+                String::from_utf8_lossy(&self.stderr).into_owned()
+            },
+            credential_taint: self.credential_taint,
             stdout_truncated: self.stdout_truncated,
             stderr_truncated: self.stderr_truncated,
         }
@@ -174,6 +191,9 @@ impl Host for HostState {
     }
 
     fn set_output(&mut self, value: Vec<u8>) -> Result<(), String> {
+        if self.credential_taint.is_tainted() {
+            return Err("component output is disabled after credential release".to_owned());
+        }
         let value = Zeroizing::new(value);
         if value.len() > self.limits.max_output_bytes {
             return Err("component output exceeds the configured byte limit".to_owned());
@@ -324,6 +344,7 @@ impl Host for HostState {
         }
         let value = response.as_bytes().to_vec();
         self.register_sensitive_log_value(&value);
+        self.credential_taint = CredentialTaint::CredentialReleased;
         Ok(value)
     }
 
@@ -356,6 +377,7 @@ impl Host for HostState {
         }
         let value = response.as_bytes().to_vec();
         self.register_sensitive_log_value(&value);
+        self.credential_taint = CredentialTaint::CredentialReleased;
         Ok(value)
     }
 }

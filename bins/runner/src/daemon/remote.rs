@@ -5,7 +5,7 @@ use super::{
     },
 };
 use crate::{
-    broker::{RunnerBrokerClient, ScmCredentialObserver, ScmRuntimeFiles},
+    broker::{RunnerBrokerClient, ScmCredentialObserver, ScmCredentialTaint, ScmRuntimeFiles},
     firecracker::FirecrackerJobExecutor,
     oci::OciJobExecutor,
     wasm::WasmJobExecutor,
@@ -117,15 +117,18 @@ impl JobExecutor for RemoteJobExecutor {
                 reject_non_scm_broker_capabilities(offered_job(lease)?, "OCI")?;
                 let runtime = ScmRuntimeFiles::prepare(lease, workspace)
                     .map_err(RunnerError::OciConfiguration)?;
-                let observer = match (services.broker, services.step_state_observer) {
-                    (Some(client), Some(lifecycle)) => Some(
-                        ScmCredentialObserver::wrap(lease, workspace, client, lifecycle)
-                            .map_err(RunnerError::OciConfiguration)?,
-                    ),
-                    (None, observer) => observer,
-                    (Some(_), None) => None,
-                };
-                let result = self
+                let (observer, credential_taint) =
+                    match (services.broker, services.step_state_observer) {
+                        (Some(client), Some(lifecycle)) => {
+                            let (observer, taint) =
+                                ScmCredentialObserver::wrap(lease, workspace, client, lifecycle)
+                                    .map_err(RunnerError::OciConfiguration)?;
+                            (Some(observer), taint)
+                        }
+                        (None, observer) => (observer, ScmCredentialTaint::default()),
+                        (Some(_), None) => (None, ScmCredentialTaint::default()),
+                    };
+                let mut result = self
                     .oci
                     .as_ref()
                     .ok_or_else(|| RunnerError::UnsupportedIsolation("Oci".to_owned()))?
@@ -136,6 +139,7 @@ impl JobExecutor for RemoteJobExecutor {
                         observer,
                         runtime.as_ref().and_then(ScmRuntimeFiles::proxy_socket),
                     )?;
+                result.apply_credential_taint(credential_taint.credential_taint());
                 execution_from_engine(lease, result)
             }
             Isolation::Wasm => {

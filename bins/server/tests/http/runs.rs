@@ -1,4 +1,131 @@
 use super::support::*;
+
+#[tokio::test]
+async fn replay_bundle_publication_rejects_explicit_tainted_completion() {
+    let (control, application) = application(None);
+    control
+        .create_repository(&tenant_repository(
+            "repo-replay-taint",
+            "tenant-1",
+            "replay-taint",
+        ))
+        .unwrap();
+    store_tenant_capsule(&control, "repo-replay-taint", "capsule-replay-taint");
+    for suffix in ["clean", "tainted"] {
+        store_tenant_run(
+            &control,
+            "repo-replay-taint",
+            "capsule-replay-taint",
+            &format!("run-{suffix}"),
+            &format!("job-{suffix}"),
+        );
+    }
+    control
+        .create_runner_pool(&RunnerPoolRecord {
+            id: "pool-replay-taint".to_owned(),
+            tenant_id: "tenant-1".to_owned(),
+            name: "replay-taint".to_owned(),
+            region: None,
+            status: RunnerPoolStatus::Active,
+            created_unix_ms: 1,
+        })
+        .unwrap();
+    control
+        .register_runner_with_inventory(
+            &RunnerRecord {
+                id: "runner-replay-taint".to_owned(),
+                tenant_id: "tenant-1".to_owned(),
+                pool_id: "pool-replay-taint".to_owned(),
+                ephemeral: false,
+                retired: false,
+                os: OperatingSystem::Linux,
+                arch: Architecture::Amd64,
+                isolation_backends: BTreeSet::from([Isolation::Microvm]),
+                logical_cpus: 2,
+                memory_bytes: 4_096,
+                storage_bytes: 8_192,
+                region: None,
+                verified_capabilities: BTreeSet::from(["kvm".to_owned()]),
+                self_reported_capabilities: BTreeSet::new(),
+                status: RunnerStatus::Online,
+                active_jobs: 0,
+                used_cpus: 0,
+                used_memory_bytes: 0,
+                used_storage_bytes: 0,
+                locality: BTreeSet::new(),
+                last_heartbeat_unix_ms: 1,
+            },
+            &ContentDigest::sha256(b"replay-taint-runner-inventory"),
+            1,
+        )
+        .unwrap();
+
+    for ordinal in 0_u64..2 {
+        let offered = control
+            .offer_next_lease_for_runner("runner-replay-taint", 2 + ordinal * 10)
+            .unwrap()
+            .unwrap();
+        let lease = control
+            .accept_lease(
+                &offered.id,
+                "runner-replay-taint",
+                offered.fencing_generation,
+                offered.installation_fencing_epoch,
+                3 + ordinal * 10,
+            )
+            .unwrap();
+        control
+            .transition_job_state(&lease.job_id, JobState::Running, 4 + ordinal * 10)
+            .unwrap();
+        control
+            .transition_job_state(&lease.job_id, JobState::Finalizing, 5 + ordinal * 10)
+            .unwrap();
+        let taint = if lease.job_id == "job-tainted" {
+            runtrue_control_plane::CredentialTaintState::CredentialReleased
+        } else {
+            runtrue_control_plane::CredentialTaintState::None
+        };
+        control
+            .complete_lease_with_objects(
+                &lease.id,
+                "runner-replay-taint",
+                lease.fencing_generation,
+                lease.installation_fencing_epoch,
+                &ContentDigest::sha256(lease.job_id.as_bytes()),
+                JobState::Succeeded,
+                taint,
+                1,
+                &[],
+                &[],
+                &[],
+                6 + ordinal * 10,
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        control.run_credential_taint("run-clean").unwrap(),
+        runtrue_control_plane::CredentialTaintState::None
+    );
+
+    let tainted = application
+        .oneshot(idempotent_request(
+            "POST",
+            "/api/v1/runs/run-tainted/replay-bundle",
+            "tainted-replay",
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tainted.status(), StatusCode::CONFLICT);
+    let problem = json_body(tainted).await;
+    assert_eq!(problem["title"], "Replay Bundle publication blocked");
+    assert!(problem["detail"]
+        .as_str()
+        .unwrap()
+        .contains("released credential material"));
+}
+
 #[tokio::test]
 async fn duplicate_idempotency_returns_the_original_run_and_conflicts_on_change() {
     let (control_plane, application) = application_with_capsule();
@@ -471,9 +598,9 @@ jobs:
         ))
         .await
         .unwrap();
-    assert_eq!(replay.status(), StatusCode::CREATED);
+    assert_eq!(replay.status(), StatusCode::CONFLICT);
     let replay = json_body(replay).await;
-    assert_eq!(replay["run_id"], run_id);
+    assert_eq!(replay["title"], "Replay Bundle publication blocked");
     let downloaded = application
         .clone()
         .oneshot(api_request(
@@ -483,11 +610,7 @@ jobs:
         ))
         .await
         .unwrap();
-    assert_eq!(downloaded.status(), StatusCode::OK);
-    assert_eq!(
-        downloaded.headers()[CONTENT_TYPE],
-        "application/vnd.runtrue.replay+json"
-    );
+    assert_eq!(downloaded.status(), StatusCode::NOT_FOUND);
 
     let secret_value = "never-return-this-plaintext";
     let secret = application

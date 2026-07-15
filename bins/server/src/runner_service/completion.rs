@@ -6,7 +6,9 @@ use super::{
     RunnerControlService, MAX_LIST_ITEMS,
 };
 use runtrue_artifacts::ArtifactClassification;
-use runtrue_control_plane::{ArtifactCatalogRecord, ControlPlane, ControlPlaneError};
+use runtrue_control_plane::{
+    ArtifactCatalogRecord, ControlPlane, ControlPlaneError, CredentialTaintState,
+};
 use runtrue_lifecycle::JobState;
 use runtrue_model::ContentDigest;
 use runtrue_protocol::{v1, v2};
@@ -15,6 +17,13 @@ use runtrue_storage::PathSnapshot;
 use runtrue_workflow_ir::ExecutionCapsule;
 use std::{collections::BTreeSet, sync::Arc};
 use tonic::Status;
+
+type AdaptedV2Completion = (
+    v1::CompleteLeaseRequest,
+    Vec<(String, String)>,
+    CredentialTaintState,
+);
+
 impl RunnerControlService {
     pub(super) async fn fetch_authenticated(
         &self,
@@ -63,6 +72,7 @@ impl RunnerControlService {
         &self,
         authenticated: &AuthenticatedIdentity,
         request: v1::CompleteLeaseRequest,
+        credential_taint: CredentialTaintState,
     ) -> Result<v1::CompleteLeaseResponse, Status> {
         validate_identifier_status("lease id", &request.lease_id)?;
         validate_bounded_text("completion final state", &request.final_state, false)?;
@@ -168,6 +178,7 @@ impl RunnerControlService {
                 lease.installation_fencing_epoch,
                 &result_digest,
                 final_state,
+                credential_taint,
                 request.final_job_attempt,
                 &request.artifact_ids,
                 &request.cache_entry_ids,
@@ -268,7 +279,7 @@ impl RunnerControlService {
     pub(super) fn adapt_v2_completion(
         &self,
         request: v2::CompleteLeaseRequest,
-    ) -> Result<(v1::CompleteLeaseRequest, Vec<(String, String)>), Status> {
+    ) -> Result<AdaptedV2Completion, Status> {
         if request.committed_objects.len() > MAX_LIST_ITEMS {
             return Err(Status::resource_exhausted(
                 "committed object list exceeds its bound",
@@ -289,6 +300,15 @@ impl RunnerControlService {
         };
         let result_digest =
             parse_v2_digest(&request.result_digest_algorithm, &request.result_digest)?;
+        let credential_taint = match v2::CredentialTaintState::try_from(request.credential_taint)
+            .map_err(|_| Status::invalid_argument("credential taint state is invalid"))?
+        {
+            v2::CredentialTaintState::Unspecified => CredentialTaintState::Unknown,
+            v2::CredentialTaintState::None => CredentialTaintState::None,
+            v2::CredentialTaintState::CredentialReleased => {
+                CredentialTaintState::CredentialReleased
+            }
+        };
         let mut seen = BTreeSet::new();
         let mut artifact_ids = Vec::new();
         let mut artifact_claims = Vec::new();
@@ -343,6 +363,7 @@ impl RunnerControlService {
                 expected_log_frames: request.expected_log_frames,
             },
             artifact_claims,
+            credential_taint,
         ))
     }
 }

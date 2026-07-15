@@ -22,6 +22,8 @@ pub enum ReplayError {
         expected: ContentDigest,
         actual: ContentDigest,
     },
+    #[error("credential-tainted execution cannot be published as a replay bundle")]
+    CredentialTainted,
     #[error(transparent)]
     Capsule(#[from] runtrue_workflow_ir::CapsuleError),
     #[error("invalid replay JSON: {0}")]

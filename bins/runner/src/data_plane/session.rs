@@ -3,7 +3,7 @@ use crate::{
     daemon::RunnerError,
     state::{PersistedCommittedObject, PersistedCommittedObjectKind},
 };
-use runtrue_engine::{StepState, StepStateObservation, StepStateObserver};
+use runtrue_engine::{CredentialTaint, StepState, StepStateObservation, StepStateObserver};
 use runtrue_runner_core::AdmittedLease;
 use runtrue_workflow_ir::PlannedStep;
 use std::{
@@ -15,6 +15,21 @@ use std::{
     },
 };
 
+#[derive(Clone, Default)]
+pub(super) struct CredentialTaintState(Arc<AtomicBool>);
+
+impl CredentialTaintState {
+    pub(super) fn observe(&self, taint: CredentialTaint) {
+        if taint.is_tainted() {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    pub(super) fn permits_publication(&self) -> bool {
+        !self.0.load(Ordering::Acquire)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RemoteDataPlaneSession {
     pub(super) lease: AdmittedLease,
@@ -24,6 +39,7 @@ pub(crate) struct RemoteDataPlaneSession {
     pub(super) cache_breaker_open: Arc<AtomicBool>,
     pub(super) cache_bypassed_operations: Arc<AtomicU64>,
     pub(super) cache_miss_reason: Arc<Mutex<Option<&'static str>>>,
+    pub(super) credential_taint: CredentialTaintState,
 }
 
 struct RemoteDataObserver {
@@ -33,6 +49,11 @@ struct RemoteDataObserver {
 
 impl StepStateObserver for RemoteDataObserver {
     fn observe(&self, observation: &StepStateObservation) -> Result<(), String> {
+        // Record taint before handling a terminal transition so the cache for
+        // the credential-releasing step cannot be committed.
+        self.data
+            .credential_taint
+            .observe(observation.credential_taint);
         if observation.to == StepState::Running {
             self.lifecycle.observe(observation)?;
             // Caches are an optimization: an unavailable, corrupt, stale, or
@@ -79,6 +100,7 @@ impl RemoteDataPlaneSession {
             cache_breaker_open: Arc::new(AtomicBool::new(false)),
             cache_bypassed_operations: Arc::new(AtomicU64::new(0)),
             cache_miss_reason: Arc::new(Mutex::new(None)),
+            credential_taint: CredentialTaintState::default(),
         }
     }
 

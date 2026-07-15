@@ -588,6 +588,7 @@ where
                             expected_log_frames: 0,
                         },
                         Vec::new(),
+                        runtrue_engine::CredentialTaint::None,
                     )?;
                     self.state.clear_active()?;
                     self.workspaces.cleanup(&workspace)?;
@@ -711,8 +712,11 @@ where
             expected_log_frames: u32::try_from(outcome.log_frames.len())
                 .map_err(|_| RunnerError::LogSequenceOverflow)?,
         };
-        self.state
-            .set_pending_completion_with_objects(&completion, completed.committed_objects)?;
+        self.state.set_pending_completion_with_objects(
+            &completion,
+            completed.committed_objects,
+            outcome.credential_taint,
+        )?;
         self.workspaces.cleanup(&execution.workspace)?;
 
         for batch in outcome.log_frames.chunks(LOG_BATCH_FRAMES) {

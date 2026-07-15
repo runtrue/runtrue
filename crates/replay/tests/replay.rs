@@ -56,6 +56,7 @@ fn result_with_sensitive_output() -> ExecutionResult {
             stdout: "super-secret-value".to_owned(),
             stderr: "private-error-detail".to_owned(),
             structured_output: None,
+            credential_taint: runtrue_engine::CredentialTaint::None,
             stdout_truncated: false,
             stderr_truncated: false,
             timed_out: false,
@@ -76,6 +77,7 @@ fn result_with_sensitive_output() -> ExecutionResult {
                 attempts: vec![JobAttemptResult {
                     number: 1,
                     primary_state: JobState::Succeeded,
+                    credential_taint: runtrue_engine::CredentialTaint::None,
                     steps: vec![step],
                     finalizers: Vec::new(),
                 }],
@@ -83,6 +85,7 @@ fn result_with_sensitive_output() -> ExecutionResult {
             },
         )]),
         events: Vec::<EngineEvent>::new(),
+        credential_taint: runtrue_engine::CredentialTaint::None,
     }
 }
 
@@ -135,6 +138,20 @@ fn execution_output_and_errors_never_enter_bundle() {
     ] {
         assert!(!encoded.contains(forbidden), "leaked `{forbidden}`");
     }
+}
+
+#[test]
+fn credential_tainted_execution_cannot_be_published_as_replay() {
+    let mut result = result_with_sensitive_output();
+    let attempt = &mut result.jobs.get_mut("job").unwrap().attempts[0];
+    attempt.credential_taint = runtrue_engine::CredentialTaint::CredentialReleased;
+    attempt.steps[0].output.as_mut().unwrap().credential_taint =
+        runtrue_engine::CredentialTaint::CredentialReleased;
+
+    assert!(matches!(
+        ReplayBundle::new(capsule(), ContentDigest::sha256(b"approval"), Some(&result)),
+        Err(ReplayError::CredentialTainted)
+    ));
 }
 
 #[test]

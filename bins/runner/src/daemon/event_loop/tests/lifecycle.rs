@@ -8,6 +8,7 @@ fn lifecycle_bridge_publishes_running_and_matching_terminal_states_only() {
         job_attempt: 1,
         from: Some(runtrue_engine::StepState::Created),
         to: runtrue_engine::StepState::Running,
+        credential_taint: runtrue_engine::CredentialTaint::None,
     };
     assert!(publish_step_observation(&running));
     assert!(publish_step_observation(&StepStateObservation {

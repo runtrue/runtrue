@@ -68,6 +68,7 @@ pub(super) fn failed_execution_outcome(job_attempt: u32) -> JobExecution {
         final_job_attempt: job_attempt,
         artifact_ids: Vec::new(),
         cache_entry_ids: Vec::new(),
+        credential_taint: runtrue_engine::CredentialTaint::None,
     }
 }
 

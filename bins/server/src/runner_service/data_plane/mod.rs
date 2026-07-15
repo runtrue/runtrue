@@ -776,7 +776,8 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
         let authenticated = self.authenticate(&request)?;
         let session = self.authenticated_session(&authenticated)?;
         require_session_protocol(&session, 2)?;
-        let (request, artifact_claims) = self.adapt_v2_completion(request.into_inner())?;
+        let (request, artifact_claims, credential_taint) =
+            self.adapt_v2_completion(request.into_inner())?;
         let lease = self.bound_lease(
             &authenticated.runner_id,
             &request.lease_id,
@@ -801,7 +802,9 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
                 &artifact_claims,
             )
             .map_err(control_plane_status)?;
-        let response = self.complete_authenticated(&authenticated, request).await?;
+        let response = self
+            .complete_authenticated(&authenticated, request, credential_taint)
+            .await?;
         let resulting_job_state = match response.resulting_job_state.as_str() {
             "succeeded" => v2::LeaseFinalState::Succeeded,
             "failed" => v2::LeaseFinalState::Failed,

@@ -973,6 +973,7 @@ fn r10_external_secret_authority_is_exact_tenant_safe_and_restart_durable() {
                 producer_lease.installation_fencing_epoch,
                 &ContentDigest::sha256(b"producer-completion"),
                 JobState::Succeeded,
+                CredentialTaintState::None,
                 1,
                 &["artifact-external".to_owned()],
                 &[],

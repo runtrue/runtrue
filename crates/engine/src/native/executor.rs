@@ -334,6 +334,7 @@ impl Executor for NativeProcessExecutor {
             stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
             stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
             structured_output: None,
+            credential_taint: crate::CredentialTaint::None,
             stdout_truncated: stdout.truncated,
             stderr_truncated: stderr.truncated,
             timed_out,

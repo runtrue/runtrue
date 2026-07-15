@@ -89,10 +89,12 @@ impl RunnerStateStore {
         &mut self,
         completion: &v1::CompleteLeaseRequest,
         committed_objects: Vec<PersistedCommittedObject>,
+        credential_taint: runtrue_engine::CredentialTaint,
     ) -> Result<(), StateError> {
         let mut persisted = PersistedCompletion::from_wire(completion)?;
         persisted.validate_committed_objects(&committed_objects)?;
         persisted.committed_objects = Some(committed_objects);
+        persisted.credential_taint = Some(credential_taint);
         self.state.pending_completion = Some(persisted);
         self.persist()
     }

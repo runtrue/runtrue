@@ -71,6 +71,292 @@ fn lease_boundaries_requeue_offers_and_hard_deadlines_timeout() {
 }
 
 #[test]
+fn expired_lease_evidence_blocks_replay_after_a_clean_completion() {
+    let control = ControlPlane::open_in_memory("lease-taint-aggregate", NOW).unwrap();
+    bootstrap(&control);
+    add_runner(&control);
+    control
+        .create_run_idempotent(
+            "run-taint-aggregate-key",
+            &run_request("run-taint-aggregate", "job-taint-aggregate"),
+        )
+        .unwrap();
+
+    let expired = control
+        .offer_next_lease_for_runner("runner-1", NOW + 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        control.run_credential_taint("run-taint-aggregate").unwrap(),
+        CredentialTaintState::Unknown
+    );
+    assert!(matches!(
+        control.accept_lease(
+            &expired.id,
+            "runner-1",
+            expired.fencing_generation,
+            expired.installation_fencing_epoch,
+            expired.accept_by_unix_ms,
+        ),
+        Err(ControlPlaneError::LeaseOfferExpired)
+    ));
+
+    let offered = control
+        .offer_next_lease_for_runner("runner-1", expired.accept_by_unix_ms + 1)
+        .unwrap()
+        .unwrap();
+    let active = control
+        .accept_lease(
+            &offered.id,
+            "runner-1",
+            offered.fencing_generation,
+            offered.installation_fencing_epoch,
+            offered.issued_unix_ms + 1,
+        )
+        .unwrap();
+    control
+        .transition_job_state(
+            "job-taint-aggregate",
+            JobState::Running,
+            active.issued_unix_ms + 2,
+        )
+        .unwrap();
+    control
+        .transition_job_state(
+            "job-taint-aggregate",
+            JobState::Finalizing,
+            active.issued_unix_ms + 3,
+        )
+        .unwrap();
+    control
+        .complete_lease_with_objects(
+            &active.id,
+            "runner-1",
+            active.fencing_generation,
+            active.installation_fencing_epoch,
+            &ContentDigest::sha256(b"clean retry"),
+            JobState::Succeeded,
+            CredentialTaintState::None,
+            1,
+            &[],
+            &[],
+            &[],
+            active.issued_unix_ms + 4,
+        )
+        .unwrap();
+
+    assert_eq!(
+        control.run_credential_taint("run-taint-aggregate").unwrap(),
+        CredentialTaintState::Unknown
+    );
+}
+
+#[test]
+fn runner_logs_are_visible_only_after_an_explicit_clean_completion() {
+    let control = ControlPlane::open_in_memory("lease-log-taint", NOW).unwrap();
+    bootstrap(&control);
+    add_runner(&control);
+
+    for (suffix, taint, at) in [
+        ("clean", CredentialTaintState::None, NOW + 1),
+        (
+            "tainted",
+            CredentialTaintState::CredentialReleased,
+            NOW + 100,
+        ),
+    ] {
+        let run_id = format!("run-log-{suffix}");
+        let job_id = format!("job-log-{suffix}");
+        control
+            .create_run_idempotent(&format!("{run_id}-key"), &run_request(&run_id, &job_id))
+            .unwrap();
+        let offered = control
+            .offer_next_lease_for_runner("runner-1", at)
+            .unwrap()
+            .unwrap();
+        let lease = control
+            .accept_lease(
+                &offered.id,
+                "runner-1",
+                offered.fencing_generation,
+                offered.installation_fencing_epoch,
+                at + 1,
+            )
+            .unwrap();
+        control
+            .transition_job_state(&job_id, JobState::Running, at + 2)
+            .unwrap();
+        let frame = RunnerLogFrameRecord {
+            execution_lease_id: lease.id.clone(),
+            fencing_generation: lease.fencing_generation,
+            job_attempt: 1,
+            step_id: "build".to_owned(),
+            stream: "stdout".to_owned(),
+            sequence: 0,
+            monotonic_nanoseconds: 1,
+            wall_time_unix_ms: at + 3,
+            payload: format!("{suffix} output").into_bytes(),
+            redaction_state: "redacted".to_owned(),
+        };
+        control
+            .append_runner_logs(
+                &AppendRunnerLogsRequest {
+                    execution_lease_id: lease.id.clone(),
+                    fencing_generation: lease.fencing_generation,
+                    runner_id: "runner-1".to_owned(),
+                    frames: vec![frame.clone()],
+                },
+                at + 3,
+            )
+            .unwrap();
+        assert!(control.runner_logs_for_run(&run_id, 10).unwrap().is_empty());
+        control
+            .transition_job_state(&job_id, JobState::Finalizing, at + 4)
+            .unwrap();
+        control
+            .complete_lease_with_objects(
+                &lease.id,
+                "runner-1",
+                lease.fencing_generation,
+                lease.installation_fencing_epoch,
+                &ContentDigest::sha256(suffix.as_bytes()),
+                JobState::Succeeded,
+                taint,
+                1,
+                &[],
+                &[],
+                &[],
+                at + 5,
+            )
+            .unwrap();
+
+        if taint == CredentialTaintState::None {
+            assert_eq!(control.runner_logs_for_run(&run_id, 10).unwrap(), [frame]);
+        } else {
+            assert!(control.runner_logs_for_run(&run_id, 10).unwrap().is_empty());
+            assert_eq!(
+                control.runner_log_frame_count_for_lease(&lease.id).unwrap(),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn observed_taint_survives_rejected_completion_and_cannot_be_downgraded() {
+    let control = ControlPlane::open_in_memory("lease-taint-monotonic", NOW).unwrap();
+    bootstrap(&control);
+    add_runner(&control);
+
+    for (suffix, taint, at) in [
+        (
+            "released",
+            CredentialTaintState::CredentialReleased,
+            NOW + 1,
+        ),
+        ("unknown", CredentialTaintState::Unknown, NOW + 100),
+    ] {
+        let run_id = format!("run-monotonic-{suffix}");
+        let job_id = format!("job-monotonic-{suffix}");
+        control
+            .create_run_idempotent(&format!("{run_id}-key"), &run_request(&run_id, &job_id))
+            .unwrap();
+        let offered = control
+            .offer_next_lease_for_runner("runner-1", at)
+            .unwrap()
+            .unwrap();
+        let lease = control
+            .accept_lease(
+                &offered.id,
+                "runner-1",
+                offered.fencing_generation,
+                offered.installation_fencing_epoch,
+                at + 1,
+            )
+            .unwrap();
+        control
+            .transition_job_state(&job_id, JobState::Running, at + 2)
+            .unwrap();
+        control
+            .transition_job_state(&job_id, JobState::Finalizing, at + 3)
+            .unwrap();
+
+        assert!(matches!(
+            control.complete_lease_with_objects(
+                &lease.id,
+                "runner-1",
+                lease.fencing_generation,
+                lease.installation_fencing_epoch,
+                &ContentDigest::sha256(b"rejected tainted completion"),
+                JobState::Succeeded,
+                taint,
+                2,
+                &[],
+                &[],
+                &[],
+                at + 4,
+            ),
+            Err(ControlPlaneError::RunnerBrokerBindingMismatch)
+        ));
+        assert_eq!(control.run_credential_taint(&run_id).unwrap(), taint);
+
+        assert!(matches!(
+            control.complete_lease_with_objects(
+                &lease.id,
+                "runner-1",
+                lease.fencing_generation,
+                lease.installation_fencing_epoch,
+                &ContentDigest::sha256(b"tainted object claim"),
+                JobState::Succeeded,
+                taint,
+                1,
+                &["forbidden-artifact".to_owned()],
+                &[],
+                &[],
+                at + 5,
+            ),
+            Err(ControlPlaneError::RunnerBrokerBindingMismatch)
+        ));
+
+        assert!(matches!(
+            control.complete_lease_with_objects(
+                &lease.id,
+                "runner-1",
+                lease.fencing_generation,
+                lease.installation_fencing_epoch,
+                &ContentDigest::sha256(b"dishonest clean retry"),
+                JobState::Succeeded,
+                CredentialTaintState::None,
+                1,
+                &[],
+                &[],
+                &[],
+                at + 6,
+            ),
+            Err(ControlPlaneError::RunnerBrokerBindingMismatch)
+        ));
+        assert_eq!(control.run_credential_taint(&run_id).unwrap(), taint);
+
+        control
+            .complete_lease_with_objects(
+                &lease.id,
+                "runner-1",
+                lease.fencing_generation,
+                lease.installation_fencing_epoch,
+                &ContentDigest::sha256(b"same-taint completion"),
+                JobState::Succeeded,
+                taint,
+                1,
+                &[],
+                &[],
+                &[],
+                at + 7,
+            )
+            .unwrap();
+    }
+}
+
+#[test]
 fn lease_generation_and_installation_epoch_fence_completion() {
     let control = ControlPlane::open_in_memory("installation", NOW).unwrap();
     bootstrap(&control);

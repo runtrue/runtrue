@@ -1,4 +1,8 @@
 use super::*;
+use runtrue_engine::{
+    CredentialTaint, EngineEvent, ExecutionResult, ExecutorOutput, JobAttemptResult, JobResult,
+    JobState, RunState, StepResult, StepState,
+};
 
 #[test]
 fn remote_executor_never_falls_back_to_trusted_native() {
@@ -165,4 +169,78 @@ fn native_backend_rejects_network_allow_before_workspace_creation() {
         executor.preflight(&lease),
         Err(RunnerError::NetworkEnforcementUnavailable(backend)) if backend == "native"
     ));
+}
+
+#[test]
+fn credential_tainted_logs_are_not_published_and_untainted_logs_make_no_redaction_claim() {
+    let execution_capsule = capsule();
+    let capsule_signature = CapsuleSigningKey::from_seed([97; 32])
+        .sign_capsule(&execution_capsule)
+        .unwrap();
+    let lease = AdmittedLease {
+        lease_id: "lease-log-taint".to_owned(),
+        job_id: "build".to_owned(),
+        fencing_generation: 1,
+        installation_fencing_epoch: 1,
+        issued_unix_ms: 1,
+        accept_by_unix_ms: u64::MAX - 1,
+        expires_unix_ms: u64::MAX,
+        hard_deadline_unix_ms: u64::MAX,
+        capsule_digest: execution_capsule.digest().unwrap(),
+        signing_key_id: capsule_signature.key_id.clone(),
+        capsule_signature,
+        capsule: execution_capsule,
+    };
+    let step = |id: &str, stdout: &str, taint| StepResult {
+        id: id.to_owned(),
+        state: StepState::Succeeded,
+        continued_on_error: false,
+        skip_reason: None,
+        output: Some(ExecutorOutput {
+            stdout: stdout.to_owned(),
+            credential_taint: taint,
+            ..ExecutorOutput::success()
+        }),
+        error: None,
+        outputs: BTreeMap::new(),
+    };
+    let mut result = ExecutionResult {
+        state: RunState::Succeeded,
+        jobs: BTreeMap::from([(
+            "build".to_owned(),
+            JobResult {
+                id: "build".to_owned(),
+                state: JobState::Succeeded,
+                skip_reason: None,
+                attempts: vec![JobAttemptResult {
+                    number: 1,
+                    primary_state: JobState::Succeeded,
+                    credential_taint: CredentialTaint::None,
+                    steps: vec![step("clean", "ordinary output", CredentialTaint::None)],
+                    finalizers: Vec::new(),
+                }],
+                outputs: BTreeMap::new(),
+            },
+        )]),
+        events: Vec::<EngineEvent>::new(),
+        credential_taint: CredentialTaint::None,
+    };
+
+    let frames = crate::daemon::executor::bounded_log_frames(&lease, &result).unwrap();
+    assert_eq!(frames.len(), 1);
+    assert!(frames.iter().all(|frame| frame.step_id == "clean"));
+    assert!(frames
+        .iter()
+        .all(|frame| frame.redaction_state == "credential_taint_absent"));
+
+    let attempt = &mut result.jobs.get_mut("build").unwrap().attempts[0];
+    attempt.credential_taint = CredentialTaint::CredentialReleased;
+    attempt.steps.push(step(
+        "tainted",
+        "dmFsdWU= val|ue",
+        CredentialTaint::CredentialReleased,
+    ));
+    assert!(crate::daemon::executor::bounded_log_frames(&lease, &result)
+        .unwrap()
+        .is_empty());
 }

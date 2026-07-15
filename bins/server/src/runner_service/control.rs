@@ -1286,9 +1286,13 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         request: Request<v1::CompleteLeaseRequest>,
     ) -> Result<Response<v1::CompleteLeaseResponse>, Status> {
         let authenticated = self.authenticate(&request)?;
-        self.complete_authenticated(&authenticated, request.into_inner())
-            .await
-            .map(Response::new)
+        self.complete_authenticated(
+            &authenticated,
+            request.into_inner(),
+            runtrue_control_plane::CredentialTaintState::Unknown,
+        )
+        .await
+        .map(Response::new)
     }
 }
 

@@ -91,6 +91,15 @@ enum LeaseFinalState {
   LEASE_FINAL_STATE_TIMED_OUT = 4;
 }
 
+// Conservative runner evidence about whether a credential crossed into the
+// guest/workspace during this execution. Unspecified is intentionally not
+// equivalent to none so legacy or incomplete evidence fails closed.
+enum CredentialTaintState {
+  CREDENTIAL_TAINT_STATE_UNSPECIFIED = 0;
+  CREDENTIAL_TAINT_STATE_NONE = 1;
+  CREDENTIAL_TAINT_STATE_CREDENTIAL_RELEASED = 2;
+}
+
 enum CommittedObjectKind {
   COMMITTED_OBJECT_KIND_UNSPECIFIED = 0;
   COMMITTED_OBJECT_KIND_CACHE = 1;
@@ -120,6 +129,7 @@ message CompleteLeaseRequest {
   // Number of log frames sent on Open before this completion. New runners use
   // this as a cross-RPC persistence barrier; legacy runners leave it zero.
   uint32 expected_log_frames = 12;
+  CredentialTaintState credential_taint = 13;
 }
 
 message CompleteLeaseResponse {

@@ -74,6 +74,7 @@ impl JobExecutor for FakeExecutor {
                 final_job_attempt: 0,
                 artifact_ids: Vec::new(),
                 cache_entry_ids: Vec::new(),
+                credential_taint: runtrue_engine::CredentialTaint::None,
             });
         }
         Ok(JobExecution {
@@ -85,6 +86,7 @@ impl JobExecutor for FakeExecutor {
             final_job_attempt: 0,
             artifact_ids: Vec::new(),
             cache_entry_ids: Vec::new(),
+            credential_taint: runtrue_engine::CredentialTaint::None,
         })
     }
 

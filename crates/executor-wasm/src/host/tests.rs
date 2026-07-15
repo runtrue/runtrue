@@ -160,10 +160,47 @@ fn secret_reads_require_the_exact_declared_handle() {
     assert_eq!(handles[0].id, 11);
     assert_eq!(handles[0].name, "TOKEN");
     assert_eq!(handles[0].purpose.as_deref(), Some("test"));
+    assert_eq!(
+        state.output().credential_taint,
+        runtrue_engine::CredentialTaint::CredentialReleased
+    );
 }
 
 #[test]
-fn oidc_mints_require_granted_handles_and_material_cannot_leave_in_output_or_logs() {
+fn declared_but_unused_credentials_do_not_taint_guest_output() {
+    let mut state = state(CapabilityAdapters::new().with_secrets(Arc::new(ExactSecret)));
+    state.secrets.insert(
+        11,
+        SecretReference {
+            metadata_id: "declared".to_owned(),
+            name: "TOKEN".to_owned(),
+            purpose: None,
+        },
+    );
+    state
+        .set_output(br#"{"status":"unused"}"#.to_vec())
+        .unwrap();
+    state
+        .log(
+            "stdout".to_owned(),
+            "credential was not requested".to_owned(),
+        )
+        .unwrap();
+
+    let output = state.output();
+    assert_eq!(
+        output.credential_taint,
+        runtrue_engine::CredentialTaint::None
+    );
+    assert_eq!(
+        output.output.as_deref(),
+        Some(br#"{"status":"unused"}"#.as_slice())
+    );
+    assert_eq!(output.stdout, "credential was not requested");
+}
+
+#[test]
+fn successful_credential_release_suppresses_transformed_and_split_guest_material() {
     let adapters = CapabilityAdapters::new()
         .with_secrets(Arc::new(ExactSecret))
         .with_oidc(Arc::new(ExactOidc));
@@ -184,20 +221,31 @@ fn oidc_mints_require_granted_handles_and_material_cannot_leave_in_output_or_log
         state.mint_oidc_token(99),
         Err("invalid OIDC audience handle".to_owned())
     );
+    // A component can prepare durable material before asking for the
+    // credential, then transform or split it afterward. Taint must suppress
+    // the complete guest-controlled channels, not only literal substrings.
+    state
+        .set_output(br#"{"encoded":"dmFsdWU="}"#.to_vec())
+        .unwrap();
     assert_eq!(state.read_secret(11), Ok(b"value".to_vec()));
     assert_eq!(state.mint_oidc_token(12), Ok(b"token-value".to_vec()));
     assert!(state
-        .set_output(br#"{"token":"token-value"}"#.to_vec())
+        .set_output(br#"{"split":["val","ue"]}"#.to_vec())
         .is_err());
     state
         .log(
             "stdout".to_owned(),
-            "secret=value identity=token-value".to_owned(),
+            "encoded=dmFsdWU= split=val|ue".to_owned(),
         )
         .unwrap();
     let output = state.output();
-    assert_eq!(output.stdout, "secret=[REDACTED] identity=[REDACTED]");
-    assert!(!output.stdout.contains("token-value"));
+    assert_eq!(
+        output.credential_taint,
+        runtrue_engine::CredentialTaint::CredentialReleased
+    );
+    assert!(output.output.is_none());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
     assert_eq!(state.oidc_handles()[0].audience, "https://registry.example");
     assert_eq!(
         format!("{:?}", OidcToken::new(b"hidden".to_vec())),
@@ -331,5 +379,9 @@ fn host_enforces_adapter_request_response_and_secret_budgets() {
     assert_eq!(
         state.read_secret(8),
         Err("secret exceeds the configured byte limit".to_owned())
+    );
+    assert_eq!(
+        state.output().credential_taint,
+        runtrue_engine::CredentialTaint::None
     );
 }

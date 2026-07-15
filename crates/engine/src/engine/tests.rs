@@ -432,6 +432,35 @@ fn canceled_and_timed_out_attempts_are_finalized_exactly_once() {
 }
 
 #[test]
+fn credential_taint_is_propagated_and_guest_publication_is_suppressed() {
+    let mut output = ExecutorOutput::success();
+    output.stdout = "dmFsdWU=".to_owned();
+    output.stderr = "val|ue".to_owned();
+    output.structured_output = Some(r#"{"derived":"dmFsdWU="}"#.to_owned());
+    output.credential_taint = crate::CredentialTaint::CredentialReleased;
+    let mut engine = Engine::new(ScriptedExecutor::with_outputs([output]));
+
+    let result = engine
+        .execute(&capsule(vec![job("job", vec![command_step("step")])]))
+        .unwrap();
+
+    assert_eq!(
+        result.credential_taint(),
+        crate::CredentialTaint::CredentialReleased
+    );
+    let attempt = &result.jobs["job"].attempts[0];
+    assert_eq!(
+        attempt.credential_taint,
+        crate::CredentialTaint::CredentialReleased
+    );
+    let output = attempt.steps[0].output.as_ref().unwrap();
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert!(output.structured_output.is_none());
+    assert!(attempt.steps[0].outputs.is_empty());
+}
+
+#[test]
 fn finalization_failure_is_fatal_and_prevents_retry_or_success() {
     let mut executor =
         ScriptedExecutor::with_outputs([ExecutorOutput::success(), ExecutorOutput::success()]);

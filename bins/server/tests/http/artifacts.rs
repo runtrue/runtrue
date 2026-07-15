@@ -103,6 +103,7 @@ async fn artifact_metadata_and_download_tickets_are_tenant_scoped() {
             lease.installation_fencing_epoch,
             &ContentDigest::sha256(b"artifact-failed-result"),
             JobState::Failed,
+            runtrue_control_plane::CredentialTaintState::None,
             1,
             &["artifact-catalog-1".to_owned()],
             &[],

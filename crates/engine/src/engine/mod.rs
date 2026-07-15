@@ -285,6 +285,7 @@ impl<E: Executor> Engine<E> {
             state: final_state,
             jobs: results,
             events: recorder.events,
+            credential_taint: crate::CredentialTaint::None,
         })
     }
 }

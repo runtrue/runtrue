@@ -72,6 +72,7 @@ fn generation_two_object_frames_and_typed_completion_round_trip_without_redefini
         }),
         final_job_attempt: 2,
         expected_log_frames: 4,
+        credential_taint: v2::CredentialTaintState::CredentialReleased as i32,
     });
     assert_message_round_trip(v2::CompleteLeaseResponse {
         accepted: true,
@@ -131,6 +132,7 @@ fn generation_two_typed_completion_fields_are_stable() {
             ("completed_at", 10, false),
             ("final_job_attempt", 11, false),
             ("expected_log_frames", 12, false),
+            ("credential_taint", 13, false),
         ]
     );
 }

@@ -3,7 +3,7 @@ use super::{
     RunnerBrokerClient,
 };
 use rand_core::{OsRng, RngCore as _};
-use runtrue_engine::{StepState, StepStateObservation, StepStateObserver};
+use runtrue_engine::{CredentialTaint, StepState, StepStateObservation, StepStateObserver};
 use runtrue_protocol::v1;
 use runtrue_runner_core::AdmittedLease;
 use runtrue_workflow_ir::{NetworkPermission, NetworkProtocol};
@@ -356,6 +356,20 @@ pub(crate) struct ScmCredentialObserver {
     lifecycle: Arc<dyn StepStateObserver>,
     grants: BTreeMap<String, Vec<Grant>>,
     leases: Mutex<ScmCredentialLeases>,
+    credential_tainted: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ScmCredentialTaint(Arc<AtomicBool>);
+
+impl ScmCredentialTaint {
+    pub(crate) fn credential_taint(&self) -> CredentialTaint {
+        if self.0.load(Ordering::Acquire) {
+            CredentialTaint::CredentialReleased
+        } else {
+            CredentialTaint::None
+        }
+    }
 }
 
 type ScmCredentialLeases = BTreeMap<(u32, String), Vec<(PathBuf, String)>>;
@@ -381,7 +395,8 @@ impl ScmCredentialObserver {
         workspace: &Path,
         client: Arc<dyn RunnerBrokerClient>,
         lifecycle: Arc<dyn StepStateObserver>,
-    ) -> Result<Arc<dyn StepStateObserver>, String> {
+    ) -> Result<(Arc<dyn StepStateObserver>, ScmCredentialTaint), String> {
+        let credential_taint = ScmCredentialTaint::default();
         let job = lease
             .capsule
             .jobs
@@ -413,7 +428,7 @@ impl ScmCredentialObserver {
             }
         }
         if grants.is_empty() {
-            return Ok(lifecycle);
+            return Ok((lifecycle, credential_taint));
         }
         let has_scm_grant = grants
             .values()
@@ -423,7 +438,7 @@ impl ScmCredentialObserver {
         {
             return Err("SCM credential grant lacks signed SCM permissions or context".to_owned());
         }
-        Ok(Arc::new(Self {
+        let observer: Arc<dyn StepStateObserver> = Arc::new(Self {
             binding: Binding {
                 execution_lease_id: lease.lease_id.clone(),
                 fencing_generation: lease.fencing_generation,
@@ -436,7 +451,9 @@ impl ScmCredentialObserver {
             lifecycle,
             grants,
             leases: Mutex::new(BTreeMap::new()),
-        }))
+            credential_tainted: Arc::clone(&credential_taint.0),
+        });
+        Ok((observer, credential_taint))
     }
 
     fn release(&self, observation: &StepStateObservation, grant: &Grant) -> Result<(), String> {
@@ -505,6 +522,7 @@ impl ScmCredentialObserver {
                 .join(&grant.name)
         };
         write_private(&path, plaintext.as_slice())?;
+        self.credential_tainted.store(true, Ordering::Release);
         self.leases
             .lock()
             .map_err(|_| "credential lease state unavailable".to_owned())?
@@ -566,6 +584,7 @@ impl ScmCredentialObserver {
             .join("secrets")
             .join(&grant.name);
         write_private(&path, plaintext.as_slice())?;
+        self.credential_tainted.store(true, Ordering::Release);
         self.leases
             .lock()
             .map_err(|_| "credential lease state unavailable".to_owned())?
@@ -632,7 +651,11 @@ impl StepStateObserver for ScmCredentialObserver {
         };
         if observation.from == Some(StepState::Running) && observation.to.is_terminal() {
             let revoke = self.revoke(observation);
-            let terminal = self.lifecycle.observe(observation);
+            let mut terminal_observation = observation.clone();
+            if self.credential_tainted.load(Ordering::Acquire) {
+                terminal_observation.credential_taint = CredentialTaint::CredentialReleased;
+            }
+            let terminal = self.lifecycle.observe(&terminal_observation);
             revoke?;
             return terminal;
         }
@@ -647,6 +670,11 @@ impl StepStateObserver for ScmCredentialObserver {
                         job_attempt: observation.job_attempt,
                         from: Some(StepState::Running),
                         to: StepState::Failed,
+                        credential_taint: if self.credential_tainted.load(Ordering::Acquire) {
+                            CredentialTaint::CredentialReleased
+                        } else {
+                            observation.credential_taint
+                        },
                     };
                     self.lifecycle.observe(&failed)?;
                     return Err(error);
@@ -704,5 +732,20 @@ mod tests {
             }
         ));
         assert_eq!(attempts.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn scm_workspace_credential_taint_is_monotonic() {
+        let taint = ScmCredentialTaint::default();
+        assert_eq!(taint.credential_taint(), CredentialTaint::None);
+        taint.0.store(true, Ordering::Release);
+        assert_eq!(
+            taint.credential_taint(),
+            CredentialTaint::CredentialReleased
+        );
+        assert_eq!(
+            taint.credential_taint(),
+            CredentialTaint::CredentialReleased
+        );
     }
 }

@@ -108,6 +108,8 @@ impl ControlPlane {
              JOIN leases l ON l.id = f.execution_lease_id
              JOIN jobs j ON j.id = l.job_id
              WHERE j.run_id = ?1
+               AND l.state = 'completed'
+               AND l.terminal_credential_taint = 'none'
              ORDER BY f.wall_time_unix_ms, f.execution_lease_id, f.job_attempt,
                       f.step_id, f.stream, f.sequence
              LIMIT ?2",

@@ -730,6 +730,7 @@ fn classify_call(
 fn merge_host_output(output: &mut ExecutorOutput, host: HostOutput) {
     output.stdout = host.stdout;
     output.stderr = host.stderr;
+    output.credential_taint = host.credential_taint;
     output.stdout_truncated = host.stdout_truncated;
     output.stderr_truncated = host.stderr_truncated;
 }
@@ -758,6 +759,7 @@ fn interrupted_output(timed_out: bool, canceled: bool, elapsed: Duration) -> Exe
         stdout: String::new(),
         stderr: String::new(),
         structured_output: None,
+        credential_taint: runtrue_engine::CredentialTaint::None,
         stdout_truncated: false,
         stderr_truncated: false,
         timed_out,

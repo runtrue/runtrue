@@ -284,7 +284,11 @@ fn typed_completion_claims_survive_restart_and_legacy_records_stay_v1() {
     ];
     let mut store = RunnerStateStore::open(&root).unwrap();
     store
-        .set_pending_completion_with_objects(&completion, objects)
+        .set_pending_completion_with_objects(
+            &completion,
+            objects,
+            runtrue_engine::CredentialTaint::CredentialReleased,
+        )
         .unwrap();
     drop(store);
 
@@ -293,6 +297,10 @@ fn typed_completion_claims_survive_restart_and_legacy_records_stay_v1() {
     let typed = persisted.to_wire_v2().unwrap().unwrap();
     assert_eq!(typed.final_state, v2::LeaseFinalState::Succeeded as i32);
     assert_eq!(typed.committed_objects.len(), 2);
+    assert_eq!(
+        typed.credential_taint,
+        v2::CredentialTaintState::CredentialReleased as i32
+    );
     assert_eq!(persisted.to_wire().unwrap(), completion);
 
     let legacy_root = directory.path().join("legacy-state");

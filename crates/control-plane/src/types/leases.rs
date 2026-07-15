@@ -2,6 +2,39 @@ use runtrue_model::ContentDigest;
 use serde::Deserialize;
 use serde::Serialize;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialTaintState {
+    #[default]
+    Unknown,
+    None,
+    CredentialReleased,
+}
+
+impl CredentialTaintState {
+    #[must_use]
+    pub const fn permits_replay_or_checkpoint(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::None => "none",
+            Self::CredentialReleased => "credential_released",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Result<Self, &'static str> {
+        match value {
+            "unknown" => Ok(Self::Unknown),
+            "none" => Ok(Self::None),
+            "credential_released" => Ok(Self::CredentialReleased),
+            _ => Err("invalid credential taint state"),
+        }
+    }
+}
+
 /// Durable, plaintext-free record of one secret value delivered to one
 /// running step. A repeated request for the same binding is rejected rather
 /// than replaying the value.

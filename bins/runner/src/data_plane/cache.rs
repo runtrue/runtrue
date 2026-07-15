@@ -96,6 +96,9 @@ impl RemoteDataPlaneSession {
     }
 
     pub(super) fn save_cache(&self, step_id: &str, job_attempt: u32) -> Result<(), RunnerError> {
+        if !self.credential_taint.permits_publication() {
+            return Ok(());
+        }
         if self.cache_breaker_open.load(Ordering::Acquire) {
             self.cache_bypassed_operations
                 .fetch_add(1, Ordering::Relaxed);

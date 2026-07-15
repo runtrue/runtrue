@@ -5,7 +5,8 @@ use super::{
 };
 use crate::broker::RunnerBrokerClient;
 use runtrue_engine::{
-    CancellationToken, Engine, ExecutionResult, JobState, NativeProcessExecutor, StepStateObserver,
+    CancellationToken, CredentialTaint, Engine, ExecutionResult, JobState, NativeProcessExecutor,
+    StepStateObserver,
 };
 use runtrue_model::ContentDigest;
 use runtrue_protocol::v1;
@@ -27,6 +28,8 @@ pub struct JobExecution {
     pub final_job_attempt: u32,
     pub artifact_ids: Vec<String>,
     pub cache_entry_ids: Vec<String>,
+    /// Monotonic credential-release taint for the executed workspace.
+    pub credential_taint: CredentialTaint,
 }
 
 pub trait JobExecutor: Clone + Send + Sync + 'static {
@@ -169,6 +172,7 @@ pub(super) fn execution_from_engine(
     lease: &AdmittedLease,
     result: ExecutionResult,
 ) -> Result<JobExecution, RunnerError> {
+    let credential_taint = result.credential_taint();
     let result_bytes = serde_json::to_vec(&result).map_err(RunnerError::ResultEncoding)?;
     if result_bytes.len() > MAX_RESULT_BYTES {
         return Err(RunnerError::ResultLimitExceeded {
@@ -204,13 +208,21 @@ pub(super) fn execution_from_engine(
         final_job_attempt: job.attempts.last().map_or(0, |attempt| attempt.number),
         artifact_ids: Vec::new(),
         cache_entry_ids: Vec::new(),
+        credential_taint,
     })
 }
 
-fn bounded_log_frames(
+pub(super) fn bounded_log_frames(
     lease: &AdmittedLease,
     result: &ExecutionResult,
 ) -> Result<Vec<v1::LogFrame>, RunnerError> {
+    if result.credential_taint().is_tainted() {
+        // Workspace state can carry a transformed credential into later
+        // steps, whose individual executor output would otherwise look
+        // untainted. Suppress the complete execution log stream once any
+        // credential crossed the guest boundary.
+        return Ok(Vec::new());
+    }
     let mut frames = Vec::new();
     let mut sequences = BTreeMap::<(u32, String, String), u64>::new();
     let Some(job) = result.jobs.get(&lease.job_id) else {
@@ -222,16 +234,6 @@ fn bounded_log_frames(
                 continue;
             };
             for (stream, payload) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
-                let broker_redacted = lease
-                    .capsule
-                    .jobs
-                    .iter()
-                    .find(|planned| planned.id == lease.job_id)
-                    .and_then(|planned| planned.steps.iter().find(|planned| planned.id == step.id))
-                    .is_some_and(|planned| {
-                        !planned.capabilities.secrets.is_empty()
-                            || !planned.capabilities.oidc_audiences.is_empty()
-                    });
                 let sequence = sequences
                     .entry((attempt.number, step.id.clone(), stream.to_owned()))
                     .or_default();
@@ -253,11 +255,10 @@ fn bounded_log_frames(
                             .saturating_mul(1_000_000),
                         wall_time: Some(timestamp(now_unix_ms()?)),
                         payload: chunk.to_vec(),
-                        redaction_state: if broker_redacted {
-                            "wasm_host_capability_redacted".to_owned()
-                        } else {
-                            "no_secret_broker_material".to_owned()
-                        },
+                        // A declaration alone says nothing about whether a
+                        // credential was released. Tainted frames are omitted
+                        // above; these bytes came from an untainted step.
+                        redaction_state: "credential_taint_absent".to_owned(),
                         job_attempt: attempt.number,
                     });
                     *sequence = sequence

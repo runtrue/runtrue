@@ -1,8 +1,8 @@
 use crate::app::{
     api_token_tenant, approval_actor_id, authorize_resource, authorize_tenant_collection,
     control_plane_problem, idempotency_key, internal_problem, invalid_object_problem, now_unix_ms,
-    optional_json, random_id, randomness_problem, timestamp, AppState, RequestId, RequestPrincipal,
-    ServerResource, IDEMPOTENCY_REPLAYED,
+    optional_json, problem_response, random_id, randomness_problem, timestamp, AppState, RequestId,
+    RequestPrincipal, ServerResource, IDEMPOTENCY_REPLAYED,
 };
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
@@ -12,8 +12,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::Json;
 use runtrue_control_plane::{
-    CreateRunRequest as StoreCreateRunRequest, NewJob, NormalizedTriggerEventRecord,
-    ReplayBundleRecord, RepositoryRecord, RunRecord,
+    CreateRunRequest as StoreCreateRunRequest, CredentialTaintState, NewJob,
+    NormalizedTriggerEventRecord, ReplayBundleRecord, RepositoryRecord, RunRecord,
 };
 use runtrue_model::ContentDigest;
 use runtrue_policy::{CedarAction, CedarResourceKind};
@@ -510,6 +510,26 @@ pub(in crate::app) async fn create_replay_bundle(
             .in_repository(&repository.id),
     ) {
         return response;
+    }
+    match state.control_plane.run_credential_taint(&run.id) {
+        Ok(CredentialTaintState::None) => {}
+        Ok(CredentialTaintState::CredentialReleased) => {
+            return problem_response(
+                &request_id,
+                StatusCode::CONFLICT,
+                "Replay Bundle publication blocked",
+                "the execution released credential material into its guest or workspace",
+            )
+        }
+        Ok(CredentialTaintState::Unknown) => {
+            return problem_response(
+                &request_id,
+                StatusCode::CONFLICT,
+                "Replay Bundle publication blocked",
+                "the execution does not have explicit credential-taint evidence",
+            )
+        }
+        Err(error) => return control_plane_problem(&request_id, error),
     }
     let signed = match state.control_plane.signed_capsule(&run.capsule_id) {
         Ok(capsule) => capsule,

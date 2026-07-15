@@ -187,6 +187,7 @@ pub(super) fn job_execution_from_report(
         final_job_attempt: 1,
         artifact_ids: Vec::new(),
         cache_entry_ids: Vec::new(),
+        credential_taint: runtrue_engine::CredentialTaint::None,
     })
 }
 
@@ -214,6 +215,7 @@ pub(super) fn canceled_job_execution(lease: &AdmittedLease) -> Result<JobExecuti
         final_job_attempt: 0,
         artifact_ids: Vec::new(),
         cache_entry_ids: Vec::new(),
+        credential_taint: runtrue_engine::CredentialTaint::None,
     })
 }
 

@@ -34,7 +34,10 @@ use super::{
 use crate::conditions::evaluate_condition;
 use crate::context::update_one_step_context;
 use crate::outputs::decode_structured_outputs;
-use crate::{Engine, EngineError, Executor, RuntimeContext, SkipReason, StepResult, StepState};
+use crate::{
+    CredentialTaint, Engine, EngineError, Executor, RuntimeContext, SkipReason, StepResult,
+    StepState,
+};
 use runtrue_model::ContentDigest;
 use runtrue_workflow_ir::{PlannedJob, ScalarValue};
 use std::{
@@ -199,7 +202,11 @@ impl<E: Executor> Engine<E> {
                 StepState::Running,
             )?;
 
-            let (state, output, error, typed_outputs) = match self.executor.execute(&request) {
+            let execution = self.executor.execute(&request).map(|mut output| {
+                output.suppress_tainted_publication();
+                output
+            });
+            let (state, output, error, typed_outputs) = match execution {
                 Ok(output) if output.canceled => {
                     (StepState::Canceled, Some(output), None, BTreeMap::new())
                 }
@@ -230,13 +237,17 @@ impl<E: Executor> Engine<E> {
                     BTreeMap::new(),
                 ),
             };
-            self.transition_step(
+            let credential_taint = output
+                .as_ref()
+                .map_or(CredentialTaint::None, |output| output.credential_taint);
+            self.transition_step_with_taint(
                 recorder,
                 &job.id,
                 &step.id,
                 attempt,
                 Some(StepState::Running),
                 state,
+                credential_taint,
             )?;
 
             let continued =
@@ -285,10 +296,18 @@ impl<E: Executor> Engine<E> {
             &mut context,
             recorder,
         )?;
+        let credential_taint = results
+            .iter()
+            .chain(&finalizers)
+            .filter_map(|step| step.output.as_ref())
+            .fold(CredentialTaint::None, |taint, output| {
+                taint.merge(output.credential_taint)
+            });
 
         Ok(JobAttemptResult {
             number: attempt,
             primary_state,
+            credential_taint,
             steps: results,
             finalizers,
         })

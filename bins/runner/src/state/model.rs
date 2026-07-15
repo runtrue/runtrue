@@ -35,6 +35,8 @@ pub(crate) struct PersistedCompletion {
     #[serde(default)]
     pub expected_log_frames: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_taint: Option<runtrue_engine::CredentialTaint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committed_objects: Option<Vec<PersistedCommittedObject>>,
 }
 
@@ -77,6 +79,7 @@ impl PersistedCompletion {
             completed_unix_ms,
             final_job_attempt: request.final_job_attempt,
             expected_log_frames: request.expected_log_frames,
+            credential_taint: None,
             committed_objects: None,
         })
     }
@@ -147,6 +150,15 @@ impl PersistedCompletion {
             completed_at: Some(timestamp(self.completed_unix_ms)),
             final_job_attempt: self.final_job_attempt,
             expected_log_frames: self.expected_log_frames,
+            credential_taint: match self.credential_taint {
+                Some(runtrue_engine::CredentialTaint::None) => {
+                    v2::CredentialTaintState::None as i32
+                }
+                Some(runtrue_engine::CredentialTaint::CredentialReleased) => {
+                    v2::CredentialTaintState::CredentialReleased as i32
+                }
+                None => v2::CredentialTaintState::Unspecified as i32,
+            },
         }))
     }
 

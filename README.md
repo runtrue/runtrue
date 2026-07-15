@@ -97,11 +97,24 @@ Control plane and security:
   accepted fence, run-authorized signed Capsule, and currently running declared
   step. Remote Wasm consumes both just in time through opaque WIT handles,
   authenticated ephemeral envelopes, zeroizing host adapters, and live fenced
-  step transitions; native and OCI jobs cannot receive either capability.
+  step transitions. OCI steps can receive only explicitly sealed SCM or local
+  secret grants through private, step-scoped runtime files; provider grants also
+  require the signed SCM context and declared permission, and credentials are
+  never injected as ambient environment variables. Native execution cannot
+  receive brokered credentials. Firecracker rejects secret and OIDC capabilities
+  before invoking the driver because its guest adapter does not yet implement
+  credential delivery.
   Remote retries are attempt-bound across step transitions, logs, secret/OIDC
   brokers, revocation, completion journals, and durable broker records. Native,
   OCI, and Wasm jobs support whole-job retries; the v1 MicroVM guest remains
   fail-closed until its guest report carries the same attempt identity.
+- Credential taint becomes monotonic after a credential is successfully exposed
+  to a Wasm guest or written to an OCI private runtime file. Generation-two
+  runner completion persists that evidence across restarts; legacy or missing
+  evidence is treated as unknown and fails closed. Tainted execution suppresses
+  subsequent durable logs, cache publication, artifacts, and Replay Bundles.
+  The same fail-closed predicate is defined for execution Checkpoint publication;
+  no tenant execution-Checkpoint publication route is implemented in v0.x.
 - Tamper-evident audit events and signed checkpoints, break-glass and debug
   session state machines, non-exportable signing-operation contracts, protected
   deployment gates, and restore-time fencing.

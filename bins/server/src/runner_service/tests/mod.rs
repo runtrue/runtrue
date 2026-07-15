@@ -10,8 +10,8 @@ use runtrue_cache::{
 };
 use runtrue_control_plane::{
     CacheTrustGenerationRecord, CapsuleApiMetadata, ControlPlane, ControlPlaneError,
-    CreateRunRequest, NewJob, RepositoryRecord, RunnerPoolRecord, RunnerPoolStatus,
-    SecretMetadataReference, SignedCapsuleRecord, StorageReservationState,
+    CreateRunRequest, CredentialTaintState, NewJob, RepositoryRecord, RunnerPoolRecord,
+    RunnerPoolStatus, SecretMetadataReference, SignedCapsuleRecord, StorageReservationState,
     TenantStorageReservation,
 };
 use runtrue_git::{GitTreeEntryKind, GitTreeManifest};
@@ -142,10 +142,13 @@ fn typed_completion_adapter_rejects_unknown_kinds_names_and_attempts() {
         completed_at: Some(proto_timestamp(now_unix_ms().unwrap())),
         final_job_attempt: 0,
         expected_log_frames: 0,
+        credential_taint: v2::CredentialTaintState::CredentialReleased as i32,
     };
-    let (legacy, claims) = fixture.service.adapt_v2_completion(valid.clone()).unwrap();
+    let (legacy, claims, credential_taint) =
+        fixture.service.adapt_v2_completion(valid.clone()).unwrap();
     assert_eq!(legacy.final_state, "failed");
     assert!(claims.is_empty());
+    assert_eq!(credential_taint, CredentialTaintState::CredentialReleased);
 
     let mut malformed = valid;
     malformed.final_job_attempt = 1;
@@ -1121,7 +1124,11 @@ async fn open_fetch_heartbeat_cancel_and_completion_are_exact_and_idempotent() {
     assert!(
         fixture
             .service
-            .complete_authenticated(&test_identity("runner-1"), completion.clone())
+            .complete_authenticated(
+                &test_identity("runner-1"),
+                completion.clone(),
+                CredentialTaintState::None,
+            )
             .await
             .expect("complete")
             .accepted
@@ -1129,7 +1136,11 @@ async fn open_fetch_heartbeat_cancel_and_completion_are_exact_and_idempotent() {
     assert!(
         fixture
             .service
-            .complete_authenticated(&test_identity("runner-1"), completion.clone())
+            .complete_authenticated(
+                &test_identity("runner-1"),
+                completion.clone(),
+                CredentialTaintState::None,
+            )
             .await
             .expect("idempotent completion")
             .accepted
@@ -1140,7 +1151,11 @@ async fn open_fetch_heartbeat_cancel_and_completion_are_exact_and_idempotent() {
     assert_eq!(
         fixture
             .service
-            .complete_authenticated(&test_identity("runner-1"), conflicting)
+            .complete_authenticated(
+                &test_identity("runner-1"),
+                conflicting,
+                CredentialTaintState::None,
+            )
             .await
             .expect_err("conflicting completion")
             .code(),
@@ -1257,7 +1272,11 @@ async fn stale_runner_connection_fence_and_capsule_identifiers_fail_closed() {
     assert_eq!(
         fixture
             .service
-            .complete_authenticated(&test_identity("runner-1"), completion.clone())
+            .complete_authenticated(
+                &test_identity("runner-1"),
+                completion.clone(),
+                CredentialTaintState::None,
+            )
             .await
             .expect_err("stale completion generation")
             .code(),
@@ -1269,7 +1288,11 @@ async fn stale_runner_connection_fence_and_capsule_identifiers_fail_closed() {
     assert_eq!(
         fixture
             .service
-            .complete_authenticated(&test_identity("runner-1"), stale_epoch)
+            .complete_authenticated(
+                &test_identity("runner-1"),
+                stale_epoch,
+                CredentialTaintState::None,
+            )
             .await
             .expect_err("stale completion epoch")
             .code(),

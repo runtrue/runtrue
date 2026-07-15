@@ -1035,6 +1035,7 @@ async fn configured_data_plane_is_reached_only_over_enrolled_mtls_identity() {
         completed_at: exact_completion.completed_at,
         final_job_attempt: exact_completion.final_job_attempt,
         expected_log_frames: exact_completion.expected_log_frames,
+        credential_taint: v2::CredentialTaintState::Unspecified as i32,
     };
     let mut object_replay_client = RunnerObjectTransferClient::new(replay_channel.clone());
     assert!(

@@ -102,7 +102,7 @@ use super::EventRecorder;
 use crate::conditions::evaluate_condition;
 use crate::context::update_one_step_context;
 use crate::outputs::decode_structured_outputs;
-use crate::{Engine, Executor, JobState, StepStateObservation};
+use crate::{CredentialTaint, Engine, Executor, JobState, StepStateObservation};
 use runtrue_model::ContentDigest;
 
 impl<E: Executor> Engine<E> {
@@ -205,7 +205,11 @@ impl<E: Executor> Engine<E> {
                 Some(StepState::Created),
                 StepState::Running,
             )?;
-            let (state, output, error, outputs) = match self.executor.execute(&request) {
+            let execution = self.executor.execute(&request).map(|mut output| {
+                output.suppress_tainted_publication();
+                output
+            });
+            let (state, output, error, outputs) = match execution {
                 Ok(output) if output.canceled => {
                     (StepState::Canceled, Some(output), None, BTreeMap::new())
                 }
@@ -236,13 +240,17 @@ impl<E: Executor> Engine<E> {
                     BTreeMap::new(),
                 ),
             };
-            self.transition_step(
+            let credential_taint = output
+                .as_ref()
+                .map_or(CredentialTaint::None, |output| output.credential_taint);
+            self.transition_step_with_taint(
                 recorder,
                 &job.id,
                 &step.id,
                 attempt,
                 Some(StepState::Running),
                 state,
+                credential_taint,
             )?;
             let continued_on_error = !finalizer.required
                 && matches!(
@@ -273,6 +281,28 @@ impl<E: Executor> Engine<E> {
         from: Option<StepState>,
         to: StepState,
     ) -> Result<(), EngineError> {
+        self.transition_step_with_taint(
+            recorder,
+            job_id,
+            step_id,
+            job_attempt,
+            from,
+            to,
+            CredentialTaint::None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn transition_step_with_taint(
+        &self,
+        recorder: &mut EventRecorder,
+        job_id: &str,
+        step_id: &str,
+        job_attempt: u32,
+        from: Option<StepState>,
+        to: StepState,
+        credential_taint: CredentialTaint,
+    ) -> Result<(), EngineError> {
         recorder.step(job_id, step_id, job_attempt, from, to)?;
         if let Some(observer) = &self.step_state_observer {
             observer
@@ -282,6 +312,7 @@ impl<E: Executor> Engine<E> {
                     job_attempt,
                     from,
                     to,
+                    credential_taint,
                 })
                 .map_err(|message| EngineError::StepStateObserver {
                     job_id: job_id.to_owned(),

@@ -12,7 +12,7 @@ mod secrets;
 
 pub use bindings::BrokerExecutionBinding;
 pub use client::{ObjectUploadBinding, RunnerBrokerClient};
-pub(crate) use scm::{ScmCredentialObserver, ScmRuntimeFiles};
+pub(crate) use scm::{ScmCredentialObserver, ScmCredentialTaint, ScmRuntimeFiles};
 
 use runtrue_executor_wasm::CapabilityAdapters;
 use std::sync::Arc;

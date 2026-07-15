@@ -2003,6 +2003,17 @@ fn schema_one_is_upgraded_through_scm_check_schema_twenty_two() {
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     assert_eq!(migrations, (1..=CURRENT_SCHEMA_VERSION).collect::<Vec<_>>());
+    let credential_taint_column: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('leases')
+                WHERE name = 'terminal_credential_taint'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(credential_taint_column);
 }
 
 #[test]

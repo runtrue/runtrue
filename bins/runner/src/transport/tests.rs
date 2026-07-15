@@ -71,6 +71,7 @@ fn typed_completion_adapter_preserves_kinds_names_and_attempts() {
         }),
         final_job_attempt: 2,
         expected_log_frames: 3,
+        credential_taint: v2::CredentialTaintState::CredentialReleased as i32,
     };
     let legacy = completion_v2_to_v1(request).unwrap();
     assert_eq!(legacy.final_state, "succeeded");

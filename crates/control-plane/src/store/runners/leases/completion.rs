@@ -4,12 +4,56 @@ use super::super::{
     job_state_name, lease_conn, lease_hard_deadline_conn, lease_hard_deadline_tx, lease_state_name,
     lease_tx, params, revoke_runner_broker_state_tx, to_i64, transition_job_tx,
     validate_lease_fence_tx, validate_text, AuditValue, BTreeMap, BTreeSet, ContentDigest,
-    ControlPlane, ControlPlaneError, JobState, Lease, LeaseState, RunnerDataCommitKind,
-    TransactionBehavior, MAX_RUNNER_COMPLETION_ARTIFACT_CLAIMS,
+    ControlPlane, ControlPlaneError, CredentialTaintState, JobState, Lease, LeaseState,
+    RunnerDataCommitKind, TransactionBehavior, MAX_RUNNER_COMPLETION_ARTIFACT_CLAIMS,
 };
 use rusqlite::OptionalExtension as _;
 
 impl ControlPlane {
+    /// Conservative aggregate used to gate Replay Bundle and Checkpoint
+    /// publication. Runs without an explicit completion taint record are
+    /// unknown and therefore fail closed.
+    pub fn run_credential_taint(
+        &self,
+        run_id: &str,
+    ) -> Result<CredentialTaintState, ControlPlaneError> {
+        validate_text("run id", run_id)?;
+        self.run(run_id)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT l.terminal_credential_taint
+             FROM leases l JOIN jobs j ON j.id = l.job_id
+             WHERE j.run_id = ?1",
+        )?;
+        let values = statement.query_map([run_id], |row| row.get::<_, String>(0))?;
+        let mut found = false;
+        let mut aggregate = CredentialTaintState::None;
+        for value in values {
+            found = true;
+            let value = value?;
+            if value == "unobserved" {
+                aggregate = CredentialTaintState::Unknown;
+                continue;
+            }
+            match CredentialTaintState::parse(&value).map_err(|_| {
+                ControlPlaneError::CorruptState(
+                    "invalid terminal credential taint state".to_owned(),
+                )
+            })? {
+                CredentialTaintState::CredentialReleased => {
+                    return Ok(CredentialTaintState::CredentialReleased)
+                }
+                CredentialTaintState::Unknown => aggregate = CredentialTaintState::Unknown,
+                CredentialTaintState::None => {}
+            }
+        }
+        Ok(if found {
+            aggregate
+        } else {
+            CredentialTaintState::Unknown
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn complete_lease(
         &self,
@@ -28,6 +72,7 @@ impl ControlPlane {
             epoch,
             result_digest,
             final_job_state,
+            CredentialTaintState::Unknown,
             0,
             &[],
             &[],
@@ -191,6 +236,7 @@ impl ControlPlane {
         epoch: u64,
         result_digest: &ContentDigest,
         final_job_state: JobState,
+        credential_taint: CredentialTaintState,
         job_attempt: u32,
         artifact_ids: &[String],
         cache_entry_ids: &[String],
@@ -202,9 +248,90 @@ impl ControlPlane {
                 "lease completion requires a terminal job state",
             ));
         }
+        let effective_taint = {
+            let mut connection = self.connection()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let lease =
+                validate_lease_fence_tx(&transaction, lease_id, runner_id, generation, epoch)?;
+            let stored_taint: String = transaction.query_row(
+                "SELECT terminal_credential_taint FROM leases WHERE id = ?1",
+                [lease_id],
+                |row| row.get(0),
+            )?;
+            let (effective, downgrade) = match (stored_taint.as_str(), credential_taint) {
+                ("unobserved", incoming) => (incoming, false),
+                ("none", CredentialTaintState::None) => (CredentialTaintState::None, false),
+                ("none", incoming) => (incoming, false),
+                ("unknown", CredentialTaintState::CredentialReleased) => {
+                    (CredentialTaintState::CredentialReleased, false)
+                }
+                ("unknown", CredentialTaintState::Unknown) => {
+                    (CredentialTaintState::Unknown, false)
+                }
+                ("unknown", CredentialTaintState::None) => (CredentialTaintState::Unknown, true),
+                ("credential_released", CredentialTaintState::CredentialReleased) => {
+                    (CredentialTaintState::CredentialReleased, false)
+                }
+                ("credential_released", _) => (CredentialTaintState::CredentialReleased, true),
+                _ => {
+                    return Err(ControlPlaneError::CorruptState(
+                        "invalid terminal credential taint state".to_owned(),
+                    ))
+                }
+            };
+            if downgrade {
+                return Err(ControlPlaneError::RunnerBrokerBindingMismatch);
+            }
+            transaction.execute(
+                "UPDATE leases SET terminal_credential_taint = ?2 WHERE id = ?1",
+                params![lease_id, effective.as_str()],
+            )?;
+            if !effective.permits_replay_or_checkpoint() {
+                transaction.execute(
+                    "DELETE FROM runner_log_frames WHERE execution_lease_id = ?1",
+                    [lease_id],
+                )?;
+                transaction.execute(
+                    "DELETE FROM artifact_download_tickets
+                     WHERE artifact_id IN (
+                       SELECT artifact_id FROM artifacts_catalog WHERE job_id = ?1
+                     )",
+                    [&lease.job_id],
+                )?;
+                transaction.execute(
+                    "UPDATE artifacts_catalog SET state = 'quarantined' WHERE job_id = ?1",
+                    [&lease.job_id],
+                )?;
+                transaction.execute(
+                    "DELETE FROM cache_trust_current_heads
+                     WHERE cache_entry_id IN (
+                       SELECT object_id FROM job_result_objects
+                       WHERE job_id = ?1 AND kind = 'cache'
+                     )",
+                    [&lease.job_id],
+                )?;
+            }
+            transaction.commit()?;
+            effective
+        };
+        if !effective_taint.permits_replay_or_checkpoint()
+            && (!artifact_ids.is_empty() || !cache_entry_ids.is_empty())
+        {
+            return Err(ControlPlaneError::RunnerBrokerBindingMismatch);
+        }
+
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let lease = validate_lease_fence_tx(&transaction, lease_id, runner_id, generation, epoch)?;
+        let current_taint: String = transaction.query_row(
+            "SELECT terminal_credential_taint FROM leases WHERE id = ?1",
+            [lease_id],
+            |row| row.get(0),
+        )?;
+        if current_taint != effective_taint.as_str() {
+            return Err(ControlPlaneError::RunnerBrokerBindingMismatch);
+        }
         let durable_job_attempt: u32 = transaction.query_row(
             "SELECT attempt FROM jobs WHERE id = ?1",
             [&lease.job_id],
@@ -241,16 +368,17 @@ impl ControlPlane {
                 rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
             };
         if lease.state == LeaseState::Completed {
-            let stored_state: Option<String> = transaction.query_row(
-                "SELECT terminal_job_state FROM leases WHERE id = ?1",
+            let (stored_state, stored_taint): (Option<String>, String) = transaction.query_row(
+                "SELECT terminal_job_state, terminal_credential_taint FROM leases WHERE id = ?1",
                 [lease_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             let objects_match = submitted_objects.iter().all(|(kind, submitted)| {
                 stored_objects(*kind).is_ok_and(|stored| stored == **submitted)
             });
             if lease.terminal_result_digest.as_ref() == Some(result_digest)
                 && stored_state.as_deref() == Some(job_state_name(final_job_state))
+                && stored_taint == effective_taint.as_str()
                 && objects_match
             {
                 transaction.commit()?;

@@ -535,6 +535,7 @@ where
             stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
             structured_output: None,
+            credential_taint: runtrue_engine::CredentialTaint::None,
             stdout_truncated: result.stdout_truncated,
             stderr_truncated: result.stderr_truncated,
             timed_out: result.timed_out,

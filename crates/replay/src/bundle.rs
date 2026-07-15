@@ -13,6 +13,9 @@ impl ReplayBundle {
         approval_subject_digest: ContentDigest,
         result: Option<&ExecutionResult>,
     ) -> Result<Self, ReplayError> {
+        if result.is_some_and(|result| result.credential_taint().is_tainted()) {
+            return Err(ReplayError::CredentialTainted);
+        }
         let capsule_digest = capsule.digest()?;
         let required_secret_metadata_ids = collect_secret_ids(&capsule);
         Ok(Self {

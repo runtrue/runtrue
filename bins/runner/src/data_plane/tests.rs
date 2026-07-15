@@ -1,8 +1,10 @@
+use super::session::CredentialTaintState;
 use super::{
     patterns::{expand_pattern, expand_patterns},
     transfer::{call_after_lifecycle, temporary_cas},
     wire::classification_name,
 };
+use runtrue_engine::CredentialTaint;
 use runtrue_workflow_ir::ArtifactClassification;
 use std::fs;
 
@@ -75,4 +77,18 @@ fn artifact_classification_uses_wire_canonical_kebab_case() {
         classification_name(ArtifactClassification::ReleaseCandidate),
         "release-candidate"
     );
+}
+
+#[test]
+fn credential_taint_denies_cache_and_artifact_publication() {
+    let taint = CredentialTaintState::default();
+    assert!(taint.permits_publication());
+
+    taint.observe(CredentialTaint::CredentialReleased);
+
+    // Both cache save and artifact capture use this shared fail-closed gate.
+    assert!(!taint.permits_publication());
+    // Taint is monotonic for the workspace, including later retries/steps.
+    taint.observe(CredentialTaint::None);
+    assert!(!taint.permits_publication());
 }

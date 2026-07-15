@@ -18,6 +18,9 @@ impl RemoteDataPlaneSession {
         final_state: &str,
         job_attempt: u32,
     ) -> Result<Vec<PersistedCommittedObject>, RunnerError> {
+        if !self.credential_taint.permits_publication() {
+            return Ok(Vec::new());
+        }
         if final_state != "succeeded" {
             return Ok(Vec::new());
         }
