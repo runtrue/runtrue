@@ -51,6 +51,7 @@ test("serves the full backend-supported POC surface with a strict CSP", async (t
   assert.match(html, /id="repository-workflow-directory"/);
   assert.match(html, /id="repository-workflow-directory-form"/);
   assert.match(html, /id="repository-provider-link"[^>]*target="_blank"[^>]*rel="noopener noreferrer"/);
+  assert.match(html, /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml">/);
   assert.match(html, /id="user-initials"/);
   assert.match(html, /id="delete-setting-dialog"/);
   assert.doesNotMatch(html, /id="tenant-name"/);
@@ -70,6 +71,11 @@ test("serves the full backend-supported POC surface with a strict CSP", async (t
   const scriptResponse = await fetch(`http://127.0.0.1:${frontendPort}/assets/app.js`);
   assert.equal(scriptResponse.status, 200);
   assert.equal(scriptResponse.headers.get("cache-control"), "no-cache");
+
+  const faviconResponse = await fetch(`http://127.0.0.1:${frontendPort}/favicon.svg`);
+  assert.equal(faviconResponse.status, 200);
+  assert.equal(faviconResponse.headers.get("content-type"), "image/svg+xml");
+  assert.match(await faviconResponse.text(), /aria-hidden="true"/);
 
   const diagnosticResponse = await fetch(`http://127.0.0.1:${frontendPort}/frontend-client-error`, {
     method: "POST",

@@ -9,6 +9,7 @@ const publicDirectory = join(moduleDirectory, "public");
 const staticFiles = new Map([
   ["/", ["index.html", "text/html; charset=utf-8", "no-store"]],
   ["/ui/github/installations", ["index.html", "text/html; charset=utf-8", "no-store"]],
+  ["/favicon.svg", ["favicon.svg", "image/svg+xml", "public, max-age=86400"]],
   ["/assets/styles.css", ["styles.css", "text/css; charset=utf-8", "no-cache"]],
   ["/assets/app.js", ["app.js", "text/javascript; charset=utf-8", "no-cache"]],
 ]);
