@@ -1,0 +1,9 @@
+{
+  "artifact": "dist/runtrue_wasi_0_3_hello.wasm",
+  "expected_exit_code": 0,
+  "expected_stderr": "",
+  "expected_stdout": "",
+  "runtime_generation": "wasi-0.3",
+  "wasi_import": "wasi:cli/environment@0.3.0",
+  "wit_world": "runtrue:action/run@1.0.0"
+}

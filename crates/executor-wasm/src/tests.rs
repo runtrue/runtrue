@@ -52,6 +52,12 @@ fn ambient_random_component() -> Vec<u8> {
     )
 }
 
+fn wasi_03_environment_component() -> Vec<u8> {
+    component(include_str!(
+        "../../../examples/actions/wasi-0.3-hello/component.wat"
+    ))
+}
+
 fn declared_host_component() -> Vec<u8> {
     component(
         r#"(component
@@ -498,6 +504,14 @@ fn undeclared_wasi_random_import_is_not_linked() {
         executor.execute_request(&request(&bytes)),
         Err(WasmError::Link(_))
     ));
+}
+
+#[test]
+fn wasi_03_example_executes_end_to_end() {
+    let bytes = wasi_03_environment_component();
+    let (_temporary, mut executor) = executor(&bytes, WasmLimits::default());
+    let output = executor.execute_request(&request(&bytes)).unwrap();
+    assert!(output.executor.succeeded());
 }
 
 #[test]

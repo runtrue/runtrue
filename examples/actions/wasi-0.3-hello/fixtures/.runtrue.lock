@@ -1,0 +1,7 @@
+lock_version = 1
+
+[[component]]
+source = "wasm://registry.example/runtrue/wasi-0-3-hello@v0"
+resolved = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+signature_identity = "example@runtrue.dev"
+wit_world = "runtrue:action/run@1.0.0"

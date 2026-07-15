@@ -1,0 +1,16 @@
+[package]
+name = "runtrue-wasi-0-3-component-builder"
+version = "0.1.0"
+edition = "2024"
+publish = false
+rust-version = "1.94"
+
+[[bin]]
+name = "build-component"
+path = "tools/build-component.rs"
+
+[dependencies]
+wat = "=1.253.0"
+
+# Keep the fixture builder independent from the repository workspace.
+[workspace]

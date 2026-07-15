@@ -1,0 +1,22 @@
+version: 1
+name: wasi-0-3-hello
+
+"on":
+  manual: {}
+
+permissions:
+  network: deny
+
+jobs:
+  hello:
+    runner:
+      os: linux
+      arch: amd64
+      isolation: wasm
+      memory: 128MiB
+    steps:
+      - id: hello
+        uses: wasm://registry.example/runtrue/wasi-0-3-hello@v0
+        with:
+          name: Runtrue
+
