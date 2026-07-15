@@ -246,8 +246,6 @@
       providerLink.removeAttribute("href");
       providerLink.removeAttribute("aria-label");
     }
-    byId("repository-state").textContent = repository.state;
-    byId("repository-state").className = `state-badge ${tone(repository.state)}`;
     byId("repository-detail-summary").innerHTML = [["Source", repository.source], ["Visibility", repository.visibility], ["Default branch", repository.defaultBranch], ["Installation", repository.installationAccount]].map(([label, value]) => definitionCard(label, value)).join("");
     byId("repository-connection-state").textContent = repository.state;
     byId("repository-connection-state").className = `state-badge ${tone(repository.state)}`;
