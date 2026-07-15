@@ -1,7 +1,9 @@
 use super::*;
 use runtrue_attest::{CapsuleSigningKey, ImageKind, ImageManifest, ImageSigningKey};
 use runtrue_engine::CancellationToken;
-use runtrue_executor_wasm::{COMPONENT_MEDIA_TYPE, WASMTIME_VERSION, WIT_SOURCE, WIT_WORLD};
+use runtrue_executor_wasm::{
+    COMPONENT_MEDIA_TYPE, WASI_VERSION, WASMTIME_VERSION, WIT_SOURCE, WIT_WORLD,
+};
 use runtrue_workflow_ir::{
     ApprovalRequirements, Architecture, CapsuleContext, ParityGrade, PermissionSet, PlannedJob,
     PlannedService, PlannedStep, RunnerRequirements, SourceTrust, StepCapabilitySet, Trust,
@@ -107,6 +109,7 @@ impl Fixture {
                     "target_triple".to_owned(),
                     self.target.target_triple().to_owned(),
                 ),
+                ("wasi_version".to_owned(), WASI_VERSION.to_owned()),
                 ("wasmtime_version".to_owned(), WASMTIME_VERSION.to_owned()),
                 ("wit_world".to_owned(), WIT_WORLD.to_owned()),
             ]),
