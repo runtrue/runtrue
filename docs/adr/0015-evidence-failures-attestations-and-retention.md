@@ -111,7 +111,7 @@ execution-plane event or Evidence grade.
 
 ### 4. Stable failure classes
 
-The portable Execution terminal failure classes are:
+The portable failure classes are:
 
 - `admission rejected`: the Capsule, Seal, Program, protocol, or required
   feature was invalid before policy evaluation completed;
@@ -130,20 +130,40 @@ The portable Execution terminal failure classes are:
 - `runner integrity failure`: runtime identity, lease, fencing, Evidence,
   isolation, revocation, or cleanup could not be proven.
 
+Their applicability is closed:
+
+- `admission rejected`, `policy denied`, and `capacity unavailable` describe a
+  request or initial-subject failure before guest execution. They may terminate
+  a proposed Session during creation. During renew, suspend, or restore they are
+  operation outcomes, and the Session follows ADR 0008's recovery transition
+  instead of being reclassified automatically.
+- `Program failure` applies only to an Execution. A child Program failure is
+  retained in the child Evidence and does not by itself terminate its Session.
+- `runtime failure`, `timed out`, `canceled`, `resource exhausted`, `external
+  effect indeterminate`, and `runner integrity failure` may terminate an
+  Execution or an active Session when their definitions apply.
+
+A successful Execution result or successfully destroyed Session is a successful
+terminal outcome outside this failure list. An explicit successful Session
+destroy is not relabeled `canceled`.
+
 Spelling and meaning are protocol data. Providers may attach bounded diagnostic
 codes and retry hints, but may not invent a portable class or map an unknown
 condition to `Program failure`.
 
-Admission, policy, and capacity failures occur before an Execution starts and
-are mutually exclusive with running-state outcomes. After start, the first
+For a given subject, admission, policy, and capacity failures are mutually
+exclusive with its running-state outcomes. After an Execution starts, the first
 durably committed terminal cause wins ordinary races among Program completion,
-deadline, cancellation, resource exhaustion, and runtime failure.
+deadline, cancellation, resource exhaustion, and runtime failure. For an active
+Session, the same first-winner rule applies among hard or idle lifetime expiry,
+forced cancellation, aggregate resource exhaustion, and runtime failure; child
+Program completion is not a Session terminal cause.
 
 Two safety overrides apply even after an ordinary cause was selected:
 
 1. an unresolved accepted-or-possibly-accepted mutation makes the primary
    class `external effect indeterminate`; and
-2. an unproven execution or cleanup boundary makes the primary class
+2. an unproven subject runtime or cleanup boundary makes the primary class
    `runner integrity failure`.
 
 All observed causes remain in Evidence. The primary class controls terminal
