@@ -54,7 +54,6 @@ Provider advertises versioned feature profiles such as:
 - Checkpoint suspend and restore;
 - specific runtime compatibility identities;
 - capability and external-effect classes;
-- warm-pool acquisition;
 - Replay Bundle grades; and
 - Evidence and attestation grades.
 
@@ -63,6 +62,11 @@ Absence means unsupported, not best effort. A Capsule requiring an unavailable
 profile fails admission before placement. Feature negotiation never removes a
 Capsule requirement or selects an older protocol generation after a newer
 mutual generation was authenticated.
+
+Warm-pool presence, desired capacity, and acquisition are operational Provider
+inventory and Evidence, not a workload-requestable feature. Their absence may
+increase latency or cause ordinary exact-capacity failure, but never changes
+Capsule admission semantics or authorizes a warm-only requirement.
 
 ### 3. Inventory and scheduling interface
 
@@ -121,11 +125,19 @@ same canonical Capsule and controlled inputs. It covers at least:
 - cleanup result and portable failure classification; and
 - rejection of unsupported features and prohibited fallback.
 
+A Bisim conformance Capsule enumerates both target Provider trust identities or
+profiles in its allowed placement set. Each run selects one admitted target
+without changing any other Capsule field. The comparison validates each actual
+Provider, pool trust profile, runtime, and Evidence producer identity against
+that set, then compares the portable projection. It does not require the two
+Providers to share an identity or remove identity validation.
+
 Bisim normalizes only fields declared operational, such as timestamps within
-documented bounds, worker IDs, cold-versus-warm acquisition, and Provider-
-specific diagnostics. It never normalizes a Program result, capability decision,
-effect state, runtime compatibility identity, security failure, or missing
-Evidence into equivalence.
+documented bounds, concrete worker and pool IDs, cold-versus-warm acquisition,
+the validated Provider comparison role, and Provider-specific diagnostics. It
+never normalizes a Program result, capability decision, effect state, runtime
+compatibility identity, unadmitted Provider identity, security failure, or
+missing Evidence into equivalence.
 
 Bisim does not prove that two isolation mechanisms have equal security. Each
 runtime family and Provider also passes its own adversarial suite for escape,
