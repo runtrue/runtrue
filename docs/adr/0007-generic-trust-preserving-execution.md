@@ -181,8 +181,13 @@ Long-lived plaintext credentials do not enter a guest by default. Prefer a
 broker that applies a credential only to an authorized operation and
 destination. Where an incompatible tool requires guest-visible credentials,
 policy may issue a short-lived, Session-scoped derivative through an explicit
-high-risk capability. Such material is excluded from Checkpoints and Replay
-Bundles, redacted from output, and revoked at terminal cleanup.
+high-risk capability. The release taints all subsequently reachable guest
+state and output under ADR 0012; redaction and scanning are defense in depth,
+not proof of exclusion. Strong Checkpoints and Replay grades require discarding
+the tainted state or a sound admitted information-flow boundary. Network use
+after release must remain effect-aware and mediated under ADR 0011; an
+unclassifiable transmitted mutation becomes indeterminate. The derivative is
+revoked at terminal cleanup.
 
 ### 7. External effects, idempotency, and retries
 
