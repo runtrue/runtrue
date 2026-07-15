@@ -216,6 +216,154 @@ pub struct CapabilityContract {
     pub aggregate_budget: CapabilityBudget,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NondeterministicInputClass {
+    LiveClock,
+    LiveRandomness,
+    External,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NondeterministicInputGrant {
+    pub class: NondeterministicInputClass,
+    pub profile_digest: ContentDigest,
+    pub maximum_uses: u64,
+    pub maximum_bytes: u64,
+}
+
+impl NondeterministicInputGrant {
+    fn validate(&self) -> Result<(), ExecutionModelError> {
+        if self.maximum_uses == 0 || self.maximum_bytes > MAX_RESOURCE_BYTES {
+            return Err(ExecutionModelError::InvalidField {
+                field: "nondeterministic input grant",
+                reason: "uses must be positive and bytes within the canonical bound",
+            });
+        }
+        Ok(())
+    }
+
+    fn contains(&self, child: &Self) -> bool {
+        self.class == child.class
+            && self.profile_digest == child.profile_digest
+            && child.maximum_uses <= self.maximum_uses
+            && child.maximum_bytes <= self.maximum_bytes
+    }
+}
+
+/// Empty means deterministic inputs only. Live clock, live randomness, and
+/// other nondeterminism must each be named by an exact admitted profile.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NondeterminismContract {
+    pub inputs: BTreeMap<String, NondeterministicInputGrant>,
+}
+
+impl NondeterminismContract {
+    pub fn validate(&self) -> Result<(), ExecutionModelError> {
+        validation::bounded(
+            "nondeterministic inputs",
+            self.inputs.len(),
+            validation::MAX_COLLECTION_ENTRIES,
+        )?;
+        for (identity, grant) in &self.inputs {
+            validation::identifier("nondeterministic input identity", identity)?;
+            grant.validate()?;
+        }
+        Ok(())
+    }
+
+    pub fn contains(&self, child: &Self) -> bool {
+        child.inputs.iter().all(|(identity, child_grant)| {
+            self.inputs
+                .get(identity)
+                .is_some_and(|parent_grant| parent_grant.contains(child_grant))
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalEffectDeclaration {
+    pub operation_id: String,
+    pub idempotency_key: String,
+    pub capability_grant_id: String,
+    pub effect_class: String,
+    pub destination_digest: ContentDigest,
+    pub idempotency_contract_digest: ContentDigest,
+    pub bounded_request_digest: ContentDigest,
+}
+
+impl ExternalEffectDeclaration {
+    fn validate_against(
+        &self,
+        operation_id: &str,
+        capabilities: &CapabilityContract,
+    ) -> Result<(), ExecutionModelError> {
+        validation::identifier("external-effect operation identity", &self.operation_id)?;
+        validation::identifier("external-effect idempotency key", &self.idempotency_key)?;
+        validation::identifier(
+            "external-effect capability identity",
+            &self.capability_grant_id,
+        )?;
+        validation::identifier("external-effect class", &self.effect_class)?;
+        let grant = capabilities.grants.get(&self.capability_grant_id).ok_or(
+            ExecutionModelError::InvalidField {
+                field: "external-effect capability",
+                reason: "must name a capability in the same Capsule",
+            },
+        )?;
+        if operation_id != self.operation_id
+            || grant.external_effect_class.as_deref() != Some(self.effect_class.as_str())
+        {
+            return Err(ExecutionModelError::InvalidField {
+                field: "external-effect declaration",
+                reason: "operation key and admitted effect class must match exactly",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalEffectContract {
+    pub operations: BTreeMap<String, ExternalEffectDeclaration>,
+}
+
+impl ExternalEffectContract {
+    pub fn validate_against(
+        &self,
+        capabilities: &CapabilityContract,
+    ) -> Result<(), ExecutionModelError> {
+        validation::bounded(
+            "external-effect declarations",
+            self.operations.len(),
+            validation::MAX_COLLECTION_ENTRIES,
+        )?;
+        if u64::try_from(self.operations.len()).unwrap_or(u64::MAX)
+            > capabilities.aggregate_budget.maximum_external_effects
+        {
+            return Err(ExecutionModelError::InvalidField {
+                field: "external-effect declarations",
+                reason: "exceed the Capsule aggregate external-effect budget",
+            });
+        }
+        let mut keys = BTreeSet::new();
+        for (operation_id, declaration) in &self.operations {
+            declaration.validate_against(operation_id, capabilities)?;
+            if !keys.insert(&declaration.idempotency_key) {
+                return Err(ExecutionModelError::InvalidField {
+                    field: "external-effect idempotency key",
+                    reason: "must be unique within one Execution Capsule",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 impl CapabilityContract {
     pub fn validate(&self) -> Result<(), ExecutionModelError> {
         validation::bounded(

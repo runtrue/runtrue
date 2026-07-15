@@ -8,6 +8,12 @@ pub const MIN_SEAL_SIGNATURE_BYTES: usize = 32;
 pub const MAX_SEAL_SIGNATURE_BYTES: usize = 16 * 1024;
 pub const MAX_SEAL_LIFETIME_MS: u64 = 365 * 24 * 60 * 60 * 1_000;
 
+/// Algorithm-specific cryptographic verification supplied by the trust
+/// boundary. Structural Seal validation is never an authorization decision.
+pub trait SealSignatureVerifier {
+    fn verify_signature(&self, seal: &Seal, signing_bytes: &[u8]) -> bool;
+}
+
 /// A domain-neutral authorization artifact over one exact ApprovalSubject.
 ///
 /// The Seal is deliberately separate from workflow approvals. Its signing
@@ -79,6 +85,7 @@ impl Seal {
         subject: &ApprovalSubject,
         now_unix_ms: u64,
         current_revocation_generation: u64,
+        verifier: &(impl SealSignatureVerifier + ?Sized),
     ) -> Result<(), ExecutionModelError> {
         self.validate()?;
         subject.validate()?;
@@ -99,6 +106,10 @@ impl Seal {
                 expected: current_revocation_generation,
                 actual: self.revocation_generation,
             });
+        }
+        let signing_bytes = self.signing_bytes()?;
+        if !verifier.verify_signature(self, &signing_bytes) {
+            return Err(ExecutionModelError::InvalidSealSignature);
         }
         Ok(())
     }

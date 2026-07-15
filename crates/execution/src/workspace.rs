@@ -1,5 +1,8 @@
 use crate::ReservationState;
-use crate::{canonical, validation, ContentDigest, ExecutionModelError, SessionReservationLedger};
+use crate::{
+    canonical, validation, ChildReservationRecord, ContentDigest, ExecutionModelError,
+    ReservationTerminalOutcome, ReservationTransitionRequest, SessionReservationLedger,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -26,6 +29,8 @@ pub struct WorkspacePublicationRequest {
     pub output_manifest_digest: ContentDigest,
     pub idempotency_key: String,
     pub session_fence: u64,
+    pub expected_publication_revision: u64,
+    pub expected_reservation_revision: u64,
     pub committed_unix_ms: u64,
 }
 
@@ -85,6 +90,13 @@ pub struct WorkspacePublicationResult {
     pub replayed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizeAndPublishResult {
+    pub reservation: ChildReservationRecord,
+    pub publication: WorkspacePublicationRecord,
+    pub replayed: bool,
+}
+
 /// Generation-fenced publication ledger. Durable callers should transact the
 /// whole value (or enforce the same generation CAS) to preserve first-writer
 /// wins across recursive workers.
@@ -94,6 +106,7 @@ pub struct WorkspacePublicationLedger {
     pub session_id: String,
     pub session_capsule_digest: ContentDigest,
     pub session_fence: u64,
+    pub ledger_revision: u64,
     pub initial_workspace_digest: ContentDigest,
     pub current: WorkspaceGeneration,
     publications: BTreeMap<u64, WorkspacePublicationRecord>,
@@ -116,6 +129,7 @@ impl WorkspacePublicationLedger {
             session_id,
             session_capsule_digest,
             session_fence,
+            ledger_revision: 0,
             initial_workspace_digest: initial_workspace_digest.clone(),
             current: WorkspaceGeneration {
                 generation: 0,
@@ -127,17 +141,41 @@ impl WorkspacePublicationLedger {
         })
     }
 
-    pub fn publish(
+    /// Atomically publish one workspace generation and finalize the successful
+    /// child reservation. There is intentionally no public publish-only path.
+    pub fn finalize_and_publish(
         &mut self,
-        request: WorkspacePublicationRequest,
-        reservations: &SessionReservationLedger,
-    ) -> Result<WorkspacePublicationResult, ExecutionModelError> {
+        reservations: &mut SessionReservationLedger,
+        completion: ReservationTransitionRequest,
+        publication: WorkspacePublicationRequest,
+    ) -> Result<FinalizeAndPublishResult, ExecutionModelError> {
+        if !matches!(
+            completion.outcome,
+            ReservationTerminalOutcome::Finalized { .. }
+        ) || completion.reservation_id != publication.reservation_id
+            || completion.child_execution_id != publication.child_execution_id
+            || completion.session_fence != publication.session_fence
+        {
+            return Err(ExecutionModelError::InvalidReservationTransition);
+        }
         self.validate()?;
         reservations.validate()?;
-        let mut staged = self.clone();
-        let result = staged.publish_staged(request, reservations)?;
-        staged.validate()?;
-        *self = staged;
+        let mut staged_publications = self.clone();
+        let mut staged_reservations = reservations.clone();
+        let published = staged_publications.publish_staged(publication, &staged_reservations)?;
+        let finalized = staged_reservations.transition_staged(completion)?;
+        if published.replayed != finalized.replayed {
+            return Err(ExecutionModelError::AccountingFailure);
+        }
+        staged_publications.validate()?;
+        staged_reservations.validate()?;
+        let result = FinalizeAndPublishResult {
+            reservation: finalized.record,
+            publication: published.record,
+            replayed: published.replayed,
+        };
+        *self = staged_publications;
+        *reservations = staged_reservations;
         Ok(result)
     }
 
@@ -163,6 +201,11 @@ impl WorkspacePublicationLedger {
         }
         if request.session_fence != self.session_fence {
             return Err(ExecutionModelError::StaleSessionFence);
+        }
+        if request.expected_publication_revision != self.ledger_revision
+            || request.expected_reservation_revision != reservations.ledger_revision
+        {
+            return Err(ExecutionModelError::StaleLedgerRevision);
         }
         if request.session_id != self.session_id
             || request.session_capsule_digest != self.session_capsule_digest
@@ -214,6 +257,10 @@ impl WorkspacePublicationLedger {
         self.published_by_child
             .insert(request.child_execution_id, generation);
         self.publications.insert(generation, record.clone());
+        self.ledger_revision = self
+            .ledger_revision
+            .checked_add(1)
+            .ok_or(ExecutionModelError::AccountingFailure)?;
         Ok(WorkspacePublicationResult {
             record,
             replayed: false,
@@ -225,6 +272,9 @@ impl WorkspacePublicationLedger {
     pub fn validate(&self) -> Result<(), ExecutionModelError> {
         validation::identifier("Session identity", &self.session_id)?;
         if self.session_fence == 0
+            || self.ledger_revision
+                != u64::try_from(self.publications.len())
+                    .map_err(|_| ExecutionModelError::AccountingFailure)?
             || self.idempotency.len() != self.publications.len()
             || self.published_by_child.len() != self.publications.len()
         {
@@ -267,4 +317,33 @@ impl WorkspacePublicationLedger {
         }
         Ok(())
     }
+}
+
+/// Durable storage boundary for generation-fenced publication ledgers.
+pub trait WorkspacePublicationLedgerStore {
+    type Error;
+
+    fn load(&self, session_id: &str) -> Result<Option<WorkspacePublicationLedger>, Self::Error>;
+
+    fn compare_and_swap(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        next: &WorkspacePublicationLedger,
+    ) -> Result<bool, Self::Error>;
+}
+
+/// Transaction boundary used by `finalize_and_publish`: both durable ledgers
+/// must advance together or neither may advance.
+pub trait SessionLedgerCommitStore {
+    type Error;
+
+    fn compare_and_swap_both(
+        &self,
+        session_id: &str,
+        expected_reservation_revision: u64,
+        next_reservations: &SessionReservationLedger,
+        expected_publication_revision: u64,
+        next_publications: &WorkspacePublicationLedger,
+    ) -> Result<bool, Self::Error>;
 }

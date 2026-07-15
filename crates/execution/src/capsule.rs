@@ -1,7 +1,8 @@
 use crate::{
     canonical, validation, CapabilityContract, ContentDigest, EvidenceContract,
-    ExecutionModelError, OutputContract, PlacementConstraints, ProgramIdentity, ProgramKind,
-    ResourceLimits, RuntimeCompatibilityProfile, Seal,
+    ExecutionModelError, ExternalEffectContract, NondeterminismContract, OutputContract,
+    PlacementConstraints, ProgramIdentity, ProgramKind, ResourceLimits,
+    RuntimeCompatibilityProfile, Seal, SealSignatureVerifier,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -76,6 +77,7 @@ pub struct DelegationPolicy {
     pub maximum_resources: ResourceLimits,
     pub placement: PlacementConstraints,
     pub capabilities: CapabilityContract,
+    pub nondeterminism: NondeterminismContract,
     pub output: OutputContract,
     pub maximum_child_count: u32,
     pub maximum_concurrency: u32,
@@ -111,6 +113,7 @@ impl DelegationPolicy {
             || !session.maximum_resources.contains(&self.maximum_resources)
             || !session.placement.contains(&self.placement)
             || !session.capabilities.contains(&self.capabilities)
+            || !session.nondeterminism.contains(&self.nondeterminism)
             || !session.output.contains(&self.output)
             || self.maximum_child_count == 0
             || self.maximum_child_count > session.maximum_child_count
@@ -129,6 +132,7 @@ impl DelegationPolicy {
         self.maximum_resources.validate()?;
         self.placement.validate()?;
         self.capabilities.validate()?;
+        self.nondeterminism.validate()?;
         self.output.validate()
     }
 
@@ -162,6 +166,7 @@ pub struct DelegationGrant {
     pub maximum_resources: ResourceLimits,
     pub placement: PlacementConstraints,
     pub capabilities: CapabilityContract,
+    pub nondeterminism: NondeterminismContract,
     pub output: OutputContract,
     pub maximum_child_count: u32,
     pub maximum_concurrency: u32,
@@ -172,6 +177,19 @@ pub struct DelegationGrant {
     pub issued_unix_ms: u64,
     pub expires_unix_ms: u64,
     pub revocation_generation: u64,
+}
+
+/// Complete authority context required to validate a Delegation Grant against
+/// its sealed parent Session. Keeping these values together prevents callers
+/// from accidentally mixing time or revocation observations across admission.
+pub struct DelegationValidationContext<'a, V: SealSignatureVerifier + ?Sized> {
+    pub session: &'a SessionCapsule,
+    pub subject: &'a ApprovalSubject,
+    pub seal: &'a Seal,
+    pub verifier: &'a V,
+    pub now_unix_ms: u64,
+    pub current_seal_revocation_generation: u64,
+    pub current_grant_revocation_generation: u64,
 }
 
 impl DelegationGrant {
@@ -203,21 +221,31 @@ impl DelegationGrant {
         self.maximum_resources.validate()?;
         self.placement.validate()?;
         self.capabilities.validate()?;
+        self.nondeterminism.validate()?;
         self.output.validate()
     }
 
-    pub fn validate_against_parent(
+    pub fn validate_against_parent<V: SealSignatureVerifier + ?Sized>(
         &self,
-        session: &SessionCapsule,
-        subject: &ApprovalSubject,
-        seal: &Seal,
-        now_unix_ms: u64,
-        current_seal_revocation_generation: u64,
-        current_grant_revocation_generation: u64,
+        context: &DelegationValidationContext<'_, V>,
     ) -> Result<(), ExecutionModelError> {
+        let DelegationValidationContext {
+            session,
+            subject,
+            seal,
+            verifier,
+            now_unix_ms,
+            current_seal_revocation_generation,
+            current_grant_revocation_generation,
+        } = context;
         self.validate()?;
         session.validate()?;
-        seal.validate_for_subject(subject, now_unix_ms, current_seal_revocation_generation)?;
+        seal.validate_for_subject(
+            subject,
+            *now_unix_ms,
+            *current_seal_revocation_generation,
+            *verifier,
+        )?;
         if subject.capsule_kind != CapsuleKind::Session
             || subject.capsule_digest != session.digest()?
             || self.parent_session_capsule_digest != subject.capsule_digest
@@ -227,12 +255,12 @@ impl DelegationGrant {
                 field: "sealed parent identity",
             });
         }
-        if now_unix_ms < self.issued_unix_ms || now_unix_ms >= self.expires_unix_ms {
+        if *now_unix_ms < self.issued_unix_ms || *now_unix_ms >= self.expires_unix_ms {
             return Err(ExecutionModelError::ContainmentViolation {
                 field: "delegation lifetime",
             });
         }
-        if self.revocation_generation != current_grant_revocation_generation {
+        if self.revocation_generation != *current_grant_revocation_generation {
             return Err(ExecutionModelError::ContainmentViolation {
                 field: "delegation revocation generation",
             });
@@ -257,6 +285,7 @@ impl DelegationGrant {
             || !policy.maximum_resources.contains(&self.maximum_resources)
             || !policy.placement.contains(&self.placement)
             || !policy.capabilities.contains(&self.capabilities)
+            || !policy.nondeterminism.contains(&self.nondeterminism)
             || !policy.output.contains(&self.output)
             || self.maximum_child_count > policy.maximum_child_count
             || self.maximum_concurrency > policy.maximum_concurrency
@@ -315,6 +344,10 @@ impl DelegationGrant {
                 self.capabilities.contains(&child.capabilities),
                 "capabilities",
             ),
+            (
+                self.nondeterminism.contains(&child.nondeterminism),
+                "nondeterminism",
+            ),
             (self.output.contains(&child.output), "output classes"),
         ];
         if let Some((_, field)) = checks.into_iter().find(|(allowed, _)| !allowed) {
@@ -350,6 +383,8 @@ pub struct ExecutionCapsule {
     pub placement: PlacementConstraints,
     pub resources: ResourceLimits,
     pub capabilities: CapabilityContract,
+    pub nondeterminism: NondeterminismContract,
+    pub external_effects: ExternalEffectContract,
     pub output: OutputContract,
     pub evidence: EvidenceContract,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -389,6 +424,8 @@ impl ExecutionCapsule {
         self.placement.validate()?;
         self.resources.validate()?;
         self.capabilities.validate()?;
+        self.nondeterminism.validate()?;
+        self.external_effects.validate_against(&self.capabilities)?;
         self.output.validate()?;
         self.evidence.validate()?;
         if let Some(parent) = &self.parent {
@@ -435,6 +472,7 @@ pub struct SessionCapsule {
     pub placement: PlacementConstraints,
     pub maximum_resources: ResourceLimits,
     pub capabilities: CapabilityContract,
+    pub nondeterminism: NondeterminismContract,
     pub output: OutputContract,
     pub evidence: EvidenceContract,
     pub idle_timeout_ms: u64,
@@ -468,6 +506,7 @@ impl SessionCapsule {
         self.placement.validate()?;
         self.maximum_resources.validate()?;
         self.capabilities.validate()?;
+        self.nondeterminism.validate()?;
         self.output.validate()?;
         self.evidence.validate()?;
         if self.idle_timeout_ms == 0

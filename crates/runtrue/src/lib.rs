@@ -6,7 +6,10 @@
 
 /// Immutable Programs and their canonical identity.
 pub mod program {
-    pub use runtrue_execution::{ProgramIdentity, ProgramKind, PROGRAM_IDENTITY_SCHEMA_VERSION};
+    pub use runtrue_execution::{
+        ProgramIdentity, ProgramKind, ProgramPlatform, ProgramSignatureIdentity,
+        PROGRAM_IDENTITY_SCHEMA_VERSION,
+    };
 }
 
 /// Exact runtime compatibility contracts.
@@ -20,16 +23,19 @@ pub mod runtime {
 /// Immutable Execution and Session Capsules.
 pub mod capsule {
     pub use runtrue_execution::{
-        ApprovalSubject, CapsuleKind, DelegationGrant, DelegationPolicy, ExecutionCapsule,
-        ParentBinding, SessionCapsule, EXECUTION_CAPSULE_SCHEMA_VERSION,
+        ApprovalSubject, CapsuleKind, DelegationGrant, DelegationPolicy,
+        DelegationValidationContext, ExecutionCapsule, ExternalEffectContract,
+        ExternalEffectDeclaration, NondeterminismContract, NondeterministicInputClass,
+        NondeterministicInputGrant, ParentBinding, SessionCapsule,
+        EXECUTION_CAPSULE_SCHEMA_VERSION,
     };
 }
 
 /// Exact-subject Capsule approval evidence.
 pub mod seal {
     pub use runtrue_execution::{
-        Seal, MAX_SEAL_LIFETIME_MS, MAX_SEAL_SIGNATURE_BYTES, MIN_SEAL_SIGNATURE_BYTES,
-        SEAL_SCHEMA_VERSION,
+        Seal, SealSignatureVerifier, MAX_SEAL_LIFETIME_MS, MAX_SEAL_SIGNATURE_BYTES,
+        MIN_SEAL_SIGNATURE_BYTES, SEAL_SCHEMA_VERSION,
     };
 }
 
@@ -43,12 +49,13 @@ pub mod lifecycle {
 /// Durable Session child reservation and workspace publication primitives.
 pub mod session {
     pub use runtrue_execution::{
-        ChildReservationRecord, ChildReservationRequest, ChildResourceReservation,
-        ReservationResult, ReservationState, ReservationTerminalOutcome,
-        ReservationTransitionRequest, SessionReservationLedger, WorkspaceGeneration,
-        WorkspacePublicationLedger, WorkspacePublicationRecord, WorkspacePublicationRequest,
-        WorkspacePublicationResult, SESSION_RESERVATION_SCHEMA_VERSION,
-        WORKSPACE_PUBLICATION_SCHEMA_VERSION,
+        CapabilityUsage, ChildAdmissionRequest, ChildReservationRecord, ChildReservationRequest,
+        ChildResourceReservation, FinalizeAndPublishResult, ReservationResult, ReservationState,
+        ReservationTerminalOutcome, ReservationTransitionRequest, SessionLedgerCommitStore,
+        SessionReservationLedger, SessionReservationLedgerStore, WorkspaceGeneration,
+        WorkspacePublicationLedger, WorkspacePublicationLedgerStore, WorkspacePublicationRecord,
+        WorkspacePublicationRequest, WorkspacePublicationResult,
+        SESSION_RESERVATION_SCHEMA_VERSION, WORKSPACE_PUBLICATION_SCHEMA_VERSION,
     };
 }
 
@@ -82,6 +89,7 @@ pub mod evidence {
 
 /// Write-ahead external-effect contracts.
 pub mod effects {
+    pub use runtrue_execution::{ExternalEffectContract, ExternalEffectDeclaration};
     pub use runtrue_provider_contract::{
         verify_external_effect_chain, ExternalEffectIdentity, ExternalEffectJournal,
         ExternalEffectReconciliation, ExternalEffectState, ExternalEffectTransition,
@@ -175,5 +183,27 @@ mod tests {
         let type_name = std::any::type_name::<provider::AdmissionRequest>();
         assert!(!type_name.contains("github"));
         assert!(!type_name.contains("workflow"));
+    }
+
+    #[test]
+    fn canonical_execution_kernel_additions_are_reachable_through_the_facade() {
+        fn assert_type<T>() {}
+        fn assert_trait<T: ?Sized>() {}
+
+        assert_type::<program::ProgramPlatform>();
+        assert_type::<program::ProgramSignatureIdentity>();
+        assert_type::<capsule::DelegationValidationContext<'_, dyn seal::SealSignatureVerifier>>();
+        assert_type::<capsule::NondeterminismContract>();
+        assert_type::<capsule::NondeterministicInputClass>();
+        assert_type::<capsule::NondeterministicInputGrant>();
+        assert_type::<effects::ExternalEffectContract>();
+        assert_type::<effects::ExternalEffectDeclaration>();
+        assert_type::<session::CapabilityUsage>();
+        assert_type::<session::ChildAdmissionRequest>();
+        assert_type::<session::FinalizeAndPublishResult>();
+        assert_trait::<dyn seal::SealSignatureVerifier>();
+        assert_trait::<dyn session::SessionReservationLedgerStore<Error = ()>>();
+        assert_trait::<dyn session::WorkspacePublicationLedgerStore<Error = ()>>();
+        assert_trait::<dyn session::SessionLedgerCommitStore<Error = ()>>();
     }
 }

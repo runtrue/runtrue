@@ -1,4 +1,8 @@
-use crate::{canonical, validation, ContentDigest, ExecutionModelError, SessionCapsule};
+use crate::{
+    canonical, validation, ApprovalSubject, ContentDigest, DelegationGrant,
+    DelegationValidationContext, ExecutionCapsule, ExecutionModelError, Seal,
+    SealSignatureVerifier, SessionCapsule,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -134,6 +138,107 @@ impl ChildResourceReservation {
             external_effect_count: budget.maximum_external_effects,
         }
     }
+
+    #[must_use]
+    pub const fn capability_usage(&self) -> CapabilityUsage {
+        CapabilityUsage {
+            capability_calls: self.capability_calls,
+            capability_request_bytes: self.capability_request_bytes,
+            capability_response_bytes: self.capability_response_bytes,
+            external_effect_count: self.external_effect_count,
+        }
+    }
+
+    #[must_use]
+    pub const fn contains_usage(&self, usage: &CapabilityUsage) -> bool {
+        usage.capability_calls <= self.capability_calls
+            && usage.capability_request_bytes <= self.capability_request_bytes
+            && usage.capability_response_bytes <= self.capability_response_bytes
+            && usage.external_effect_count <= self.external_effect_count
+    }
+
+    pub fn from_child(child: &ExecutionCapsule) -> Self {
+        let budget = &child.capabilities.aggregate_budget;
+        Self {
+            cpu_millis: u64::from(child.resources.cpu_millis),
+            memory_bytes: child.resources.memory_bytes,
+            storage_bytes: child.resources.storage_bytes,
+            task_count: u64::from(child.resources.task_count),
+            capability_calls: budget.maximum_calls,
+            capability_request_bytes: budget.maximum_request_bytes,
+            capability_response_bytes: budget.maximum_response_bytes,
+            external_effect_count: budget.maximum_external_effects,
+        }
+    }
+}
+
+/// Irreversible capability and external-effect use charged to the Session's
+/// lifetime budget. Unlike concurrent compute reservations, this is never
+/// recycled when a child becomes terminal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityUsage {
+    pub capability_calls: u64,
+    pub capability_request_bytes: u64,
+    pub capability_response_bytes: u64,
+    pub external_effect_count: u64,
+}
+
+impl CapabilityUsage {
+    fn checked_add(self, other: Self) -> Result<Self, ExecutionModelError> {
+        Ok(Self {
+            capability_calls: self
+                .capability_calls
+                .checked_add(other.capability_calls)
+                .ok_or(ExecutionModelError::AccountingFailure)?,
+            capability_request_bytes: self
+                .capability_request_bytes
+                .checked_add(other.capability_request_bytes)
+                .ok_or(ExecutionModelError::AccountingFailure)?,
+            capability_response_bytes: self
+                .capability_response_bytes
+                .checked_add(other.capability_response_bytes)
+                .ok_or(ExecutionModelError::AccountingFailure)?,
+            external_effect_count: self
+                .external_effect_count
+                .checked_add(other.external_effect_count)
+                .ok_or(ExecutionModelError::AccountingFailure)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildAdmissionRequest {
+    pub schema_version: u32,
+    pub reservation_id: String,
+    pub session_id: String,
+    pub child_execution_id: String,
+    pub idempotency_key: String,
+    pub session_fence: u64,
+    pub expected_ledger_revision: u64,
+    pub created_unix_ms: u64,
+}
+
+impl ChildAdmissionRequest {
+    pub fn validate(&self) -> Result<(), ExecutionModelError> {
+        validation::schema(
+            "child admission schema version",
+            self.schema_version,
+            SESSION_RESERVATION_SCHEMA_VERSION,
+        )?;
+        validation::identifier("reservation identity", &self.reservation_id)?;
+        validation::identifier("Session identity", &self.session_id)?;
+        validation::identifier("child Execution identity", &self.child_execution_id)?;
+        validation::identifier("child admission idempotency key", &self.idempotency_key)?;
+        if self.session_fence == 0 || self.created_unix_ms == 0 {
+            return Err(ExecutionModelError::InvalidField {
+                field: "child admission fence or creation time",
+                reason: "must be greater than zero",
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +252,7 @@ pub struct ChildReservationRequest {
     pub child_capsule_digest: ContentDigest,
     pub idempotency_key: String,
     pub session_fence: u64,
+    pub expected_ledger_revision: u64,
     pub resources: ChildResourceReservation,
     pub created_unix_ms: u64,
 }
@@ -205,7 +311,9 @@ pub struct ReservationTransitionRequest {
     pub child_execution_id: String,
     pub idempotency_key: String,
     pub session_fence: u64,
+    pub expected_ledger_revision: u64,
     pub outcome: ReservationTerminalOutcome,
+    pub actual_usage: CapabilityUsage,
     pub observed_unix_ms: u64,
 }
 
@@ -269,8 +377,10 @@ pub struct SessionReservationLedger {
     pub session_id: String,
     pub session_capsule_digest: ContentDigest,
     pub session_fence: u64,
+    pub ledger_revision: u64,
     pub limits: ChildResourceReservation,
     pub allocated: ChildResourceReservation,
+    pub cumulative_usage: CapabilityUsage,
     pub maximum_concurrency: u32,
     pub maximum_child_count: u32,
     pub active_concurrency: u32,
@@ -297,8 +407,10 @@ impl SessionReservationLedger {
             session_id,
             session_capsule_digest: session.digest()?,
             session_fence,
+            ledger_revision: 0,
             limits: ChildResourceReservation::from_session(session),
             allocated: ChildResourceReservation::default(),
+            cumulative_usage: CapabilityUsage::default(),
             maximum_concurrency: session.maximum_concurrency,
             maximum_child_count: session.maximum_child_count,
             active_concurrency: 0,
@@ -311,16 +423,85 @@ impl SessionReservationLedger {
         })
     }
 
-    pub fn reserve(
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_child(
         &mut self,
-        request: ChildReservationRequest,
+        request: ChildAdmissionRequest,
+        session: &SessionCapsule,
+        subject: &ApprovalSubject,
+        seal: &Seal,
+        verifier: &impl SealSignatureVerifier,
+        grant: &DelegationGrant,
+        child: &ExecutionCapsule,
+        now_unix_ms: u64,
+        current_policy_digest: &ContentDigest,
+        current_seal_revocation_generation: u64,
+        current_grant_revocation_generation: u64,
     ) -> Result<ReservationResult, ExecutionModelError> {
+        request.validate()?;
         self.validate()?;
+        session.validate()?;
+        child.validate()?;
+        let child_capsule_digest = child.digest()?;
+        let derived = ChildReservationRequest {
+            schema_version: request.schema_version,
+            reservation_id: request.reservation_id,
+            session_id: request.session_id,
+            session_capsule_digest: session.digest()?,
+            child_execution_id: request.child_execution_id,
+            child_capsule_digest,
+            idempotency_key: request.idempotency_key,
+            session_fence: request.session_fence,
+            expected_ledger_revision: request.expected_ledger_revision,
+            resources: ChildResourceReservation::from_child(child),
+            created_unix_ms: request.created_unix_ms,
+        };
         let mut staged = self.clone();
-        let result = staged.reserve_staged(request)?;
+        if let Some(result) = staged.exact_reservation_replay(&derived)? {
+            return Ok(result);
+        }
+        if derived.session_id != self.session_id
+            || derived.session_capsule_digest != self.session_capsule_digest
+            || derived.session_fence != self.session_fence
+            || child.tenant_id != session.tenant_id
+            || subject.policy_digest != *current_policy_digest
+        {
+            return Err(ExecutionModelError::ReservationIdentityConflict);
+        }
+        grant.validate_against_parent(&DelegationValidationContext {
+            session,
+            subject,
+            seal,
+            verifier,
+            now_unix_ms,
+            current_seal_revocation_generation,
+            current_grant_revocation_generation,
+        })?;
+        grant.contains_child(child)?;
+        let result = staged.reserve_staged(derived)?;
         staged.validate()?;
         *self = staged;
         Ok(result)
+    }
+
+    fn exact_reservation_replay(
+        &self,
+        request: &ChildReservationRequest,
+    ) -> Result<Option<ReservationResult>, ExecutionModelError> {
+        let Some(reservation_id) = self.reserve_idempotency.get(&request.idempotency_key) else {
+            return Ok(None);
+        };
+        let record = self
+            .reservations
+            .get(reservation_id)
+            .ok_or(ExecutionModelError::AccountingFailure)?;
+        if record.request_digest != request.digest()? {
+            return Err(ExecutionModelError::IdempotencyConflict);
+        }
+        Ok(Some(ReservationResult {
+            record: record.clone(),
+            replayed: true,
+        }))
     }
 
     fn reserve_staged(
@@ -329,21 +510,14 @@ impl SessionReservationLedger {
     ) -> Result<ReservationResult, ExecutionModelError> {
         request.validate()?;
         let request_digest = request.digest()?;
-        if let Some(reservation_id) = self.reserve_idempotency.get(&request.idempotency_key) {
-            let record = self
-                .reservations
-                .get(reservation_id)
-                .ok_or(ExecutionModelError::AccountingFailure)?;
-            if record.request_digest == request_digest {
-                return Ok(ReservationResult {
-                    record: record.clone(),
-                    replayed: true,
-                });
-            }
-            return Err(ExecutionModelError::IdempotencyConflict);
+        if let Some(result) = self.exact_reservation_replay(&request)? {
+            return Ok(result);
         }
         if request.session_fence != self.session_fence {
             return Err(ExecutionModelError::StaleSessionFence);
+        }
+        if request.expected_ledger_revision != self.ledger_revision {
+            return Err(ExecutionModelError::StaleLedgerRevision);
         }
         if request.session_id != self.session_id
             || request.session_capsule_digest != self.session_capsule_digest
@@ -355,7 +529,11 @@ impl SessionReservationLedger {
             return Err(ExecutionModelError::ReservationIdentityConflict);
         }
         let allocated = self.allocated.checked_add(request.resources)?;
+        let committed_and_reserved = self
+            .cumulative_usage
+            .checked_add(allocated.capability_usage())?;
         if !self.limits.contains(&allocated)
+            || !self.limits.contains_usage(&committed_and_reserved)
             || self.active_concurrency >= self.maximum_concurrency
             || self.admitted_child_count >= self.maximum_child_count
         {
@@ -373,6 +551,10 @@ impl SessionReservationLedger {
             .admitted_child_count
             .checked_add(1)
             .ok_or(ExecutionModelError::AccountingFailure)?;
+        let next_revision = self
+            .ledger_revision
+            .checked_add(1)
+            .ok_or(ExecutionModelError::AccountingFailure)?;
         let record = ChildReservationRecord {
             request: request.clone(),
             request_digest,
@@ -386,6 +568,7 @@ impl SessionReservationLedger {
         self.active_concurrency = next_active;
         self.admitted_child_count = next_admitted;
         self.next_generation = next_generation;
+        self.ledger_revision = next_revision;
         self.child_reservations.insert(
             request.child_execution_id.clone(),
             request.reservation_id.clone(),
@@ -402,10 +585,13 @@ impl SessionReservationLedger {
         })
     }
 
-    pub fn transition(
+    pub fn release(
         &mut self,
         request: ReservationTransitionRequest,
     ) -> Result<ReservationResult, ExecutionModelError> {
+        if !matches!(request.outcome, ReservationTerminalOutcome::Released { .. }) {
+            return Err(ExecutionModelError::InvalidReservationTransition);
+        }
         self.validate()?;
         let mut staged = self.clone();
         let result = staged.transition_staged(request)?;
@@ -414,7 +600,7 @@ impl SessionReservationLedger {
         Ok(result)
     }
 
-    fn transition_staged(
+    pub(crate) fn transition_staged(
         &mut self,
         request: ReservationTransitionRequest,
     ) -> Result<ReservationResult, ExecutionModelError> {
@@ -438,6 +624,9 @@ impl SessionReservationLedger {
         if request.session_fence != self.session_fence {
             return Err(ExecutionModelError::StaleSessionFence);
         }
+        if request.expected_ledger_revision != self.ledger_revision {
+            return Err(ExecutionModelError::StaleLedgerRevision);
+        }
         let record = self
             .reservations
             .get(&request.reservation_id)
@@ -449,6 +638,14 @@ impl SessionReservationLedger {
             return Err(ExecutionModelError::InvalidReservationTransition);
         }
         let allocated = self.allocated.checked_sub(record.request.resources)?;
+        if !record
+            .request
+            .resources
+            .contains_usage(&request.actual_usage)
+        {
+            return Err(ExecutionModelError::AccountingFailure);
+        }
+        let cumulative_usage = self.cumulative_usage.checked_add(request.actual_usage)?;
         let active = self
             .active_concurrency
             .checked_sub(1)
@@ -467,11 +664,16 @@ impl SessionReservationLedger {
         record.terminal_outcome = Some(request.outcome.clone());
         let result = record.clone();
         self.allocated = allocated;
+        self.cumulative_usage = cumulative_usage;
         self.active_concurrency = active;
         self.transition_idempotency.insert(
             request.idempotency_key,
             (request.reservation_id, request_digest),
         );
+        self.ledger_revision = self
+            .ledger_revision
+            .checked_add(1)
+            .ok_or(ExecutionModelError::AccountingFailure)?;
         Ok(ReservationResult {
             record: result,
             replayed: false,
@@ -497,6 +699,7 @@ impl SessionReservationLedger {
             return Err(ExecutionModelError::AccountingFailure);
         }
         let mut reconstructed = ChildResourceReservation::default();
+        let mut reconstructed_usage = CapabilityUsage::default();
         let mut active = 0_u32;
         let mut max_generation = 0_u64;
         let mut terminal_count = 0_usize;
@@ -546,6 +749,14 @@ impl SessionReservationLedger {
                         ReservationTerminalOutcome::Released { .. } => ReservationState::Released,
                         ReservationTerminalOutcome::Finalized { .. } => ReservationState::Finalized,
                     };
+                    if !record
+                        .request
+                        .resources
+                        .contains_usage(&terminal.actual_usage)
+                    {
+                        return Err(ExecutionModelError::AccountingFailure);
+                    }
+                    reconstructed_usage = reconstructed_usage.checked_add(terminal.actual_usage)?;
                     if terminal.reservation_id != *reservation_id
                         || terminal.child_execution_id != record.request.child_execution_id
                         || terminal.session_fence != self.session_fence
@@ -565,19 +776,46 @@ impl SessionReservationLedger {
         let expected_next = max_generation
             .checked_add(1)
             .ok_or(ExecutionModelError::AccountingFailure)?;
+        let expected_revision = u64::try_from(self.reservations.len())
+            .ok()
+            .and_then(|count| count.checked_add(u64::try_from(terminal_count).ok()?))
+            .ok_or(ExecutionModelError::AccountingFailure)?;
         if self.child_reservations.len() != self.reservations.len()
             || self.reserve_idempotency.len() != self.reservations.len()
             || self.transition_idempotency.len() != terminal_count
             || self.allocated != reconstructed
+            || self.cumulative_usage != reconstructed_usage
             || !self.limits.contains(&self.allocated)
+            || !self.limits.contains_usage(
+                &self
+                    .cumulative_usage
+                    .checked_add(self.allocated.capability_usage())?,
+            )
             || self.active_concurrency != active
             || self.active_concurrency > self.maximum_concurrency
             || self.admitted_child_count != admitted
             || self.admitted_child_count > self.maximum_child_count
             || self.next_generation != expected_next
+            || self.ledger_revision != expected_revision
         {
             return Err(ExecutionModelError::AccountingFailure);
         }
         Ok(())
     }
+}
+
+/// Durable storage boundary for reservation ledgers. Implementations must
+/// atomically compare `expected_revision` and publish the complete validated
+/// next value; `false` is a stale writer, never a retryable partial commit.
+pub trait SessionReservationLedgerStore {
+    type Error;
+
+    fn load(&self, session_id: &str) -> Result<Option<SessionReservationLedger>, Self::Error>;
+
+    fn compare_and_swap(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        next: &SessionReservationLedger,
+    ) -> Result<bool, Self::Error>;
 }

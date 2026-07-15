@@ -1,5 +1,8 @@
-use crate::{canonical, validation, ContentDigest, ExecutionModelError};
+use crate::{
+    canonical, validation, Architecture, ContentDigest, ExecutionModelError, OperatingSystem,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const PROGRAM_IDENTITY_SCHEMA_VERSION: u32 = 1;
 
@@ -15,6 +18,30 @@ pub enum ProgramKind {
     FilesystemTree,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramSignatureIdentity {
+    pub signer_identity: String,
+    pub signature_algorithm: String,
+    pub signing_key_id: ContentDigest,
+    pub signature_digest: ContentDigest,
+    pub provenance_digest: ContentDigest,
+}
+
+impl ProgramSignatureIdentity {
+    fn validate(&self) -> Result<(), ExecutionModelError> {
+        validation::identifier("Program signer identity", &self.signer_identity)?;
+        validation::identifier("Program signature algorithm", &self.signature_algorithm)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramPlatform {
+    pub operating_system: OperatingSystem,
+    pub architecture: Architecture,
+}
+
 /// Canonical identity of executable input, independent of an integration's
 /// repository, action, job, or agent terminology.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +53,11 @@ pub struct ProgramIdentity {
     pub resolver_digest: ContentDigest,
     pub media_type: String,
     pub entrypoint: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<ProgramSignatureIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<ProgramPlatform>,
+    pub compatibility_metadata: BTreeMap<String, ContentDigest>,
 }
 
 impl ProgramIdentity {
@@ -55,6 +87,35 @@ impl ProgramIdentity {
         }
         for value in &self.entrypoint {
             validation::argument("Program entrypoint value", value)?;
+        }
+        validation::bounded(
+            "Program compatibility metadata",
+            self.compatibility_metadata.len(),
+            validation::MAX_COLLECTION_ENTRIES,
+        )?;
+        for key in self.compatibility_metadata.keys() {
+            validation::identifier("Program compatibility metadata key", key)?;
+        }
+        if let Some(signature) = &self.signature {
+            signature.validate()?;
+        }
+        let signed_executable = matches!(
+            self.kind,
+            ProgramKind::WasmComponent | ProgramKind::OciImage | ProgramKind::NativeExecutable
+        );
+        let platform_required = matches!(
+            self.kind,
+            ProgramKind::OciImage | ProgramKind::NativeExecutable
+        );
+        if (signed_executable
+            && (self.signature.is_none() || self.compatibility_metadata.is_empty()))
+            || platform_required != self.platform.is_some()
+            || (self.kind == ProgramKind::WasmComponent && self.platform.is_some())
+        {
+            return Err(ExecutionModelError::InvalidField {
+                field: "Program signature, platform, or compatibility metadata",
+                reason: "must match the exact resolved Program kind",
+            });
         }
         Ok(())
     }

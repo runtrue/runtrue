@@ -24,6 +24,8 @@ pub enum ExecutionModelError {
     SealExpired,
     #[error("Seal revocation generation {actual} does not match current generation {expected}")]
     SealRevoked { expected: u64, actual: u64 },
+    #[error("Seal signature cryptographic verification failed")]
+    InvalidSealSignature,
     #[error("delegated child violates containment for {field}")]
     ContainmentViolation { field: &'static str },
     #[error("idempotency key was already used for different canonical content")]
@@ -38,6 +40,8 @@ pub enum ExecutionModelError {
     InvalidReservationTransition,
     #[error("Session fence is stale")]
     StaleSessionFence,
+    #[error("durable ledger revision is stale")]
+    StaleLedgerRevision,
     #[error("workspace generation has already advanced")]
     WorkspaceGenerationConflict,
     #[error("workspace publication requires an active matching reservation")]

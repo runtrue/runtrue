@@ -17,20 +17,26 @@ mod validation;
 mod workspace;
 
 pub use capsule::{
-    ApprovalSubject, CapsuleKind, DelegationGrant, DelegationPolicy, ExecutionCapsule,
-    ParentBinding, SessionCapsule, EXECUTION_CAPSULE_SCHEMA_VERSION,
+    ApprovalSubject, CapsuleKind, DelegationGrant, DelegationPolicy, DelegationValidationContext,
+    ExecutionCapsule, ParentBinding, SessionCapsule, EXECUTION_CAPSULE_SCHEMA_VERSION,
 };
 pub use contracts::{
     CapabilityBudget, CapabilityContract, CapabilityGrant, DeviceRequirement, EvidenceContract,
-    EvidenceProfile, OutputContract, PlacementConstraints, ResourceLimits,
+    EvidenceProfile, ExternalEffectContract, ExternalEffectDeclaration, NondeterminismContract,
+    NondeterministicInputClass, NondeterministicInputGrant, OutputContract, PlacementConstraints,
+    ResourceLimits,
 };
 pub use error::ExecutionModelError;
 pub use lifecycle::{ExecutionState, FailureClass, SessionState, TerminalCause, TerminalDecision};
-pub use program::{ProgramIdentity, ProgramKind, PROGRAM_IDENTITY_SCHEMA_VERSION};
+pub use program::{
+    ProgramIdentity, ProgramKind, ProgramPlatform, ProgramSignatureIdentity,
+    PROGRAM_IDENTITY_SCHEMA_VERSION,
+};
 pub use reservation::{
-    ChildReservationRecord, ChildReservationRequest, ChildResourceReservation, ReservationResult,
-    ReservationState, ReservationTerminalOutcome, ReservationTransitionRequest,
-    SessionReservationLedger, SESSION_RESERVATION_SCHEMA_VERSION,
+    CapabilityUsage, ChildAdmissionRequest, ChildReservationRecord, ChildReservationRequest,
+    ChildResourceReservation, ReservationResult, ReservationState, ReservationTerminalOutcome,
+    ReservationTransitionRequest, SessionReservationLedger, SessionReservationLedgerStore,
+    SESSION_RESERVATION_SCHEMA_VERSION,
 };
 pub use runtime::{
     Architecture, OperatingSystem, RuntimeCompatibilityProfile, RuntimeComponents, RuntimeFamily,
@@ -38,10 +44,11 @@ pub use runtime::{
 };
 pub use runtrue_model::ContentDigest;
 pub use seal::{
-    Seal, MAX_SEAL_LIFETIME_MS, MAX_SEAL_SIGNATURE_BYTES, MIN_SEAL_SIGNATURE_BYTES,
-    SEAL_SCHEMA_VERSION,
+    Seal, SealSignatureVerifier, MAX_SEAL_LIFETIME_MS, MAX_SEAL_SIGNATURE_BYTES,
+    MIN_SEAL_SIGNATURE_BYTES, SEAL_SCHEMA_VERSION,
 };
 pub use workspace::{
-    WorkspaceGeneration, WorkspacePublicationLedger, WorkspacePublicationRecord,
+    FinalizeAndPublishResult, SessionLedgerCommitStore, WorkspaceGeneration,
+    WorkspacePublicationLedger, WorkspacePublicationLedgerStore, WorkspacePublicationRecord,
     WorkspacePublicationRequest, WorkspacePublicationResult, WORKSPACE_PUBLICATION_SCHEMA_VERSION,
 };

@@ -1,15 +1,17 @@
 use runtrue_execution::{
     ApprovalSubject, Architecture, CapabilityBudget, CapabilityContract, CapabilityGrant,
-    CapsuleKind, ChildReservationRequest, ChildResourceReservation, ContentDigest, DelegationGrant,
-    DelegationPolicy, EvidenceContract, EvidenceProfile, ExecutionCapsule, ExecutionModelError,
-    ExecutionState, FailureClass, OperatingSystem, OutputContract, ParentBinding,
-    PlacementConstraints, ProgramIdentity, ProgramKind, ReservationState,
-    ReservationTerminalOutcome, ReservationTransitionRequest, ResourceLimits,
+    CapabilityUsage, CapsuleKind, ChildAdmissionRequest, ChildResourceReservation, ContentDigest,
+    DelegationGrant, DelegationPolicy, DelegationValidationContext, EvidenceContract,
+    EvidenceProfile, ExecutionCapsule, ExecutionModelError, ExecutionState, ExternalEffectContract,
+    ExternalEffectDeclaration, FailureClass, NondeterminismContract, NondeterministicInputClass,
+    NondeterministicInputGrant, OperatingSystem, OutputContract, ParentBinding,
+    PlacementConstraints, ProgramIdentity, ProgramKind, ProgramPlatform, ProgramSignatureIdentity,
+    ReservationState, ReservationTerminalOutcome, ReservationTransitionRequest, ResourceLimits,
     RuntimeCompatibilityProfile, RuntimeComponents, RuntimeFamily, RuntimePlatform, Seal,
-    SessionCapsule, SessionReservationLedger, SessionState, TerminalCause, TerminalDecision,
-    WorkspacePublicationLedger, WorkspacePublicationRequest, EXECUTION_CAPSULE_SCHEMA_VERSION,
-    MAX_SEAL_LIFETIME_MS, PROGRAM_IDENTITY_SCHEMA_VERSION, RUNTIME_PROFILE_SCHEMA_VERSION,
-    SEAL_SCHEMA_VERSION,
+    SealSignatureVerifier, SessionCapsule, SessionReservationLedger, SessionState, TerminalCause,
+    TerminalDecision, WorkspacePublicationLedger, WorkspacePublicationRequest,
+    EXECUTION_CAPSULE_SCHEMA_VERSION, MAX_SEAL_LIFETIME_MS, PROGRAM_IDENTITY_SCHEMA_VERSION,
+    RUNTIME_PROFILE_SCHEMA_VERSION, SEAL_SCHEMA_VERSION,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -141,6 +143,17 @@ fn execution() -> ExecutionCapsule {
             resolver_digest: digest("resolver"),
             media_type: "application/wasm".to_owned(),
             entrypoint: vec!["run".to_owned()],
+            signature: Some(ProgramSignatureIdentity {
+                signer_identity: "program-signer".to_owned(),
+                signature_algorithm: "ed25519-v1".to_owned(),
+                signing_key_id: digest("program-signing-key"),
+                signature_digest: digest("program-signature"),
+                provenance_digest: digest("program-provenance"),
+            }),
+            platform: None,
+            compatibility_metadata: [("component-model".to_owned(), digest("component-model-v1"))]
+                .into_iter()
+                .collect(),
         },
         arguments: vec!["--locked".to_owned()],
         working_directory: Some("workspace".to_owned()),
@@ -149,6 +162,8 @@ fn execution() -> ExecutionCapsule {
         placement: placement(),
         resources: resources(),
         capabilities: capabilities(),
+        nondeterminism: NondeterminismContract::default(),
+        external_effects: ExternalEffectContract::default(),
         output: output(),
         evidence: evidence(),
         parent: Some(ParentBinding {
@@ -177,6 +192,7 @@ fn session() -> SessionCapsule {
         placement: placement(),
         maximum_resources: maximum_resources.clone(),
         capabilities: capabilities(),
+        nondeterminism: NondeterminismContract::default(),
         output: output(),
         evidence: evidence(),
         idle_timeout_ms: 60_000,
@@ -194,6 +210,7 @@ fn session() -> SessionCapsule {
                 maximum_resources,
                 placement: placement(),
                 capabilities: capabilities(),
+                nondeterminism: NondeterminismContract::default(),
                 output: output(),
                 maximum_child_count: 100,
                 maximum_concurrency: 4,
@@ -209,7 +226,7 @@ fn session() -> SessionCapsule {
 }
 
 fn seal(subject: &ApprovalSubject) -> Seal {
-    Seal {
+    let mut seal = Seal {
         schema_version: SEAL_SCHEMA_VERSION,
         approval_subject_digest: subject.digest().unwrap(),
         capsule_kind: subject.capsule_kind,
@@ -221,7 +238,20 @@ fn seal(subject: &ApprovalSubject) -> Seal {
         revocation_generation: 7,
         signature_algorithm: "ed25519-v1".to_owned(),
         signing_key_id: digest("seal-signing-key"),
-        signature: vec![0x5a; 64],
+        signature: vec![0; 32],
+    };
+    seal.signature = ContentDigest::sha256(seal.signing_bytes().unwrap())
+        .as_str()
+        .as_bytes()
+        .to_vec();
+    seal
+}
+
+struct TestSealVerifier;
+
+impl SealSignatureVerifier for TestSealVerifier {
+    fn verify_signature(&self, seal: &Seal, signing_bytes: &[u8]) -> bool {
+        seal.signature == ContentDigest::sha256(signing_bytes).as_str().as_bytes()
     }
 }
 
@@ -231,7 +261,7 @@ fn golden_execution_capsule_is_canonical_and_stable() {
     let bytes = capsule.canonical_bytes().unwrap();
     assert_eq!(
         capsule.digest().unwrap().to_string(),
-        "sha256:0fee61599b1bf144e1fcde248da3e35b0f9d50648e1f06df4cef15d9867bfdab"
+        "sha256:0ccf08a17b9bb6a7f7b49f966b6ade63d155a63eb8679c60448c3f466c4a7ab2"
     );
     let decoded: ExecutionCapsule = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(decoded.canonical_bytes().unwrap(), bytes);
@@ -242,7 +272,7 @@ fn golden_session_capsule_and_approval_subject_are_distinct() {
     let capsule = session();
     assert_eq!(
         capsule.digest().unwrap().to_string(),
-        "sha256:e2b4e11721131dc7a967fe746f68eff0d17d9e51a4a1591798825969765e34c8"
+        "sha256:badc27069a095014214e749adf998ea4a751ce5a9be314551b310d7b18c1e02c"
     );
     let subject = capsule
         .approval_subject(digest("policy"), digest("authority"))
@@ -360,6 +390,86 @@ fn exact_argument_contract_preserves_empty_and_multiline_values_but_rejects_nul(
     assert!(capsule.validate().is_ok());
     capsule.arguments.push("bad\0argument".to_owned());
     assert!(capsule.validate().is_err());
+}
+
+#[test]
+fn resolved_executable_programs_require_signature_platform_and_compatibility_identity() {
+    let wasm = execution().program;
+    wasm.validate().unwrap();
+    let mut unsigned = wasm.clone();
+    unsigned.signature = None;
+    assert!(unsigned.validate().is_err());
+
+    for kind in [ProgramKind::OciImage, ProgramKind::NativeExecutable] {
+        let mut resolved = wasm.clone();
+        resolved.kind = kind;
+        resolved.platform = Some(ProgramPlatform {
+            operating_system: OperatingSystem::Linux,
+            architecture: Architecture::Amd64,
+        });
+        resolved.validate().unwrap();
+        resolved.platform = None;
+        assert!(resolved.validate().is_err());
+    }
+}
+
+#[test]
+fn effects_and_nondeterminism_are_explicit_canonical_capsule_inputs() {
+    let mut capsule = execution();
+    let baseline = capsule.digest().unwrap();
+    capsule.capabilities.grants.insert(
+        "deployment-write".to_owned(),
+        CapabilityGrant {
+            class: "deployment".to_owned(),
+            resource: "environment://production".to_owned(),
+            operations: ["write".to_owned()].into_iter().collect(),
+            destinations: ["deployment.example".to_owned()].into_iter().collect(),
+            external_effect_class: Some("deployment".to_owned()),
+            budget: CapabilityBudget {
+                maximum_calls: 1,
+                maximum_request_bytes: 1024,
+                maximum_response_bytes: 1024,
+                maximum_external_effects: 1,
+            },
+            constraints_digest: digest("deployment-constraints"),
+        },
+    );
+    capsule
+        .capabilities
+        .aggregate_budget
+        .maximum_external_effects = 1;
+    capsule.external_effects.operations.insert(
+        "deploy-1".to_owned(),
+        ExternalEffectDeclaration {
+            operation_id: "deploy-1".to_owned(),
+            idempotency_key: "deploy-idempotency-1".to_owned(),
+            capability_grant_id: "deployment-write".to_owned(),
+            effect_class: "deployment".to_owned(),
+            destination_digest: digest("deployment-destination"),
+            idempotency_contract_digest: digest("deployment-idempotency-contract"),
+            bounded_request_digest: digest("deployment-request"),
+        },
+    );
+    capsule.nondeterminism.inputs.insert(
+        "clock".to_owned(),
+        NondeterministicInputGrant {
+            class: NondeterministicInputClass::LiveClock,
+            profile_digest: digest("clock-profile"),
+            maximum_uses: 4,
+            maximum_bytes: 64,
+        },
+    );
+    capsule.validate().unwrap();
+    assert_ne!(capsule.digest().unwrap(), baseline);
+
+    let mut mismatched = capsule;
+    mismatched
+        .external_effects
+        .operations
+        .get_mut("deploy-1")
+        .unwrap()
+        .effect_class = "payment".to_owned();
+    assert!(mismatched.validate().is_err());
 }
 
 #[test]
@@ -570,10 +680,11 @@ fn golden_seal_binds_exact_subject_and_has_distinct_signed_identity() {
         .approval_subject(digest("policy"), digest("authority-context"))
         .unwrap();
     let seal = seal(&subject);
-    seal.validate_for_subject(&subject, 5_000, 7).unwrap();
+    seal.validate_for_subject(&subject, 5_000, 7, &TestSealVerifier)
+        .unwrap();
     assert_eq!(
         seal.digest().unwrap().to_string(),
-        "sha256:e1ac56263c4e9d00b708e534e81b27ef75cecf39f2ad55f15ee2f3fa786228b0"
+        "sha256:77615e52f495a9f3966140cd545792c938536264f049c8e35d464ae501ee2d0e"
     );
     assert_ne!(seal.digest().unwrap(), subject.digest().unwrap());
     assert_ne!(
@@ -587,6 +698,12 @@ fn golden_seal_binds_exact_subject_and_has_distinct_signed_identity() {
         seal.signing_bytes().unwrap()
     );
     assert_ne!(differently_signed.digest().unwrap(), seal.digest().unwrap());
+    assert_eq!(
+        differently_signed
+            .validate_for_subject(&subject, 5_000, 7, &TestSealVerifier)
+            .unwrap_err(),
+        ExecutionModelError::InvalidSealSignature
+    );
     let mut unsigned = seal.clone();
     unsigned.signature.clear();
     assert_eq!(
@@ -607,14 +724,14 @@ fn seal_rejects_subject_and_capsule_substitution() {
     let mut changed_subject = subject.clone();
     changed_subject.policy_digest = digest("different-policy");
     assert!(matches!(
-        seal.validate_for_subject(&changed_subject, 5_000, 7),
+        seal.validate_for_subject(&changed_subject, 5_000, 7, &TestSealVerifier),
         Err(runtrue_execution::ExecutionModelError::SealSubjectMismatch)
     ));
 
     let mut changed_seal = seal.clone();
     changed_seal.capsule_digest = digest("different-capsule");
     assert!(matches!(
-        changed_seal.validate_for_subject(&subject, 5_000, 7),
+        changed_seal.validate_for_subject(&subject, 5_000, 7, &TestSealVerifier),
         Err(runtrue_execution::ExecutionModelError::SealSubjectMismatch)
     ));
 }
@@ -627,15 +744,15 @@ fn seal_validity_window_and_revocation_are_fail_closed() {
         .unwrap();
     let seal = seal(&subject);
     assert!(matches!(
-        seal.validate_for_subject(&subject, 999, 7),
+        seal.validate_for_subject(&subject, 999, 7, &TestSealVerifier),
         Err(runtrue_execution::ExecutionModelError::SealNotYetValid)
     ));
     assert!(matches!(
-        seal.validate_for_subject(&subject, 10_000, 7),
+        seal.validate_for_subject(&subject, 10_000, 7, &TestSealVerifier),
         Err(runtrue_execution::ExecutionModelError::SealExpired)
     ));
     assert!(matches!(
-        seal.validate_for_subject(&subject, 5_000, 8),
+        seal.validate_for_subject(&subject, 5_000, 8, &TestSealVerifier),
         Err(runtrue_execution::ExecutionModelError::SealRevoked { .. })
     ));
 
@@ -678,6 +795,7 @@ fn sealed_session_grant() -> (SessionCapsule, ApprovalSubject, Seal, DelegationG
         maximum_resources: policy.maximum_resources,
         placement: policy.placement,
         capabilities: policy.capabilities,
+        nondeterminism: policy.nondeterminism,
         output: policy.output,
         maximum_child_count: policy.maximum_child_count,
         maximum_concurrency: policy.maximum_concurrency,
@@ -694,6 +812,16 @@ fn sealed_session_grant() -> (SessionCapsule, ApprovalSubject, Seal, DelegationG
 
 fn delegated_child(grant: &DelegationGrant) -> ExecutionCapsule {
     let mut child = execution();
+    child.resources.cpu_millis = 500;
+    child.resources.memory_bytes = 64 * 1024 * 1024;
+    child.resources.storage_bytes = 128 * 1024 * 1024;
+    child.resources.task_count = 4;
+    child.capabilities.aggregate_budget = CapabilityBudget {
+        maximum_calls: 40,
+        maximum_request_bytes: 256 * 1024,
+        maximum_response_bytes: 2 * 1024 * 1024,
+        maximum_external_effects: 0,
+    };
     child.parent = Some(ParentBinding {
         session_capsule_digest: grant.parent_session_capsule_digest.clone(),
         session_seal_digest: grant.parent_session_seal_digest.clone(),
@@ -709,7 +837,15 @@ fn delegated_child(grant: &DelegationGrant) -> ExecutionCapsule {
 fn issued_grant_binds_sealed_parent_and_contains_child() {
     let (session, subject, seal, grant) = sealed_session_grant();
     grant
-        .validate_against_parent(&session, &subject, &seal, 5_000, 7, 1)
+        .validate_against_parent(&DelegationValidationContext {
+            session: &session,
+            subject: &subject,
+            seal: &seal,
+            verifier: &TestSealVerifier,
+            now_unix_ms: 5_000,
+            current_seal_revocation_generation: 7,
+            current_grant_revocation_generation: 1,
+        })
         .unwrap();
     grant.contains_child(&delegated_child(&grant)).unwrap();
 
@@ -731,60 +867,211 @@ fn issued_grant_binds_sealed_parent_and_contains_child() {
         grant.contains_child(&expanded),
         Err(ExecutionModelError::ContainmentViolation { field: "placement" })
     ));
+
+    let mut undeclared_randomness = delegated_child(&grant);
+    undeclared_randomness.nondeterminism.inputs.insert(
+        "randomness".to_owned(),
+        NondeterministicInputGrant {
+            class: NondeterministicInputClass::LiveRandomness,
+            profile_digest: digest("randomness-profile"),
+            maximum_uses: 1,
+            maximum_bytes: 32,
+        },
+    );
+    assert!(matches!(
+        grant.contains_child(&undeclared_randomness),
+        Err(ExecutionModelError::ContainmentViolation {
+            field: "nondeterminism"
+        })
+    ));
 }
 
-fn reservation_request(
+fn admission_request(
     session_id: &str,
-    capsule_digest: ContentDigest,
     reservation_id: &str,
     child_id: &str,
     key: &str,
-) -> ChildReservationRequest {
-    ChildReservationRequest {
+    expected_ledger_revision: u64,
+) -> ChildAdmissionRequest {
+    ChildAdmissionRequest {
         schema_version: 1,
         reservation_id: reservation_id.to_owned(),
         session_id: session_id.to_owned(),
-        session_capsule_digest: capsule_digest,
         child_execution_id: child_id.to_owned(),
-        child_capsule_digest: digest(child_id),
         idempotency_key: key.to_owned(),
         session_fence: 11,
-        resources: ChildResourceReservation {
-            cpu_millis: 500,
-            memory_bytes: 1024,
-            storage_bytes: 2048,
-            task_count: 1,
-            capability_calls: 10,
-            capability_request_bytes: 1024,
-            capability_response_bytes: 2048,
-            external_effect_count: 0,
-        },
+        expected_ledger_revision,
         created_unix_ms: 5_000,
     }
 }
 
+fn admit_child(
+    ledger: &mut SessionReservationLedger,
+    request: ChildAdmissionRequest,
+    session: &SessionCapsule,
+    subject: &ApprovalSubject,
+    seal: &Seal,
+    grant: &DelegationGrant,
+    child: &ExecutionCapsule,
+) -> Result<runtrue_execution::ReservationResult, ExecutionModelError> {
+    ledger.admit_child(
+        request,
+        session,
+        subject,
+        seal,
+        &TestSealVerifier,
+        grant,
+        child,
+        5_000,
+        &subject.policy_digest,
+        7,
+        1,
+    )
+}
+
+#[test]
+fn atomic_child_admission_rejects_invalid_authority_and_containment_without_mutation() {
+    let (session, subject, valid_seal, grant) = sealed_session_grant();
+    let child = delegated_child(&grant);
+    let request = admission_request("session-1", "reservation-1", "child-1", "reserve-key-1", 0);
+    let mut ledger = SessionReservationLedger::new("session-1".to_owned(), &session, 11).unwrap();
+
+    let mut invalid_seal = valid_seal.clone();
+    invalid_seal.signature[0] ^= 0xff;
+    assert_eq!(
+        admit_child(
+            &mut ledger,
+            request.clone(),
+            &session,
+            &subject,
+            &invalid_seal,
+            &grant,
+            &child,
+        )
+        .unwrap_err(),
+        ExecutionModelError::InvalidSealSignature
+    );
+    assert_eq!(ledger.ledger_revision, 0);
+    assert_eq!(ledger.active_concurrency, 0);
+
+    assert_eq!(
+        ledger
+            .admit_child(
+                request.clone(),
+                &session,
+                &subject,
+                &valid_seal,
+                &TestSealVerifier,
+                &grant,
+                &child,
+                5_000,
+                &digest("superseding-session-policy"),
+                7,
+                1,
+            )
+            .unwrap_err(),
+        ExecutionModelError::ReservationIdentityConflict
+    );
+    assert_eq!(ledger.ledger_revision, 0);
+    assert_eq!(ledger.active_concurrency, 0);
+
+    let mut overbroad_child = child;
+    overbroad_child.resources.memory_bytes = grant.maximum_resources.memory_bytes + 1;
+    assert!(matches!(
+        admit_child(
+            &mut ledger,
+            request,
+            &session,
+            &subject,
+            &valid_seal,
+            &grant,
+            &overbroad_child,
+        ),
+        Err(ExecutionModelError::ContainmentViolation {
+            field: "resource limits"
+        })
+    ));
+    assert_eq!(ledger.ledger_revision, 0);
+    assert_eq!(ledger.active_concurrency, 0);
+    assert_eq!(ledger.admitted_child_count, 0);
+}
+
 #[test]
 fn reservations_are_atomic_bounded_and_idempotent() {
-    let session = session();
-    let session_digest = session.digest().unwrap();
+    let (session, subject, seal, grant) = sealed_session_grant();
+    let child = delegated_child(&grant);
     let mut ledger = SessionReservationLedger::new("session-1".to_owned(), &session, 11).unwrap();
-    let request = reservation_request(
-        "session-1",
-        session_digest.clone(),
-        "reservation-1",
-        "child-1",
-        "reserve-key-1",
-    );
-    let first = ledger.reserve(request.clone()).unwrap();
+    let request = admission_request("session-1", "reservation-1", "child-1", "reserve-key-1", 0);
+    let first = admit_child(
+        &mut ledger,
+        request.clone(),
+        &session,
+        &subject,
+        &seal,
+        &grant,
+        &child,
+    )
+    .unwrap();
     assert!(!first.replayed);
+    assert_eq!(
+        first.record.request.child_capsule_digest,
+        child.digest().unwrap()
+    );
+    assert_eq!(
+        first.record.request.resources,
+        ChildResourceReservation::from_child(&child)
+    );
     assert_eq!(ledger.active_concurrency, 1);
-    assert!(ledger.reserve(request.clone()).unwrap().replayed);
+    assert!(
+        admit_child(
+            &mut ledger,
+            request.clone(),
+            &session,
+            &subject,
+            &seal,
+            &grant,
+            &child,
+        )
+        .unwrap()
+        .replayed
+    );
     assert_eq!(ledger.active_concurrency, 1);
 
-    let mut conflicting = request;
-    conflicting.resources.capability_calls += 1;
     assert_eq!(
-        ledger.reserve(conflicting).unwrap_err(),
+        admit_child(
+            &mut ledger,
+            admission_request(
+                "session-1",
+                "reservation-stale",
+                "child-stale",
+                "reserve-key-stale",
+                0,
+            ),
+            &session,
+            &subject,
+            &seal,
+            &grant,
+            &child,
+        )
+        .unwrap_err(),
+        ExecutionModelError::StaleLedgerRevision
+    );
+    assert_eq!(ledger.ledger_revision, 1);
+    assert_eq!(ledger.active_concurrency, 1);
+
+    let mut conflicting_child = child.clone();
+    conflicting_child.arguments.push("different".to_owned());
+    assert_eq!(
+        admit_child(
+            &mut ledger,
+            request,
+            &session,
+            &subject,
+            &seal,
+            &grant,
+            &conflicting_child,
+        )
+        .unwrap_err(),
         ExecutionModelError::IdempotencyConflict
     );
 
@@ -794,16 +1081,23 @@ fn reservations_are_atomic_bounded_and_idempotent() {
         child_execution_id: "child-1".to_owned(),
         idempotency_key: "transition-key-1".to_owned(),
         session_fence: 11,
+        expected_ledger_revision: 1,
         outcome: ReservationTerminalOutcome::Released {
             reason_digest: digest("canceled"),
         },
+        actual_usage: CapabilityUsage {
+            capability_calls: 2,
+            capability_request_bytes: 100,
+            capability_response_bytes: 200,
+            external_effect_count: 0,
+        },
         observed_unix_ms: 6_000,
     };
-    let released = ledger.transition(transition.clone()).unwrap();
+    let released = ledger.release(transition.clone()).unwrap();
     assert_eq!(released.record.state, ReservationState::Released);
     assert_eq!(ledger.active_concurrency, 0);
     assert_eq!(ledger.admitted_child_count, 1);
-    assert!(ledger.transition(transition).unwrap().replayed);
+    assert!(ledger.release(transition).unwrap().replayed);
 
     let mut finalize_late = ReservationTransitionRequest {
         schema_version: 1,
@@ -811,56 +1105,128 @@ fn reservations_are_atomic_bounded_and_idempotent() {
         child_execution_id: "child-1".to_owned(),
         idempotency_key: "transition-key-2".to_owned(),
         session_fence: 11,
+        expected_ledger_revision: 2,
         outcome: ReservationTerminalOutcome::Finalized {
             result_digest: digest("result"),
         },
+        actual_usage: CapabilityUsage::default(),
         observed_unix_ms: 6_001,
     };
     assert_eq!(
-        ledger.transition(finalize_late.clone()).unwrap_err(),
+        ledger.release(finalize_late.clone()).unwrap_err(),
         ExecutionModelError::InvalidReservationTransition
     );
+    finalize_late.outcome = ReservationTerminalOutcome::Released {
+        reason_digest: digest("late"),
+    };
     finalize_late.session_fence = 10;
     assert_eq!(
-        ledger.transition(finalize_late).unwrap_err(),
+        ledger.release(finalize_late).unwrap_err(),
         ExecutionModelError::StaleSessionFence
     );
 }
 
 #[test]
 fn reservations_enforce_aggregate_capability_and_byte_budgets() {
-    let session = session();
+    let (session, subject, seal, grant) = sealed_session_grant();
     let mut ledger = SessionReservationLedger::new("session-1".to_owned(), &session, 11).unwrap();
-    let mut request = reservation_request(
-        "session-1",
-        session.digest().unwrap(),
-        "reservation-too-large",
-        "child-too-large",
-        "reserve-too-large",
-    );
-    request.resources.capability_response_bytes =
-        session.capabilities.aggregate_budget.maximum_response_bytes + 1;
+    let mut child = delegated_child(&grant);
+    child.capabilities.aggregate_budget.maximum_response_bytes = 5 * 1024 * 1024;
+    admit_child(
+        &mut ledger,
+        admission_request("session-1", "reservation-1", "child-1", "reserve-1", 0),
+        &session,
+        &subject,
+        &seal,
+        &grant,
+        &child,
+    )
+    .unwrap();
     assert_eq!(
-        ledger.reserve(request).unwrap_err(),
+        admit_child(
+            &mut ledger,
+            admission_request("session-1", "reservation-2", "child-2", "reserve-2", 1),
+            &session,
+            &subject,
+            &seal,
+            &grant,
+            &child,
+        )
+        .unwrap_err(),
         ExecutionModelError::ReservationCapacityUnavailable
     );
-    assert_eq!(ledger.active_concurrency, 0);
-    assert_eq!(ledger.admitted_child_count, 0);
+    assert_eq!(ledger.active_concurrency, 1);
+    assert_eq!(ledger.admitted_child_count, 1);
+}
+
+#[test]
+fn terminal_capability_spend_is_never_recycled() {
+    let (session, subject, seal, grant) = sealed_session_grant();
+    let mut ledger = SessionReservationLedger::new("session-1".to_owned(), &session, 11).unwrap();
+    let mut first_child = delegated_child(&grant);
+    first_child.capabilities.aggregate_budget.maximum_calls = 60;
+    admit_child(
+        &mut ledger,
+        admission_request("session-1", "reservation-1", "child-1", "reserve-1", 0),
+        &session,
+        &subject,
+        &seal,
+        &grant,
+        &first_child,
+    )
+    .unwrap();
+    ledger
+        .release(ReservationTransitionRequest {
+            schema_version: 1,
+            reservation_id: "reservation-1".to_owned(),
+            child_execution_id: "child-1".to_owned(),
+            idempotency_key: "release-1".to_owned(),
+            session_fence: 11,
+            expected_ledger_revision: 1,
+            outcome: ReservationTerminalOutcome::Released {
+                reason_digest: digest("failed-after-effects"),
+            },
+            actual_usage: CapabilityUsage {
+                capability_calls: 60,
+                ..CapabilityUsage::default()
+            },
+            observed_unix_ms: 6_000,
+        })
+        .unwrap();
+    assert_eq!(ledger.cumulative_usage.capability_calls, 60);
+
+    let mut second_child = delegated_child(&grant);
+    second_child.capabilities.aggregate_budget.maximum_calls = 50;
+    assert_eq!(
+        admit_child(
+            &mut ledger,
+            admission_request("session-1", "reservation-2", "child-2", "reserve-2", 2),
+            &session,
+            &subject,
+            &seal,
+            &grant,
+            &second_child,
+        )
+        .unwrap_err(),
+        ExecutionModelError::ReservationCapacityUnavailable
+    );
 }
 
 #[test]
 fn deserialized_reservation_ledger_rejects_tampered_accounting() {
-    let session = session();
+    let (session, subject, seal, grant) = sealed_session_grant();
+    let child = delegated_child(&grant);
     let mut ledger = SessionReservationLedger::new("session-1".to_owned(), &session, 11).unwrap();
-    ledger
-        .reserve(reservation_request(
-            "session-1",
-            session.digest().unwrap(),
-            "reservation-1",
-            "child-1",
-            "reserve-1",
-        ))
-        .unwrap();
+    admit_child(
+        &mut ledger,
+        admission_request("session-1", "reservation-1", "child-1", "reserve-1", 0),
+        &session,
+        &subject,
+        &seal,
+        &grant,
+        &child,
+    )
+    .unwrap();
     let mut value = serde_json::to_value(&ledger).unwrap();
     value["allocated"]["capability_calls"] = Value::from(0);
     let tampered: SessionReservationLedger = serde_json::from_value(value).unwrap();
@@ -876,6 +1242,8 @@ fn publication_request(
     child_id: &str,
     key: &str,
     output: &str,
+    expected_publication_revision: u64,
+    expected_reservation_revision: u64,
 ) -> WorkspacePublicationRequest {
     WorkspacePublicationRequest {
         schema_version: 1,
@@ -889,34 +1257,34 @@ fn publication_request(
         output_manifest_digest: digest(&format!("manifest-{output}")),
         idempotency_key: key.to_owned(),
         session_fence: 11,
+        expected_publication_revision,
+        expected_reservation_revision,
         committed_unix_ms: 7_000,
     }
 }
 
 #[test]
 fn workspace_publication_is_generation_fenced_and_idempotent() {
-    let session = session();
+    let (session, subject, seal, grant) = sealed_session_grant();
     let session_digest = session.digest().unwrap();
+    let child = delegated_child(&grant);
     let mut reservations =
         SessionReservationLedger::new("session-1".to_owned(), &session, 11).unwrap();
-    reservations
-        .reserve(reservation_request(
-            "session-1",
-            session_digest.clone(),
-            "reservation-1",
-            "child-1",
-            "reserve-1",
-        ))
+    for (reservation, child_id, key, revision) in [
+        ("reservation-1", "child-1", "reserve-1", 0),
+        ("reservation-2", "child-2", "reserve-2", 1),
+    ] {
+        admit_child(
+            &mut reservations,
+            admission_request("session-1", reservation, child_id, key, revision),
+            &session,
+            &subject,
+            &seal,
+            &grant,
+            &child,
+        )
         .unwrap();
-    reservations
-        .reserve(reservation_request(
-            "session-1",
-            session_digest.clone(),
-            "reservation-2",
-            "child-2",
-            "reserve-2",
-        ))
-        .unwrap();
+    }
     let mut publications = WorkspacePublicationLedger::new(
         "session-1".to_owned(),
         session_digest.clone(),
@@ -930,14 +1298,38 @@ fn workspace_publication_is_generation_fenced_and_idempotent() {
         "child-1",
         "publish-1",
         "workspace-1",
+        0,
+        2,
     );
+    let finalize_first = ReservationTransitionRequest {
+        schema_version: 1,
+        reservation_id: "reservation-1".to_owned(),
+        child_execution_id: "child-1".to_owned(),
+        idempotency_key: "finalize-1".to_owned(),
+        session_fence: 11,
+        expected_ledger_revision: 2,
+        outcome: ReservationTerminalOutcome::Finalized {
+            result_digest: digest("result-1"),
+        },
+        actual_usage: CapabilityUsage::default(),
+        observed_unix_ms: 7_000,
+    };
     assert!(
         !publications
-            .publish(first.clone(), &reservations)
+            .finalize_and_publish(&mut reservations, finalize_first.clone(), first.clone())
             .unwrap()
             .replayed
     );
-    assert!(publications.publish(first, &reservations).unwrap().replayed);
+    assert_eq!(
+        reservations.reservation("reservation-1").unwrap().state,
+        ReservationState::Finalized
+    );
+    assert!(
+        publications
+            .finalize_and_publish(&mut reservations, finalize_first, first)
+            .unwrap()
+            .replayed
+    );
 
     let stale_competing = publication_request(
         session_digest,
@@ -945,30 +1337,68 @@ fn workspace_publication_is_generation_fenced_and_idempotent() {
         "child-2",
         "publish-2",
         "workspace-2",
+        1,
+        3,
     );
     assert_eq!(
         publications
-            .publish(stale_competing.clone(), &reservations)
+            .finalize_and_publish(
+                &mut reservations,
+                ReservationTransitionRequest {
+                    schema_version: 1,
+                    reservation_id: "reservation-2".to_owned(),
+                    child_execution_id: "child-2".to_owned(),
+                    idempotency_key: "finalize-2".to_owned(),
+                    session_fence: 11,
+                    expected_ledger_revision: 3,
+                    outcome: ReservationTerminalOutcome::Finalized {
+                        result_digest: digest("result-2"),
+                    },
+                    actual_usage: CapabilityUsage::default(),
+                    observed_unix_ms: 7_001,
+                },
+                stale_competing.clone(),
+            )
             .unwrap_err(),
         ExecutionModelError::WorkspaceGenerationConflict
     );
 
     reservations
-        .transition(ReservationTransitionRequest {
+        .release(ReservationTransitionRequest {
             schema_version: 1,
             reservation_id: "reservation-2".to_owned(),
             child_execution_id: "child-2".to_owned(),
             idempotency_key: "release-2".to_owned(),
             session_fence: 11,
+            expected_ledger_revision: 3,
             outcome: ReservationTerminalOutcome::Released {
                 reason_digest: digest("superseded"),
             },
+            actual_usage: CapabilityUsage::default(),
             observed_unix_ms: 7_001,
         })
         .unwrap();
+    let mut stale_competing = stale_competing;
+    stale_competing.expected_reservation_revision = 4;
     assert_eq!(
         publications
-            .publish(stale_competing, &reservations)
+            .finalize_and_publish(
+                &mut reservations,
+                ReservationTransitionRequest {
+                    schema_version: 1,
+                    reservation_id: "reservation-2".to_owned(),
+                    child_execution_id: "child-2".to_owned(),
+                    idempotency_key: "finalize-after-release".to_owned(),
+                    session_fence: 11,
+                    expected_ledger_revision: 4,
+                    outcome: ReservationTerminalOutcome::Finalized {
+                        result_digest: digest("impossible"),
+                    },
+                    actual_usage: CapabilityUsage::default(),
+                    observed_unix_ms: 7_002,
+                },
+                stale_competing,
+            )
             .unwrap_err(),
         ExecutionModelError::WorkspaceReservationInactive
     );
