@@ -51,6 +51,7 @@ members = [
   "crates/trusted-planner",
   "crates/update",
   "crates/workflow-ast",
+  "crates/workflow-frontend",
   "crates/workflow-ir",
 ]
 
@@ -104,6 +105,7 @@ runtrue-storage = { path = "crates/storage" }
 runtrue-trusted-planner = { path = "crates/trusted-planner" }
 runtrue-update = { path = "crates/update" }
 runtrue-workflow-ast = { path = "crates/workflow-ast" }
+runtrue-workflow-frontend = { path = "crates/workflow-frontend" }
 runtrue-workflow-ir = { path = "crates/workflow-ir" }
 async-trait = "=0.1.89"
 axum = "=0.6.20"

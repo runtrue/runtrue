@@ -9,6 +9,8 @@ rust-version.workspace = true
 [dependencies]
 runtrue-compiler.workspace = true
 runtrue-lock.workspace = true
+runtrue-model.workspace = true
+runtrue-workflow-frontend.workspace = true
 runtrue-workflow-ast.workspace = true
 serde.workspace = true
 serde_json.workspace = true

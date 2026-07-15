@@ -95,6 +95,7 @@ fn fixture() -> (
             scm: None,
             event_context: BTreeMap::new(),
             lockfile_digest: None,
+            workflow_frontend: None,
             policy_version_ids: Vec::new(),
         },
         variables: BTreeMap::new(),

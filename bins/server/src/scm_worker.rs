@@ -11,6 +11,7 @@ use runtrue_control_plane::{
     ScmProposedAnalysisRecord, ScmProposedAnalysisStatus, ScmRepositoryLinkRecord,
     ScmSourceIdentity, SignedCapsuleRecord, SourceSnapshotRecord, SourceSnapshotState,
 };
+use runtrue_gha_import::GithubActionsFrontend;
 use runtrue_git::{
     CredentialRequest, GitCredential, GitCredentialProvider, GitError, GitLimits, GitRepository,
     MirrorLimits, MirrorManager, MirrorMiss, MirrorSyncOutcome, OriginPolicy,
@@ -66,6 +67,7 @@ const MAX_TASK_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_DEFINITION_DIFF_LINES_PER_SIDE: usize = 80;
 const MAX_DEFINITION_DIFF_BYTES: usize = 16 * 1024;
 const APPROVAL_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+static GITHUB_ACTIONS_FRONTEND: GithubActionsFrontend = GithubActionsFrontend;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2138,6 +2140,7 @@ impl ScmTaskWorker {
             endpoints: &self.config.github_provider_endpoints,
         };
         let mut planner = TrustedPlanner::new(prepared_source.repository.repository())
+            .with_source_frontend(&GITHUB_ACTIONS_FRONTEND)
             .with_reusable_source_provider(&reusable_source_provider)
             .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
         if let Some(image) = &self.config.default_job_container_image {
@@ -2675,6 +2678,7 @@ impl ScmTaskWorker {
             endpoints: &self.config.github_provider_endpoints,
         };
         let mut planner = TrustedPlanner::new(continuation_repository.repository())
+            .with_source_frontend(&GITHUB_ACTIONS_FRONTEND)
             .with_reusable_source_provider(&reusable_source_provider)
             .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
         if let Some(image) = &self.config.default_job_container_image {
@@ -2735,6 +2739,7 @@ impl ScmTaskWorker {
                 approval: workflow_approval,
             };
             let mut planner = TrustedPlanner::new(continuation_repository.repository())
+                .with_source_frontend(&GITHUB_ACTIONS_FRONTEND)
                 .with_reusable_source_provider(&reusable_source_provider)
                 .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
             if let Some(image) = &self.config.default_job_container_image {

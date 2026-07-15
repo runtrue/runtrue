@@ -269,6 +269,7 @@ pub(crate) fn approval_subject(
         resolved_action_digests: actions,
         resolved_image_digests: images,
         reusable_workflow_digests: reusable_workflow_digests.to_vec(),
+        workflow_frontend: capsule.context.workflow_frontend.clone(),
         permission_set_digest: digest_json(&(&capsule.permissions, permission_snapshot))?,
         secret_metadata_ids: secrets,
         variable_snapshot_digest: digest_json(&(&capsule.variables, variable_snapshot))?,

@@ -28,8 +28,8 @@ pub enum TrustedPlannerError {
     },
     #[error("workflow at revision {revision} is not UTF-8")]
     WorkflowNotUtf8 { revision: String },
-    #[error("GitHub Actions workflow is not safely importable: {0}")]
-    GithubActionsImport(String),
+    #[error("workflow source frontend rejected the input: {0}")]
+    WorkflowFrontend(String),
     #[error("workflow compilation failed: {0}")]
     Compile(#[from] runtrue_compiler::CompileError),
     #[error("workflow source trust decision failed: {0}")]

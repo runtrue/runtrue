@@ -16,6 +16,9 @@ pub struct CompileContext {
     pub scm_api_url: Option<String>,
     pub lockfile: Option<LockFile>,
     pub reusable_workflows: ReusableWorkflowSources,
+    /// Integrity-validated source translation provenance supplied by the
+    /// trusted planner. Native workflow compilation leaves this unset.
+    pub workflow_frontend: Option<ir::WorkflowFrontendProvenance>,
     pub policy_version_ids: Vec<String>,
     pub workflow_changed: bool,
     pub expiration_boundary: Option<String>,
@@ -37,6 +40,7 @@ impl Default for CompileContext {
             scm_api_url: None,
             lockfile: None,
             reusable_workflows: ReusableWorkflowSources::default(),
+            workflow_frontend: None,
             policy_version_ids: vec!["local-default-deny-v1".to_owned()],
             workflow_changed: false,
             expiration_boundary: None,
@@ -117,6 +121,8 @@ pub struct ApprovalSubject {
     pub resolved_action_digests: Vec<String>,
     pub resolved_image_digests: Vec<String>,
     pub reusable_workflow_digests: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_frontend: Option<ir::WorkflowFrontendProvenance>,
     pub permission_set_digest: ContentDigest,
     pub secret_metadata_ids: Vec<String>,
     pub variable_snapshot_digest: ContentDigest,

@@ -319,6 +319,7 @@ impl Compiler {
                 scm,
                 event_context,
                 lockfile_digest,
+                workflow_frontend: context.workflow_frontend.clone(),
                 policy_version_ids: context.policy_version_ids.clone(),
             },
             variables: global_variables,

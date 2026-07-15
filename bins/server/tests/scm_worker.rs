@@ -191,11 +191,11 @@ impl MirrorFixture {
         }
     }
 
-    fn github_actions_pull_request() -> (Self, String) {
+    fn github_actions_pull_request() -> Self {
         let root = tempfile::tempdir().expect("mirror root");
         secure_mode(root.path());
         let repository = root.path().join("octo").join("runtrue");
-        fs::create_dir_all(repository.join(".runtrue/workflows")).expect("workflow directory");
+        fs::create_dir_all(repository.join(".github/workflows")).expect("workflow directory");
         secure_mode(&root.path().join("octo"));
         secure_mode(&repository);
         git(&repository, &["init", "--quiet"]);
@@ -204,7 +204,7 @@ impl MirrorFixture {
             &["config", "user.email", "worker@runtrue.invalid"],
         );
         git(&repository, &["config", "user.name", "SCM Worker Test"]);
-        let workflow_path = ".runtrue/workflows/ci.github.yml";
+        let workflow_path = ".github/workflows/ci.yml";
         fs::write(
             repository.join(workflow_path),
             "name: CI\non: [pull_request]\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo base\n",
@@ -221,15 +221,12 @@ impl MirrorFixture {
         git(&repository, &["add", "."]);
         git(&repository, &["commit", "--quiet", "-m", "proposed"]);
         let source = output(&repository, &["rev-parse", "HEAD"]);
-        (
-            Self {
-                root: root.path().to_owned(),
-                _root: root,
-                base,
-                source,
-            },
-            workflow_path.to_owned(),
-        )
+        Self {
+            root: root.path().to_owned(),
+            _root: root,
+            base,
+            source,
+        }
     }
 
     fn multi_push() -> Self {
@@ -1045,10 +1042,9 @@ fn pull_request_executes_base_workflow_while_testing_proposed_code() {
 }
 
 #[test]
-fn approved_proposed_workflow_reuses_default_job_image_during_continuation() {
-    let (fixture, workflow_path) = MirrorFixture::github_actions_pull_request();
+fn standard_github_actions_workflow_is_discovered_planned_and_replanned_after_approval() {
+    let fixture = MirrorFixture::github_actions_pull_request();
     let (control_plane, state, mut config) = setup(&fixture.root, "worker-proposed-approval");
-    config.workflow_path = workflow_path;
     let default_image = "docker.io/library/node@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2".to_owned();
     config.default_job_container_image = Some(default_image.clone());
     enqueue(

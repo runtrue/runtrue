@@ -3044,7 +3044,9 @@ version = "0.1.0"
 dependencies = [
  "runtrue-compiler",
  "runtrue-lock",
+ "runtrue-model",
  "runtrue-workflow-ast",
+ "runtrue-workflow-frontend",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3428,6 +3430,7 @@ dependencies = [
  "runtrue-cache",
  "runtrue-compiler",
  "runtrue-control-plane",
+ "runtrue-gha-import",
  "runtrue-git",
  "runtrue-lifecycle",
  "runtrue-lock",
@@ -3497,11 +3500,11 @@ name = "runtrue-trusted-planner"
 version = "0.1.0"
 dependencies = [
  "runtrue-compiler",
- "runtrue-gha-import",
  "runtrue-git",
  "runtrue-lock",
  "runtrue-model",
  "runtrue-scm",
+ "runtrue-workflow-frontend",
  "runtrue-workflow-ir",
  "serde_json",
  "tempfile",
@@ -3549,6 +3552,13 @@ dependencies = [
  "serde",
  "serde_yaml",
  "thiserror 1.0.61",
+]
+
+[[package]]
+name = "runtrue-workflow-frontend"
+version = "0.1.0"
+dependencies = [
+ "runtrue-model",
 ]
 
 [[package]]

@@ -8,7 +8,6 @@
 
 mod analysis;
 mod error;
-mod frontend;
 mod limits;
 mod locks;
 mod planner;
@@ -17,13 +16,12 @@ mod source_trust;
 
 pub use analysis::{ProposedAnalysisFailure, ProposedWorkflowAnalysis, TrustedCapsuleResult};
 pub use error::TrustedPlannerError;
-pub use frontend::{
-    GithubActionsFrontend, PreparedWorkflowSource, WorkflowFrontendOptions, WorkflowFrontendReport,
-    WorkflowSourceFrontend,
-};
 pub use limits::TrustedPlannerLimits;
 pub use planner::TrustedPlanner;
 pub use provider::{ReusableWorkflowProviderError, ReusableWorkflowSourceProvider};
+pub use runtrue_workflow_frontend::{
+    PreparedWorkflowSource, WorkflowFrontendOptions, WorkflowFrontendReport, WorkflowSourceFrontend,
+};
 pub use source_trust::derive_source_trust;
 
 pub const DEFAULT_LOCKFILE_PATH: &str = ".runtrue.lock";

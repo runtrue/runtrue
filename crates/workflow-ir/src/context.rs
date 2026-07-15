@@ -3,6 +3,17 @@ use runtrue_model::ContentDigest;
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize};
 use std::{collections::BTreeMap, fmt};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowFrontendProvenance {
+    pub frontend_id: String,
+    pub frontend_generation: u32,
+    pub input_digest: ContentDigest,
+    pub native_digest: ContentDigest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_digest: Option<ContentDigest>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapsuleContext {
@@ -23,6 +34,8 @@ pub struct CapsuleContext {
     pub event_context: BTreeMap<String, ScalarValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lockfile_digest: Option<ContentDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_frontend: Option<WorkflowFrontendProvenance>,
     pub policy_version_ids: Vec<String>,
 }
 

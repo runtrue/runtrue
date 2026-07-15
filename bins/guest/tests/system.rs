@@ -114,6 +114,7 @@ fn authenticated_one_job_runs_over_fake_vsock_without_kvm() {
             scm: None,
             event_context: BTreeMap::new(),
             lockfile_digest: None,
+            workflow_frontend: None,
             policy_version_ids: Vec::new(),
         },
         variables: BTreeMap::new(),

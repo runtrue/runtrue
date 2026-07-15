@@ -9,7 +9,6 @@
 use crate::{
     analysis::absent_workflow_digest,
     derive_source_trust,
-    frontend::{GithubActionsFrontend, WorkflowFrontendOptions, WorkflowSourceFrontend},
     limits::normalize_policy_versions,
     locks::{lock_identity, parse_analysis_lock, parse_required_lock},
     provider::hydrate_reusable_sources,
@@ -25,9 +24,8 @@ use runtrue_scm::{
     TrustedWorkflowSelection, WorkflowDefinitionApprovalEvidence,
     WorkflowDefinitionApprovalVerifier, WorkflowSourceInputs,
 };
+use runtrue_workflow_frontend::{WorkflowFrontendOptions, WorkflowSourceFrontend};
 use runtrue_workflow_ir::SourceTrust;
-
-static GITHUB_ACTIONS_FRONTEND: GithubActionsFrontend = GithubActionsFrontend;
 
 pub struct TrustedPlanner<'a> {
     repository: &'a GitRepository,
@@ -327,7 +325,7 @@ impl<'a> TrustedPlanner<'a> {
                     ),
                     Err(
                         TrustedPlannerError::Compile(_)
-                        | TrustedPlannerError::GithubActionsImport(_)
+                        | TrustedPlannerError::WorkflowFrontend(_)
                         | TrustedPlannerError::ReusableSourceProviderRequired
                         | TrustedPlannerError::ReusableSource(_)
                         | TrustedPlannerError::ReusableBundle(_),
@@ -490,12 +488,7 @@ impl<'a> TrustedPlanner<'a> {
         })?;
         let frontend = self
             .source_frontend
-            .filter(|frontend| frontend.supports(workflow_path))
-            .or_else(|| {
-                GITHUB_ACTIONS_FRONTEND
-                    .supports(workflow_path)
-                    .then_some(&GITHUB_ACTIONS_FRONTEND as &dyn WorkflowSourceFrontend)
-            });
+            .filter(|frontend| frontend.supports(workflow_path));
         let prepared = frontend
             .map(|frontend| {
                 frontend.prepare(
@@ -507,21 +500,34 @@ impl<'a> TrustedPlanner<'a> {
                 )
             })
             .transpose()
-            .map_err(TrustedPlannerError::GithubActionsImport)?;
+            .map_err(TrustedPlannerError::WorkflowFrontend)?;
         if let Some(prepared) = &prepared {
+            prepared
+                .validate_for(source)
+                .map_err(|error| TrustedPlannerError::WorkflowFrontend(error.to_string()))?;
             lockfile = prepared
                 .generated_lockfile_toml
                 .as_deref()
                 .map(|value| LockFile::parse(value.as_bytes()))
                 .transpose()
                 .map_err(|source| TrustedPlannerError::InvalidLockfile {
-                    kind: "generated GitHub Actions lockfile",
+                    kind: "generated frontend lockfile",
                     source,
                 })?;
         }
         let source = prepared
             .as_ref()
             .map_or(source, |prepared| prepared.native_yaml.as_str());
+        let workflow_frontend =
+            prepared
+                .as_ref()
+                .map(|prepared| runtrue_workflow_ir::WorkflowFrontendProvenance {
+                    frontend_id: prepared.frontend_id.to_owned(),
+                    frontend_generation: prepared.frontend_generation,
+                    input_digest: prepared.input_digest.clone(),
+                    native_digest: prepared.native_digest.clone(),
+                    report_digest: prepared.report.as_ref().map(|report| report.digest.clone()),
+                });
         let reusable_workflows =
             hydrate_reusable_sources(self.reusable_source_provider, lockfile.as_ref())?;
         let event_value = serde_json::to_value(event)?;
@@ -538,6 +544,7 @@ impl<'a> TrustedPlanner<'a> {
             scm_api_url: self.scm_api_url.clone(),
             reusable_workflows,
             lockfile,
+            workflow_frontend,
             policy_version_ids,
             workflow_changed,
             ..CompileContext::default()

@@ -4,6 +4,9 @@ use runtrue_scm::{
     ActorIdentity, EventType, GitRevision, IssueCommentAction, IssueCommentEvent, ProviderKind,
     PullRequestAction, PullRequestEvent, RepositoryIdentity, WorkflowSourceError,
 };
+use runtrue_workflow_frontend::{
+    PreparedWorkflowSource, WorkflowFrontendOptions, WorkflowFrontendReport, WorkflowSourceFrontend,
+};
 use std::{fs, path::Path, process::Command};
 
 const NOW: u64 = 10_000;
@@ -70,6 +73,45 @@ impl Fixture {
 }
 
 struct Verifier(bool);
+
+struct FixedFrontend {
+    generation: u32,
+    dishonest_input_digest: bool,
+}
+
+impl WorkflowSourceFrontend for FixedFrontend {
+    fn supports(&self, _workflow_path: &str) -> bool {
+        true
+    }
+
+    fn prepare(
+        &self,
+        source: &str,
+        _workflow_path: &str,
+        _options: &WorkflowFrontendOptions,
+    ) -> Result<PreparedWorkflowSource, String> {
+        let native_yaml =
+            String::from_utf8(workflow("translated", "microvm")).expect("native test workflow");
+        let report_bytes = br#"{"status":"translated"}"#.to_vec();
+        Ok(PreparedWorkflowSource {
+            frontend_id: "runtrue.test-frontend",
+            frontend_generation: self.generation,
+            input_digest: if self.dishonest_input_digest {
+                ContentDigest::sha256(b"substituted input")
+            } else {
+                ContentDigest::sha256(source.as_bytes())
+            },
+            native_digest: ContentDigest::sha256(native_yaml.as_bytes()),
+            native_yaml,
+            generated_lockfile_toml: None,
+            report: Some(WorkflowFrontendReport {
+                media_type: "application/vnd.runtrue.test-frontend+json".to_owned(),
+                digest: ContentDigest::sha256(&report_bytes),
+                bytes: report_bytes,
+            }),
+        })
+    }
+}
 
 impl WorkflowDefinitionApprovalVerifier for Verifier {
     fn verify(
@@ -305,72 +347,95 @@ fn issue_comment_executes_exact_trusted_default_revision_without_mutating_event_
 }
 
 #[test]
-fn trusted_planner_imports_standard_github_actions_yaml_at_the_exact_revision() {
-    const GHA_PATH: &str = ".github/workflows/runtrue-scm-automation.yml";
-    let directory = tempfile::tempdir().expect("tempdir");
-    git(directory.path(), &["init", "--quiet"]);
-    git(
-        directory.path(),
-        &["config", "user.email", "planner@runtrue.invalid"],
-    );
-    git(directory.path(), &["config", "user.name", "Planner Test"]);
-    fs::create_dir_all(directory.path().join(".github/workflows")).unwrap();
-    fs::write(
-        directory.path().join(GHA_PATH),
-        format!(
-            "name: Runtrue SCM automation\non:\n  issue_comment:\n    types: [created, edited]\npermissions:\n  contents: write\n  pull-requests: write\n  issues: write\n  checks: read\njobs:\n  reconcile:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: docker://containers.example/runtrue/scm-automation@sha256:{}\n        with:\n          github-token: ${{{{ github.token }}}}\n",
-            "a".repeat(64)
-        ),
-    )
-    .unwrap();
-    git(directory.path(), &["add", "."]);
-    git(directory.path(), &["commit", "--quiet", "-m", "workflow"]);
-    let commit = output(directory.path(), &["rev-parse", "HEAD"]);
-    let repository =
-        GitRepository::open(directory.path(), runtrue_git::GitLimits::default()).unwrap();
-    let mut event = event(
-        EventType::IssueComment {
-            action: IssueCommentAction::Created,
-        },
-        "0".repeat(40),
-        None,
-    );
-    event.issue_comment = Some(IssueCommentEvent {
-        issue_number: 17,
-        issue_is_pull_request: true,
-        comment_id: 99,
-        body: "managed interaction".to_owned(),
-        previous_body: None,
-    });
-    event.normalized_digest =
-        ContentDigest::sha256(event.canonical_normalized_bytes().expect("canonical event"));
-    let revision = GitRevision {
-        commit: commit.clone(),
-        ref_name: Some("refs/heads/main".to_owned()),
-        repository_full_name: Some("octo/runtrue".to_owned()),
+fn trusted_planner_rejects_dishonest_frontend_integrity_metadata() {
+    let fixture = Fixture::create(&workflow("source", "microvm"));
+    let repository = fixture.repository();
+    let push = event(EventType::Push, fixture.source.clone(), None);
+    let frontend = FixedFrontend {
+        generation: 1,
+        dishonest_input_digest: true,
     };
-    let result = TrustedPlanner::new(&repository)
-        .capsule_trusted_default_revision(
-            &event,
-            &revision,
-            GHA_PATH,
+
+    let error = TrustedPlanner::new(&repository)
+        .with_source_frontend(&frontend)
+        .capsule(
+            &push,
+            WORKFLOW_PATH,
             "installation-1",
             "tenant-1",
             "repo-1",
             "main",
             vec!["policy-v1".to_owned()],
+            None,
+            &Verifier(true),
+            NOW,
         )
-        .expect("trusted GitHub Actions capsule");
-    assert_eq!(result.execution.capsule.jobs.len(), 1);
-    let expected_image = format!(
-        "containers.example/runtrue/scm-automation@sha256:{}",
-        "a".repeat(64)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        TrustedPlannerError::WorkflowFrontend(message)
+            if message.contains("input digest")
+    ));
+}
+
+#[test]
+fn frontend_generation_is_bound_into_capsule_and_approval_identity() {
+    let fixture = Fixture::create(&workflow("source", "microvm"));
+    let repository = fixture.repository();
+    let push = event(EventType::Push, fixture.source.clone(), None);
+    let compile_with_generation = |generation| {
+        let frontend = FixedFrontend {
+            generation,
+            dishonest_input_digest: false,
+        };
+        TrustedPlanner::new(&repository)
+            .with_source_frontend(&frontend)
+            .capsule(
+                &push,
+                WORKFLOW_PATH,
+                "installation-1",
+                "tenant-1",
+                "repo-1",
+                "main",
+                vec!["policy-v1".to_owned()],
+                None,
+                &Verifier(true),
+                NOW,
+            )
+            .unwrap()
+            .execution
+    };
+
+    let first = compile_with_generation(1);
+    let second = compile_with_generation(2);
+    assert_eq!(
+        first.capsule.workflow.digest,
+        second.capsule.workflow.digest
+    );
+    assert_ne!(first.capsule_digest, second.capsule_digest);
+    assert_ne!(
+        first.approval_subject_digest,
+        second.approval_subject_digest
     );
     assert_eq!(
-        result.execution.capsule.jobs[0].runner.image.as_deref(),
-        Some(expected_image.as_str())
+        first
+            .capsule
+            .context
+            .workflow_frontend
+            .as_ref()
+            .unwrap()
+            .frontend_generation,
+        1
     );
-    assert_eq!(result.execution.capsule.context.source_commit, commit);
+    assert_eq!(
+        second
+            .approval_subject
+            .workflow_frontend
+            .as_ref()
+            .unwrap()
+            .frontend_generation,
+        2
+    );
 }
 
 #[test]

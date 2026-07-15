@@ -33,6 +33,7 @@ pub(super) fn capsule(capabilities: Vec<String>) -> ExecutionCapsule {
             scm: None,
             event_context: BTreeMap::new(),
             lockfile_digest: None,
+            workflow_frontend: None,
             policy_version_ids: vec!["policy-v1".to_owned()],
         },
         variables: BTreeMap::new(),

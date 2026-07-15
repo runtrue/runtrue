@@ -273,6 +273,7 @@ fn capsule() -> ExecutionCapsule {
             scm: None,
             event_context: BTreeMap::new(),
             lockfile_digest: Some(ContentDigest::sha256(b"lock")),
+            workflow_frontend: None,
             policy_version_ids: vec!["policy".to_owned()],
         },
         variables: BTreeMap::new(),
