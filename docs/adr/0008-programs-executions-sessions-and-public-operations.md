@@ -111,7 +111,37 @@ only when their aggregate CPU, memory, storage, task, effect, and concurrency
 use fits the Session Capsule. A Session scheduler must reserve resources
 atomically; racing children cannot each observe the full remaining envelope.
 
-### 4. Workspace and output ownership
+### 4. Child isolation
+
+Sharing a Session runtime and logical workspace does not make child Executions
+one authority domain. Each child receives a fresh inner compartment appropriate
+to its runtime profile:
+
+- a fresh Wasm Store, WASI context, resource table, and host-handle table;
+- or a fresh process tree with separate process, user, mount, IPC, network, and
+  resource namespaces and a child-specific broker channel;
+- or an equivalently isolated compartment admitted by an explicit profile and
+  its adversarial conformance suite.
+
+A child cannot enumerate, signal, trace, read memory from, communicate with, or
+inherit handles from a prior or concurrent child. Capability handles, network
+flows, environment, temporary files, and resource accounting bind the child
+Capsule, lease, fence, and reservation. Concurrent children receive separate
+copy-on-write views of the exact input workspace generation and cannot observe
+one another's uncommitted changes.
+
+Before a child becomes terminal, the Provider fences its broker channel,
+terminates and reaps its complete process and task tree, closes IPC and network
+resources, revokes its handles, and proves cleanup. A daemon or background task
+cannot survive into another child. A persistent Session service requires its
+own explicit Session-level Capsule authority and cannot inherit a child's
+capabilities.
+
+A Provider that cannot meet these invariants does not advertise the affected
+Session or concurrency profile. It may not silently treat independently sealed
+children as one shared trust domain.
+
+### 5. Workspace and output ownership
 
 The Session owns a logical workspace whose initial identity and permitted
 mutable roots are declared by its Capsule. A child Execution receives an exact
@@ -123,7 +153,7 @@ Stateless Executions receive an ephemeral workspace and destroy it at terminal
 cleanup. Outputs that must survive are published as Artifacts or Evidence
 before destruction under the output contract.
 
-### 5. Public operations
+### 6. Public operations
 
 Expose one domain-neutral facade through the Rust API and versioned remote
 protocol. HTTP and language SDKs adapt the same contract. The CLI calls this
