@@ -8,6 +8,7 @@
 
 mod analysis;
 mod error;
+mod frontend;
 mod limits;
 mod locks;
 mod planner;
@@ -16,6 +17,10 @@ mod source_trust;
 
 pub use analysis::{ProposedAnalysisFailure, ProposedWorkflowAnalysis, TrustedCapsuleResult};
 pub use error::TrustedPlannerError;
+pub use frontend::{
+    GithubActionsFrontend, PreparedWorkflowSource, WorkflowFrontendOptions, WorkflowFrontendReport,
+    WorkflowSourceFrontend,
+};
 pub use limits::TrustedPlannerLimits;
 pub use planner::TrustedPlanner;
 pub use provider::{ReusableWorkflowProviderError, ReusableWorkflowSourceProvider};

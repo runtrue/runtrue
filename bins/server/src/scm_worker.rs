@@ -54,6 +54,7 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
 pub const DEFAULT_SCM_WORKFLOW_PATH: &str = ".runtrue/workflows/ci.yaml";
 const SCM_WORKFLOW_DIRECTORY: &str = ".runtrue/workflows";
+const GITHUB_WORKFLOW_DIRECTORY: &str = ".github/workflows";
 const MAX_SCM_WORKFLOWS: usize = 64;
 const SCM_TASK_KIND: &str = "scm.event";
 const SCM_CONTINUATION_TASK_KIND: &str = "scm.approval.continue";
@@ -3811,10 +3812,14 @@ fn workflow_path_allowed(config: &ScmWorkerConfig, path: &str) -> bool {
     if path == config.workflow_path {
         return true;
     }
+    let is_workflow_directory = [SCM_WORKFLOW_DIRECTORY, GITHUB_WORKFLOW_DIRECTORY]
+        .into_iter()
+        .any(|directory| {
+            path.strip_prefix(directory)
+                .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1)
+        });
     normalize_relative_path(path).ok().as_deref() == Some(path)
-        && path
-            .strip_prefix(SCM_WORKFLOW_DIRECTORY)
-            .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1)
+        && is_workflow_directory
         && (path.ends_with(".yml") || path.ends_with(".yaml"))
 }
 
@@ -3842,16 +3847,33 @@ fn discover_workflow_paths(
     trusted_commit: &str,
     config: &ScmWorkerConfig,
 ) -> Result<Vec<String>, TaskFailure> {
-    repository
-        .read_blob(trusted_commit, &config.workflow_path)
-        .map_err(TaskFailure::from_git_snapshot)?;
-    let mut paths = repository
-        .regular_files_under(trusted_commit, SCM_WORKFLOW_DIRECTORY, MAX_SCM_WORKFLOWS)
-        .map_err(TaskFailure::from_git_snapshot)?
-        .into_iter()
-        .filter(|path| workflow_path_allowed(config, path))
-        .collect::<BTreeSet<_>>();
-    paths.insert(config.workflow_path.clone());
+    let configured_exists = match repository.read_blob(trusted_commit, &config.workflow_path) {
+        Ok(_) => true,
+        Err(runtrue_git::GitError::PathNotFound)
+            if config.workflow_path == DEFAULT_SCM_WORKFLOW_PATH =>
+        {
+            false
+        }
+        Err(error) => return Err(TaskFailure::from_git_snapshot(error)),
+    };
+    let mut paths = BTreeSet::new();
+    for directory in [SCM_WORKFLOW_DIRECTORY, GITHUB_WORKFLOW_DIRECTORY] {
+        paths.extend(
+            repository
+                .regular_files_under(trusted_commit, directory, MAX_SCM_WORKFLOWS)
+                .map_err(TaskFailure::from_git_snapshot)?
+                .into_iter()
+                .filter(|path| workflow_path_allowed(config, path)),
+        );
+    }
+    if configured_exists {
+        paths.insert(config.workflow_path.clone());
+    }
+    if paths.is_empty() {
+        return Err(TaskFailure::terminal(
+            "repository contains no Runtrue or GitHub Actions workflows",
+        ));
+    }
     if paths.len() > MAX_SCM_WORKFLOWS {
         return Err(TaskFailure::terminal(
             "repository contains too many SCM workflows",
@@ -4149,6 +4171,37 @@ mod tests {
         } else {
             String::new()
         }
+    }
+
+    #[test]
+    fn standard_github_actions_workflow_is_discovered_without_native_default() {
+        let directory = tempfile::tempdir().unwrap();
+        private_directory(directory.path());
+        let repository_path = directory.path().join("repository");
+        private_directory(&repository_path);
+        git(&repository_path, &["init", "--quiet"]);
+        git(
+            &repository_path,
+            &["config", "user.email", "worker@runtrue.invalid"],
+        );
+        git(&repository_path, &["config", "user.name", "Worker Test"]);
+        let workflow_directory = repository_path.join(GITHUB_WORKFLOW_DIRECTORY);
+        fs::create_dir_all(&workflow_directory).unwrap();
+        fs::write(
+            workflow_directory.join("ci.yml"),
+            "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n",
+        )
+        .unwrap();
+        git(&repository_path, &["add", ".github/workflows/ci.yml"]);
+        git(&repository_path, &["commit", "--quiet", "-m", "workflow"]);
+        let commit = git(&repository_path, &["rev-parse", "HEAD"]);
+        let repository = GitRepository::open(&repository_path, GitLimits::default()).unwrap();
+        let config = ScmWorkerConfig::new(directory.path().join("mirrors"), "worker-1");
+
+        assert_eq!(
+            discover_workflow_paths(&repository, &commit, &config).unwrap(),
+            vec![".github/workflows/ci.yml"]
+        );
     }
 
     #[test]

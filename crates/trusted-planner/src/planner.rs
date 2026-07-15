@@ -9,6 +9,7 @@
 use crate::{
     analysis::absent_workflow_digest,
     derive_source_trust,
+    frontend::{GithubActionsFrontend, WorkflowFrontendOptions, WorkflowSourceFrontend},
     limits::normalize_policy_versions,
     locks::{lock_identity, parse_analysis_lock, parse_required_lock},
     provider::hydrate_reusable_sources,
@@ -16,7 +17,6 @@ use crate::{
     TrustedCapsuleResult, TrustedPlannerError, TrustedPlannerLimits, DEFAULT_LOCKFILE_PATH,
 };
 use runtrue_compiler::{semantic_risk_diff, Compilation, CompileContext, Compiler};
-use runtrue_gha_import::{import_github_actions_with_options, ImportOptions};
 use runtrue_git::{GitBlob, GitError, GitRepository};
 use runtrue_lock::LockFile;
 use runtrue_model::ContentDigest;
@@ -27,6 +27,8 @@ use runtrue_scm::{
 };
 use runtrue_workflow_ir::SourceTrust;
 
+static GITHUB_ACTIONS_FRONTEND: GithubActionsFrontend = GithubActionsFrontend;
+
 pub struct TrustedPlanner<'a> {
     repository: &'a GitRepository,
     reusable_source_provider: Option<&'a dyn ReusableWorkflowSourceProvider>,
@@ -35,6 +37,7 @@ pub struct TrustedPlanner<'a> {
     source_tree_digest: Option<ContentDigest>,
     scm_api_url: Option<String>,
     default_job_container_image: Option<String>,
+    source_frontend: Option<&'a dyn WorkflowSourceFrontend>,
 }
 
 impl<'a> TrustedPlanner<'a> {
@@ -48,6 +51,7 @@ impl<'a> TrustedPlanner<'a> {
             source_tree_digest: None,
             scm_api_url: None,
             default_job_container_image: None,
+            source_frontend: None,
         }
     }
 
@@ -65,6 +69,7 @@ impl<'a> TrustedPlanner<'a> {
             source_tree_digest: None,
             scm_api_url: None,
             default_job_container_image: None,
+            source_frontend: None,
         }
     }
 
@@ -99,6 +104,15 @@ impl<'a> TrustedPlanner<'a> {
     #[must_use]
     pub fn with_default_job_container_image(mut self, image: impl Into<String>) -> Self {
         self.default_job_container_image = Some(image.into());
+        self
+    }
+
+    /// Override source-language translation without changing the execution
+    /// kernel. This is the seam used when an integration moves to a separate
+    /// repository or deployment artifact.
+    #[must_use]
+    pub fn with_source_frontend(mut self, frontend: &'a dyn WorkflowSourceFrontend) -> Self {
+        self.source_frontend = Some(frontend);
         self
     }
 
@@ -474,21 +488,29 @@ impl<'a> TrustedPlanner<'a> {
                 revision: workflow.commit.clone(),
             }
         })?;
-        let imported;
-        let source = if workflow_path.starts_with(".github/workflows/")
-            || workflow_path.ends_with(".github.yml")
-            || workflow_path.ends_with(".github.yaml")
-        {
-            imported = import_github_actions_with_options(
-                source,
-                workflow_path,
-                ImportOptions {
-                    default_job_container_image: self.default_job_container_image.clone(),
-                },
-            )
-            .map_err(|error| TrustedPlannerError::GithubActionsImport(error.to_string()))?;
-            lockfile = imported
-                .lockfile_toml
+        let frontend = self
+            .source_frontend
+            .filter(|frontend| frontend.supports(workflow_path))
+            .or_else(|| {
+                GITHUB_ACTIONS_FRONTEND
+                    .supports(workflow_path)
+                    .then_some(&GITHUB_ACTIONS_FRONTEND as &dyn WorkflowSourceFrontend)
+            });
+        let prepared = frontend
+            .map(|frontend| {
+                frontend.prepare(
+                    source,
+                    workflow_path,
+                    &WorkflowFrontendOptions {
+                        default_job_container_image: self.default_job_container_image.clone(),
+                    },
+                )
+            })
+            .transpose()
+            .map_err(TrustedPlannerError::GithubActionsImport)?;
+        if let Some(prepared) = &prepared {
+            lockfile = prepared
+                .generated_lockfile_toml
                 .as_deref()
                 .map(|value| LockFile::parse(value.as_bytes()))
                 .transpose()
@@ -496,25 +518,10 @@ impl<'a> TrustedPlanner<'a> {
                     kind: "generated GitHub Actions lockfile",
                     source,
                 })?;
-            imported.native_yaml.as_deref().ok_or_else(|| {
-                let blockers = imported
-                    .report
-                    .findings
-                    .iter()
-                    .filter(|finding| finding.blocking)
-                    .map(|finding| finding.code.as_str())
-                    .take(8)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                TrustedPlannerError::GithubActionsImport(if blockers.is_empty() {
-                    "compatibility analysis produced no executable workflow".to_owned()
-                } else {
-                    blockers
-                })
-            })?
-        } else {
-            source
-        };
+        }
+        let source = prepared
+            .as_ref()
+            .map_or(source, |prepared| prepared.native_yaml.as_str());
         let reusable_workflows =
             hydrate_reusable_sources(self.reusable_source_provider, lockfile.as_ref())?;
         let event_value = serde_json::to_value(event)?;
