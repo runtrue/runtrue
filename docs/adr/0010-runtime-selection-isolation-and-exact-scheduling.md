@@ -46,7 +46,7 @@ A runtime profile binds at least:
   versions or digests;
 - Program ABI, WIT world, syscall or device contract;
 - memory, task, process, filesystem, network, and device model;
-- compiler, AOT, snapshot, and mitigation settings;
+- compiler, AOT, snapshot-compatibility, and mitigation settings;
 - capability-adapter and guest-protocol generations; and
 - security patch and revocation generation.
 
@@ -57,6 +57,13 @@ inventory, scheduling, snapshots, caches, Evidence, and attestations.
 An implementation patch may preserve portable behavior, but it is still a new
 runtime identity unless the compatibility schema explicitly defines the field
 as non-semantic. Cached code or snapshots never cross incompatible identities.
+
+Snapshot compatibility binds the format, restore ABI, guest-visible initial
+state contract, and security-relevant restore settings. It does not bind a
+concrete sterile-template digest or pool member. Those are operational
+acquisition identities recorded under ADR 0013. Cold construction and warm
+restore may satisfy the same runtime profile only when they produce the same
+declared guest-visible initial state and security boundary.
 
 ### 3. Policy floors are planning constraints
 
@@ -75,16 +82,20 @@ Providers advertise immutable compatibility identities separately from
 mutable capacity and placement. Scheduling matches the Capsule against:
 
 - exact runtime compatibility digest;
-- permitted Provider and pool identities;
+- permitted Provider identities and immutable pool trust profiles;
 - tenant and administrative trust domain;
 - allowed region, locality, and data-residency set;
 - required devices and resource quantities; and
 - current non-revoked runner posture.
 
-The scheduler may choose any worker, sterile prepared instance, or availability
-zone within those sealed sets. It may choose cold or warm acquisition because
-that is operational Evidence, not functional semantics. It may not change
-runtime, isolation, Program, capabilities, limits, or placement constraints.
+The scheduler may choose any concrete worker, pool, sterile prepared instance,
+or availability zone whose authenticated attributes fall within those sealed
+sets. A Capsule may constrain a stable pool trust profile or administrative
+trust domain, but never names a mutable concrete pool or member as workload
+semantics. Concrete pool and member identities are placement Evidence. The
+scheduler may choose cold or warm acquisition because that is operational
+Evidence, not functional semantics. It may not change runtime, isolation,
+Program, capabilities, limits, or placement constraints.
 
 Capacity reservations are leased and fenced. A stale offer or runner cannot
 claim work after a newer scheduling generation. Inventory identity is
