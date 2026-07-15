@@ -448,11 +448,14 @@ where
             return Ok(None);
         }
         let broker = self.transport.broker_client();
-        if self
+        if let Err(error) = self
             .executor
             .preflight_with_broker(&admitted, broker.clone())
-            .is_err()
         {
+            eprintln!(
+                "runtrue-runner: executor preflight rejected job `{}`: {error}",
+                offer.job_id
+            );
             self.reject_offer(&offer, "executor_preflight_rejected")
                 .await?;
             return Ok(None);
