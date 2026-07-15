@@ -380,14 +380,14 @@ Rust will increase initial implementation cost in areas where mature Go librarie
 
 ### 7.6 WebAssembly version policy
 
-WASI 0.3.0 was released on June 11, 2026 and adds native async to the Component Model. Runtime support is landing in current Wasmtime versions, but language and guest-toolchain support will mature at different rates. Therefore:
+WASI 0.3.0 was released on June 11, 2026 and adds native async to the Component Model. ADR 0006 selects it as the unreleased v0.x runtime baseline with Wasmtime 46.0.1 and no WASI 0.2 compatibility mode. Therefore:
 
-1. The first stable Runtrue action ABI targets WASI 0.2 plus Runtrue-owned WIT interfaces.
-2. The WIT package names include explicit semantic versions.
-3. WASI 0.3 support begins as experimental behind a feature flag.
-4. The host can support both 0.2 and 0.3 components concurrently.
+1. Standard WASI imports target the pinned final 0.3.0 interface set.
+2. Runtrue-owned WIT package names retain explicit semantic versions independently from WASI.
+3. A fresh default-deny WASI context exposes no inherited environment, files, standard streams, or network.
+4. The exact WASI version participates in signed compatibility metadata and authenticated AOT cache identity.
 5. No workflow Capsule depends directly on runtime-specific host functions; it depends on Runtrue capability interfaces.
-6. Stable 0.3 becomes the default only after Rust and at least two additional guest-language SDKs pass the conformance suite.
+6. An asynchronous Runtrue action export and broad guest SDK claims require separate conformance evidence for futures, streams, cancellation, and backpressure.
 
 Wasm is the preferred runtime for compact reusable actions, policy-safe transformations, metadata processing, artifact handling, and tools that fit a capability model. It is not the only job runtime and does not replace containers or microVMs for arbitrary build tools.
 
@@ -4510,7 +4510,7 @@ Deliverables:
 - Runner/guest protocol draft.
 - Rust dependency and crate-boundary ADRs.
 - Firecracker lifecycle spike.
-- Wasmtime Component/WIT spike for WASI 0.2 and 0.3 coexistence.
+- Wasmtime Component/WIT spike for the final WASI 0.3 baseline.
 - Rootless OCI backend spike.
 - SQLite lease/task concurrency spike.
 - Cache CAS/chunking benchmark.
@@ -4739,8 +4739,8 @@ Acceptance:
 5. Implement cache/artifact/checks interfaces.
 6. Enforce memory, fuel, epoch, and wall-clock limits.
 7. Add component signature/manifest verification.
-8. Add WASI 0.2 stable host.
-9. Add feature-gated WASI 0.3 host.
+8. Add the deny-ambient WASI 0.3 host.
+9. Bind the exact WASI generation into admission and AOT identity.
 10. Implement AOT cache.
 11. Build SDK examples for Rust and at least one other language.
 
@@ -4993,7 +4993,7 @@ Acceptance:
 |---|---|---:|---|---|
 | Rust ecosystem gap for a provider/backend | Schedule/maintenance cost | Medium | Traits, narrow wrappers, use stable protocols/CLIs where safer | Repeated blocking SDK defects |
 | Firecracker operational complexity | Delays untrusted runner | Medium | Early spike, minimal image pipeline, OCI fallback only for trusted jobs | Cannot meet cleanup/startup targets |
-| WASI 0.3/toolchain churn | Component incompatibility | High near-term | Stable 0.2 ABI first, versioned WIT, dual host | Two-language conformance matures |
+| WASI 0.3/toolchain churn | Component incompatibility | High near-term | Exact 0.3 pins, versioned Runtrue WIT, deterministic WAT fixture | Two-language conformance matures |
 | GitHub compatibility treadmill | Scope explosion | High | Native core, explicit importer coverage, compatibility report | Support burden exceeds core roadmap |
 | Cache poisoning | Supply-chain compromise | Medium | Trust domains, quarantine, immutable content, promotion | Any cross-scope incident |
 | Warm-state data leak | Secret/source exposure | Medium | Sterile snapshots, per-job CoW, post-job destroy, testing | Snapshot/volume leak finding |
@@ -5110,7 +5110,7 @@ The design draws on current primary documentation and public architecture descri
 
 - Blacksmith documents modern bare-metal runner pools, ephemeral Firecracker microVMs, co-located cache storage, sticky disks, persistent Docker/BuildKit layer caching, prehydrated container images, and incremental Git mirrors. These validate the importance of data locality and warm state, but Runtrue's trust-domain cache and exact Capsule security model are original design requirements rather than claims about Blacksmith.
 - Firecracker documents KVM-based microVMs, fast startup, low VMM overhead, and a reduced device model. Its snapshot guidance reinforces that snapshot files are trusted inputs requiring authentication and careful lifecycle management.
-- WASI 0.3.0 was released on June 11, 2026 with native async Component Model support. Runtrue deliberately keeps WASI 0.2 as the initial stable action baseline while versioning its host ABI for coexistence and later migration.
+- WASI 0.3.0 was released on June 11, 2026 with native async Component Model support. ADR 0006 selects it as Runtrue's initial runtime baseline while keeping the Runtrue-owned action ABI independently versioned.
 - GitHub's own security documentation warns about self-hosted runners for public repositories, the limitations of contributor-history approval settings, mutable workflow/action risks, and the value of OIDC short-lived identities. Runtrue's target-branch workflow, exact subject approval, step-secret leases, cache quarantine, and egress model are designed to make those controls first-class rather than optional guidance.
 - Cedar provides a Rust policy engine with schema validation suitable for embedded authorization.
 - SLSA/in-toto, Sigstore/Cosign, and TUF provide established patterns for provenance, identity-based artifact signatures, and compromise-resilient update distribution.

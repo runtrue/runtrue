@@ -564,7 +564,8 @@ missing restored blob blocks activation.
   These call opaque host services and never expose storage credentials.
 - Preserve invocation-local limits, cancellation, taint/redaction, and response
   bounds for every adapter.
-- Add WASI 0.3 only behind a runtime-generation feature and conformance suite.
+- Preserve the deny-ambient WASI 0.3 context and add async stream/future
+  adapters only with conformance, cancellation, and backpressure evidence.
 
 #### R6.2 OCI
 
