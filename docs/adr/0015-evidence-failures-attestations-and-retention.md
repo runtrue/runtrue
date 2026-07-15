@@ -28,10 +28,12 @@ allowing sensitive payloads to expire.
 Every durable Evidence event uses a versioned canonical envelope containing at
 least:
 
-- tenant, Provider, Program, Capsule, Seal, Execution, and optional Session
-  identities;
-- the runtime compatibility and deployed Provider generation;
-- an Execution-local sequence number and previous-event digest;
+- a closed, versioned scope kind and primary subject identity;
+- tenant and administrative trust domain where applicable;
+- applicable Provider, Program, Capsule, Seal, Execution, Session, sterile
+  template, pool, runtime, and conformance-profile identities;
+- the deployed Provider generation where applicable;
+- a subject-local sequence number and previous-event digest;
 - event type, schema generation, canonical payload digest, and event digest;
 - the authenticated producer identity and signing-key generation;
 - observed wall and monotonic times with their declared precision; and
@@ -49,12 +51,12 @@ event meaning or terminal classification.
 
 Secrets, bearer credentials, prohibited content, and unrestricted request or
 response bodies are not Evidence. Sensitive identifiers and low-entropy values
-use a tenant-scoped keyed digest or are omitted; an ordinary hash is not
-sufficient protection against guessing.
+use a tenant- or trust-domain-scoped keyed digest or are omitted; an ordinary
+hash is not sufficient protection against guessing.
 
 ### 2. Required coverage
 
-The portable Evidence profile records, within declared bounds:
+Execution and Session Evidence profiles record, within declared bounds:
 
 - admission inputs, canonical identities, policy and Seal decisions, and
   rejected requirements;
@@ -70,6 +72,13 @@ The portable Evidence profile records, within declared bounds:
 - revocation, runtime disposal, cleanup, terminal classification, and
   attestation publication.
 
+Provider infrastructure profiles separately record sterile-template
+publication and revocation, pool-member transitions and reconciliation,
+inventory and deployed generations, and Bisim and backend-specific conformance
+results. Those subjects exist before or outside a tenant Execution and have
+their own authenticated chains; they are never forced into a synthetic
+Execution identity.
+
 Profiles may add observations, but they cannot silently omit a required event.
 The baseline does not promise full syscall, packet, instruction, or memory
 tracing. A stronger Evidence grade states its extra observation boundary and
@@ -77,16 +86,17 @@ limits explicitly.
 
 ### 3. Append-only publication and integrity
 
-Evidence is appended durably under an Execution-scoped compare-and-swap
+Evidence is appended durably under a subject-scoped compare-and-swap
 sequence. Replaying the exact same canonical event is idempotent. Reusing a
 sequence for different content, observing a gap after finalization, or changing
 an earlier event is an integrity failure.
 
 Providers publish signed chain checkpoints so a verifier can validate a prefix
-without trusting the serving store. Storage verifies digest, size, tenant, and
-authorization on every read as required by ADR 0014. Replication may lag, but a
-Provider cannot report a durable terminal result until the required Evidence
-and chain checkpoint are committed.
+without trusting the serving store. Storage verifies digest, size, tenant or
+trust domain, and authorization on every read as required by ADR 0014.
+Replication may lag, but a Provider cannot report a durable terminal result or
+conformance publication until the required Evidence and chain checkpoint are
+committed.
 
 Events received from a runner are untrusted claims until the execution plane
 authenticates the runner, lease, fence, Capsule, sequence, and schema. The
@@ -94,9 +104,14 @@ execution plane adds its own admission, lease, cancellation, effect, cleanup,
 and terminal observations rather than allowing a runner to attest to them on
 its behalf.
 
+Ordinary clients and integrations cannot append portable Provider Evidence.
+Client-supplied claims or attachments, if supported, use a separate typed scope
+that preserves their authenticated producer and cannot satisfy a required
+execution-plane event or Evidence grade.
+
 ### 4. Stable failure classes
 
-The portable terminal failure classes are:
+The portable Execution terminal failure classes are:
 
 - `admission rejected`: the Capsule, Seal, Program, protocol, or required
   feature was invalid before policy evaluation completed;
@@ -131,15 +146,24 @@ Two safety overrides apply even after an ordinary cause was selected:
 2. an unproven execution or cleanup boundary makes the primary class
    `runner integrity failure`.
 
-All observed causes remain in Evidence. The primary class controls automation;
-it does not erase the earlier Program exit, cancellation request, or Provider
-fault. An integrity failure takes precedence over an indeterminate effect while
-retaining the effect state as a required unresolved cause.
+All observed causes remain in Evidence. The primary class controls terminal
+status presentation and ordinary handling; it does not erase the earlier
+Program exit, cancellation request, Provider fault, or effect state. An
+integrity failure takes precedence over an indeterminate effect while retaining
+the effect state as a required unresolved cause.
+
+Retry eligibility is a separate signed deny-overrides decision across every
+observed cause and external operation. An unresolved indeterminate effect
+always denies automatic retry until ADR 0011's safety proof succeeds, regardless
+of the primary class or a Provider retry hint. A runner-integrity failure also
+denies automatic retry until the affected runtime or Provider is quarantined or
+remediated and an independent effect-safety proof is available. No single
+terminal class implies retry safety.
 
 ### 5. Finalization and cleanup
 
-Output completion is not terminal finalization. Before publishing a terminal
-result, the Provider must:
+Output completion is not terminal finalization. Before publishing an Execution
+or Session terminal result, the Provider must, where applicable:
 
 1. fence new guest and capability activity;
 2. close or classify every external operation;
@@ -168,9 +192,10 @@ retry unless ADR 0011's safety proof is later established.
 
 ### 7. Attestations
 
-A Runtrue attestation is a signed canonical statement binding:
+A Runtrue attestation is a signed canonical statement binding, as applicable:
 
 - the Evidence schema, chain root, and sequence range;
+- the scope kind and primary subject identity;
 - Program, Capsule, Seal, policy, runtime, Provider, and deployed-generation
   identities;
 - admission, lease, fence, capability, and external-effect summaries;
@@ -186,9 +211,16 @@ complete syscall tracing, absence of a Provider vulnerability, semantic
 correctness of the Program, or equal isolation across runtime families. Bisim
 conformance and backend security results remain separate claims under ADR 0014.
 
-Signing occurs only after finalization. Key rotation preserves verification of
-unexpired historical attestations, while key compromise publishes a signed
-revocation or trust-policy update with an explicit affected range.
+Signing occurs only after the subject's required Evidence prefix is finalized.
+For an Execution, that prefix ends with terminal cleanup Evidence. The Provider
+then appends an attestation-publication event that refers to the signed
+attestation; the attestation does not include its own publication event in its
+chain root. This avoids a circular digest while retaining a durable publication
+record.
+
+Key rotation preserves verification of unexpired historical attestations,
+while key compromise publishes a signed revocation or trust-policy update with
+an explicit affected range.
 
 ### 8. Retention and payload expiry
 
@@ -215,8 +247,9 @@ expired data from corruption or an unauthorized missing object.
 An attestation remains cryptographically verifiable after allowed payload
 expiry, but verification reports that the payload is unavailable under the
 named retention policy. It must not report a full reproduction or content
-validation. Replay Bundle grades degrade according to ADR 0012 when required
-inputs expire.
+validation. The declared historical Replay Bundle grade remains immutable;
+current replay availability and verification status degrade under ADR 0012
+when required inputs expire.
 
 ### 9. Evidence access and export
 
