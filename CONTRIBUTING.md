@@ -7,9 +7,10 @@ production data.
 
 ## Development setup
 
-Use the repository-pinned Rust 1.88 toolchain and Node.js 22.17 or newer. The
-Rust dependency graph is lockfile-bound. Do not update a lockfile unless the
-dependency change is intentional and described in the pull request.
+Use the repository-pinned Rust 1.88 toolchain, Go 1.24 or newer, and Node.js
+22.17 or newer. The Rust dependency graph is lockfile-bound, and the Go signer
+uses only the standard library. Do not update a lockfile or add a Go module
+dependency unless the change is intentional and described in the pull request.
 
 Run the relevant focused tests while developing. Before requesting review, run:
 
@@ -25,6 +26,7 @@ python3 tests/conformance/check_migrations.py
 deploy/tests/validate.sh
 
 npm --prefix web test
+(cd components/github-signer && go test ./...)
 ```
 
 Container or build-input changes must retain immutable base-image references,

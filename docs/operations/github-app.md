@@ -186,7 +186,8 @@ transport failure.
 
 ## Non-exportable signer protocol
 
-The signer socket owns the App private key. Runtrue sends one length-prefixed
+The first-party Go signer in `components/github-signer` owns the App private
+key. Runtrue sends one length-prefixed
 (big-endian u32), bounded JSON request:
 
 ```json
@@ -206,6 +207,13 @@ the ten-minute maximum lifetime before using the JWT once to mint a
 repository-scoped installation token. The private key never enters Runtrue. The
 installation token is zeroized, never persisted, and is passed to Git only
 through the exact read-only child credential channel.
+
+Build the signer from the same reviewed Runtrue checkout with `go test ./...`
+and `CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid='`. It remains a
+separate process and may be replaced by any conforming implementation; choosing
+Go does not add Go to the Rust execution kernel. Run it with networking disabled
+and expose only its mode-0600 socket to the server. Exact environment, build,
+and readiness commands are in `components/github-signer/README.md`.
 
 ## Network and resource posture
 

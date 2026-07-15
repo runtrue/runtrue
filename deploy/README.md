@@ -16,6 +16,7 @@ runner-control experiment are explicit profiles.
 - Linux with a reachable Docker Engine 24 or newer and Docker Compose v2.20 or
   newer. Rootless Docker is preferred where it works for the host.
 - Bash 4+, OpenSSL 3, and GNU `coreutils`, `findutils`, and `grep`.
+- Go 1.24 or newer when the GitHub App integration is enabled.
 - Enough disk for a release Rust build and retained SQLite backups. The first
   image build compiles the workspace and can take several minutes.
 - A checked-out source tree with the exact `Cargo.lock` being evaluated.
@@ -113,13 +114,28 @@ web/API origins with `https://github.com` and `https://api.github.com`.
 `RUNTRUE_PUBLIC_ORIGIN` must be the externally reachable HTTPS origin of this
 Runtrue deployment.
 
-Before starting Compose, run the separately managed GitHub App signer at the
+Before starting Compose, build and test the first-party GitHub App signer from
+`components/github-signer`, then run it at the
 absolute host path in `RUNTRUE_GITHUB_SIGNER_SOCKET`. The socket must be a Unix
 stream socket, owned by root or the numeric Compose runtime uid, with exact
 mode `0600`. Compose bind-mounts only that socket, read-only; it never mounts an
-App private key into the Runtrue server container. The signer implementation and
-private-key lifecycle remain an operator-owned security boundary described in
+App private key into the Runtrue server container. The signer process and
+private-key lifecycle remain an independently isolated security boundary described in
 [`docs/operations/github-app.md`](../docs/operations/github-app.md).
+
+```sh
+(
+  cd components/github-signer
+  go test ./...
+  CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' \
+    -o runtrue-github-signer .
+)
+```
+
+Use the exact environment and readiness command in
+`components/github-signer/README.md`. Run the signer with networking disabled,
+as the same numeric uid as the server, and give only the signer read access to
+the private key.
 
 Build and start the GitHub-enabled server:
 

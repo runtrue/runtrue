@@ -2,7 +2,8 @@
 
 **Run local. Run remote. Run true.**
 
-Runtrue is a trust-preserving execution system in Rust. It binds an immutable
+Runtrue is a trust-preserving execution system whose execution kernel is
+implemented in Rust. It binds an immutable
 **Program** and exact runtime contract into an **Execution Capsule** or
 **Session Capsule**, then binds approval through a **Seal** to that exact
 subject. The **Bisim** conformance suite compares portable Provider behavior,
@@ -84,6 +85,8 @@ Control plane and security:
   worker re-verifies normalized events and atomically commits the signed Capsule,
   remote run/jobs, idempotency record, and task completion, including across a
   database close/reopen.
+- A first-party, Linux-only Go GitHub App signer keeps the App private key out
+  of the server behind the bounded, language-neutral Unix-socket protocol.
 - Hashed-at-rest, one-time, scoped, expiring, revocable API tokens plus rotating
   browser-session primitives with CSRF and refresh-reuse revocation semantics.
 - Embedded schema-validated Cedar authorization, typed Runtrue resources/actions,
@@ -146,9 +149,10 @@ Data, delivery, and operations:
   out-of-band roots, signed metadata, SBOM/provenance evidence, and exact target
   verification. Automated publication remains disabled until it runs on
   Runtrue. See the [release runbook](docs/operations/releases.md).
-- Pinned Rust 1.88 and Node.js 22.17 verification gates for formatting, all targets,
-  workspace and component tests, Clippy, schema/API/migration conformance,
-  deployment validation, dependency auditing, and every shipped image build.
+- Pinned Rust 1.88, Go 1.24, and Node.js 22.17 verification gates for formatting,
+  all targets, workspace and component tests, Clippy, schema/API/migration
+  conformance, deployment validation, dependency auditing, and every shipped
+  image build.
 
 ## Build and verify
 
@@ -165,6 +169,8 @@ python3 tests/conformance/check_migrations.py
 deploy/tests/validate.sh
 
 npm --prefix web test
+
+(cd components/github-signer && go test ./...)
 ```
 
 ## Local workflow path

@@ -22,6 +22,12 @@ fail() {
 bash -n "${DEPLOY_DIR}/bootstrap.sh"
 bash -n "${DEPLOY_DIR}/healthcheck.sh"
 
+command -v go >/dev/null 2>&1 || fail 'Go is required to verify the GitHub App signer'
+(
+  cd "${ROOT_DIR}/components/github-signer"
+  go test ./...
+)
+
 [[ "$(stat -c '%a' "${DEPLOY_DIR}/bootstrap.sh")" == 700 ]] ||
   fail 'bootstrap.sh must have mode 0700'
 [[ "$(stat -c '%a' "${DEPLOY_DIR}/healthcheck.sh")" == 555 ]] ||

@@ -12,9 +12,9 @@ is manual unless the release decision explicitly authorizes that process.
 
 ## Source and verification gates
 
-Start from a clean checkout of the exact proposed commit. Use Rust 1.88.0,
-Node.js 22.17.0, the locked dependency graph, and a controlled builder with no
-ambient publication credentials.
+Start from a clean checkout of the exact proposed commit. Use Rust 1.88.0, Go
+1.24 or newer, Node.js 22.17.0, the locked dependency graph, and a controlled
+builder with no ambient publication credentials.
 
 ```bash
 cargo +1.88.0 fetch --locked
@@ -28,6 +28,7 @@ python3 tests/conformance/check_openapi_routes.py
 python3 tests/conformance/check_migrations.py
 deploy/tests/validate.sh
 npm --prefix web test
+(cd components/github-signer && go test ./...)
 cargo +1.88.0 audit
 ```
 
