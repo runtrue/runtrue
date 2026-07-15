@@ -49,6 +49,13 @@ Every host call revalidates the handle and current cancellation, deadline,
 fence, revocation, request, response, concurrency, and byte budgets. Validation
 at handle issuance alone is insufficient.
 
+Before dispatch, the broker atomically reserves count, concurrency, request,
+response, byte, rate, and effect budgets under the current handle, fence, and
+operation identity. Completion idempotently charges actual use and releases only
+the unused reservation. A crash or ambiguous completion keeps the conservative
+charge until reconciliation. Concurrent calls cannot each observe and spend the
+same remaining budget.
+
 ### 3. Credential brokers
 
 Prefer a broker that performs the authorized operation using a credential the
@@ -58,9 +65,20 @@ tenant, and Execution before applying authority.
 When an incompatible tool requires guest-visible material, policy may issue a
 short-lived derivative credential with the narrowest possible audience and
 scope. Release is a separately evidenced high-risk capability. The material is
-redacted, zeroized, excluded from structured output and persistent state, and
-revoked at terminal cleanup. A long-lived provider or tenant root credential is
-never placed in a guest.
+zeroized from host delivery buffers and revoked at terminal cleanup, but the
+execution plane cannot prove that an adversarial guest did not transform it
+into output or persistent state. All subsequently reachable guest-mutable state
+and output is tainted under ADR 0012; scanning and redaction remain defense in
+depth. A long-lived Provider or tenant root credential is never placed in a
+guest.
+
+Guest-visible credentials may use only an effect-aware mediated network path
+that can classify each authenticated operation. If a protocol cannot expose
+that boundary, policy must either deny it or admit one coarse operation whose
+`requested` state is durably recorded before enabling transmission. Any
+possible unclassified mutation after transmission is `indeterminate`; a raw
+socket or encrypted channel cannot be assumed read-only merely because the
+execution plane could not inspect it.
 
 ### 4. Network authority
 
@@ -85,6 +103,14 @@ requested -> accepted
 requested -> indeterminate
 ```
 
+Before sending any request byte or enabling a coarse effect-capable channel,
+the Provider durably appends `requested` with the operation ID, idempotency key,
+grant, fence, destination, and bounded request digest using compare-and-swap.
+Failure to commit means nothing is transmitted. After possible transmission,
+exactly one terminal transition is appended; a crash, timeout, or lost response
+that prevents proof of rejection or safe acceptance becomes `indeterminate`.
+Recovery never infers `rejected` from an absent post-dispatch event.
+
 `Accepted` means the authoritative destination acknowledged the operation
 under its idempotency contract. It does not mean the desired business outcome
 was later observed. `Indeterminate` means Runtrue cannot prove rejection or
@@ -104,8 +130,8 @@ Runtrue may automatically retry only when one of these is proven:
 
 - no effect-capable call was accepted or left indeterminate;
 - all attempted effects were read-only;
-- every accepted call is safely replayable under a destination-enforced
-  idempotency key; or
+- every accepted or indeterminate mutation is safely replayable under a
+  destination-enforced idempotency key; or
 - a protocol-specific recovery operation established the exact final state.
 
 Otherwise the Execution terminates with `external effect indeterminate` or its
@@ -122,8 +148,11 @@ operations were closed or whether integrity is unproven.
 
 Evidence records capability identity and version, operation ID, bounded request
 and destination metadata, state transitions, destination acknowledgement
-identity, retries, revocation, and cleanup. Secret values, bearer credentials,
-and prohibited payloads are never Evidence.
+identity, retries, revocation, and cleanup. Known secret values, bearer
+credentials, and prohibited payloads are never deliberately admitted as
+Evidence. After guest-visible release, tainted guest output is excluded from
+Evidence payloads unless an admitted sound mechanism proves it independent of
+the credential; only permitted bounded release and lifecycle metadata remains.
 
 ## Consequences
 
