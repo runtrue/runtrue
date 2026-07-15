@@ -2,7 +2,7 @@ use super::inspection::table_exists;
 use crate::BackupError;
 use rusqlite::Connection;
 
-pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 28;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 29;
 
 pub(super) fn verify_schema(connection: &Connection) -> Result<(), BackupError> {
     let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -94,6 +94,22 @@ pub(super) fn verify_schema(connection: &Connection) -> Result<(), BackupError> 
             ));
         }
     }
+    if version >= 29 {
+        let credential_taint_column: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('leases')
+                WHERE name = 'terminal_credential_taint'
+                  AND type = 'TEXT' AND \"notnull\" = 1
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !credential_taint_column {
+            return Err(BackupError::InvalidDatabase(
+                "credential-taint lease state is missing",
+            ));
+        }
+    }
     let migrations = connection
         .prepare("SELECT version FROM schema_migrations ORDER BY version")?
         .query_map([], |row| row.get::<_, u32>(0))?
@@ -142,6 +158,25 @@ mod tests {
             verify_schema(&connection),
             Err(BackupError::InvalidDatabase(
                 "versioned required table is missing"
+            ))
+        ));
+    }
+
+    #[test]
+    fn schema_twenty_nine_backup_validation_requires_durable_credential_taint() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sqlite3");
+        drop(ControlPlane::open(&path, "backup-schema-29", 1).unwrap());
+
+        let connection = Connection::open(&path).unwrap();
+        verify_schema(&connection).unwrap();
+        connection
+            .execute_batch("ALTER TABLE leases DROP COLUMN terminal_credential_taint;")
+            .unwrap();
+        assert!(matches!(
+            verify_schema(&connection),
+            Err(BackupError::InvalidDatabase(
+                "credential-taint lease state is missing"
             ))
         ));
     }
