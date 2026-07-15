@@ -250,16 +250,21 @@ Expose domain-neutral operations through a stable Rust facade and versioned
 remote protocol. HTTP or other language SDKs may adapt the same protocol. The
 minimum operation set is:
 
-- create, inspect, cancel, and observe an Execution;
-- create, inspect, suspend, restore, and destroy a Session;
+- create, inspect, cancel, and stream events for an Execution;
+- create, inspect, renew, suspend, restore, and destroy a Session;
 - execute a child Capsule within a Session;
 - create and retrieve a Checkpoint;
-- stream bounded events;
-- publish and retrieve permitted Artifacts and Evidence; and
-- construct, verify, and authorize Capsules and Seals.
+- publish and retrieve authorized Programs and Artifacts;
+- retrieve, stream, verify, and export authorized Evidence;
+- construct and verify Capsules and approval subjects;
+- request and record authorization decisions; and
+- retrieve, verify, and revoke permitted Seals.
 
 An integration translates its domain events to these operations and translates
-portable Evidence back into domain output.
+portable Evidence back into domain output. Portable Evidence is produced only
+by authenticated execution-plane components under ADR 0015. Client-supplied
+claims or attachments, if supported, use a distinct typed namespace and never
+become Provider Evidence merely because a client uploaded them.
 
 ### 12. Evidence and Replay Bundles
 
@@ -275,10 +280,11 @@ logs, network bodies, or sensitive Artifacts.
 
 A Replay Bundle declares one of three grades:
 
-- **Exact:** all relevant inputs and interactions are immutable or safely
-  recorded, so equivalent replay is expected.
-- **Hermetic:** the Execution used only content-addressed inputs and no mutable
-  external service.
+- **Hermetic:** all execution inputs are content-addressed and no mutable
+  external service or effect influenced execution.
+- **Exact:** mutable interactions were replaced by a complete, policy-safe,
+  authenticated recorded-interaction contract, so equivalent replay is
+  expected without contacting or mutating the original service.
 - **Evidence-only:** commands, inputs, effects, and observed results are
   retained, but mutable external behavior cannot be recreated exactly.
 
