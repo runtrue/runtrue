@@ -19,14 +19,15 @@ The public project is **Runtrue**, with the tagline:
 
 The canonical product vocabulary is:
 
-- **Capsule:** the immutable execution plan, including the digest-bound inputs
-  and policy context required to execute it.
+- **Capsule:** the immutable specification of an Execution or Session,
+  including the digest-bound inputs and policy context required to admit it.
 - **Seal:** approval authorizing one exact approval subject for a Capsule. A
   Seal is invalid when any bound input changes.
 - **Bisim:** the shared-engine conformance suite that verifies equivalent
   behavior across local and remote execution providers.
-- **Replay Bundle:** the portable, secret-free material required to reproduce
-  an execution locally.
+- **Replay Bundle:** the portable, secret-free manifest and permitted material
+  used to reproduce or investigate an Execution. Its declared grade states
+  whether equivalent reproduction is possible.
 
 Use `Runtrue` for the product, organization, and prose; use `runtrue` for the
 CLI, packages, repositories, images, and filesystem paths; and use `RUNTRUE_`
@@ -55,7 +56,8 @@ changed only through their own explicitly versioned design decisions.
   explicit.
 - Bisim cannot be used as a synonym for digest comparison; it must exercise
   observable engine behavior.
-- Replay Bundle retains its reproducibility and secret-exclusion contract.
+- Replay Bundle makes reproducibility an explicit grade and retains its
+  secret-exclusion contract.
 - A release check must reject unintended user-facing references to superseded
   names.
 
@@ -65,3 +67,10 @@ Before public announcement, verify and reserve the GitHub organization, primary
 developer domains, `runtrue` and `runtrue-cli` Rust crates, OCI namespace,
 `@runtrue` npm scope, and planned package-manager names. Track ownership and
 verification in the [public namespace reservation runbook](../operations/public-namespace-reservations.md).
+
+## Review triggers
+
+- A trademark or public namespace conflict prevents consistent use of Runtrue.
+- A canonical term becomes ambiguous across the protocol and product surface.
+- A new distribution channel requires a public package-name convention.
+- A Replay Bundle grade can no longer describe reproduction honestly.
