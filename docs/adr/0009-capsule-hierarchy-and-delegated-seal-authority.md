@@ -10,7 +10,8 @@
 Interactive Programs and agents choose commands after a Session begins. Sealing
 every command manually is unusable, but allowing a Program to expand its own
 authority would make the sandbox the authorization root. Runtrue needs bounded
-delegation in which dynamic child plans remain immutable and attributable.
+delegation in which dynamically proposed child Capsules become immutable and
+attributable before authorization.
 
 The exact Capsule, the approval subject, the authority of the issuer, and the
 proof that a child fits its parent are distinct security objects.
