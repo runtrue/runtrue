@@ -1036,7 +1036,7 @@ async fn configured_data_plane_is_reached_only_over_enrolled_mtls_identity() {
         completed_at: exact_completion.completed_at,
         final_job_attempt: exact_completion.final_job_attempt,
         expected_log_frames: exact_completion.expected_log_frames,
-        credential_taint: v2::CredentialTaintState::Unspecified as i32,
+        credential_taint: v2::CredentialTaintState::None as i32,
     };
     let mut object_replay_client = RunnerObjectTransferClient::new(replay_channel.clone());
     assert!(
@@ -1048,7 +1048,7 @@ async fn configured_data_plane_is_reached_only_over_enrolled_mtls_identity() {
             .accepted,
         "the exact typed terminal completion must replay over protocol v2"
     );
-    let mut wrong_name = exact_v2_completion;
+    let mut wrong_name = exact_v2_completion.clone();
     wrong_name.committed_objects[0].declaration_name = Some("substituted-output".into());
     assert_eq!(
         object_replay_client
@@ -1059,31 +1059,21 @@ async fn configured_data_plane_is_reached_only_over_enrolled_mtls_identity() {
         tonic::Code::FailedPrecondition,
         "typed declaration-name substitution must fail with the uniform binding-mismatch response before terminal replay, without disclosing artifact existence"
     );
-    let mut replay_client = RunnerControlClient::new(replay_channel);
-    assert!(
-        replay_client
-            .complete_lease(exact_completion.clone())
-            .await
-            .unwrap()
-            .into_inner()
-            .accepted,
-        "the exact terminal completion must replay over the authenticated network boundary"
-    );
-    let mut substituted = exact_completion.clone();
-    substituted.artifact_ids[0] = "artifact-substitution".into();
+    let mut substituted = exact_v2_completion.clone();
+    substituted.committed_objects[0].object_id = "artifact-substitution".into();
     assert_eq!(
-        replay_client
+        object_replay_client
             .complete_lease(substituted)
             .await
             .unwrap_err()
             .code(),
-        tonic::Code::AlreadyExists,
+        tonic::Code::FailedPrecondition,
         "a changed completion object must conflict without replacing durable bindings"
     );
-    let mut stale_fence = exact_completion.clone();
+    let mut stale_fence = exact_v2_completion.clone();
     stale_fence.fencing_generation += 1;
     assert_eq!(
-        replay_client
+        object_replay_client
             .complete_lease(stale_fence)
             .await
             .unwrap_err()
@@ -1091,10 +1081,10 @@ async fn configured_data_plane_is_reached_only_over_enrolled_mtls_identity() {
         tonic::Code::FailedPrecondition,
         "a stale or invented lease fence must be rejected"
     );
-    let mut stale_attempt = exact_completion.clone();
+    let mut stale_attempt = exact_v2_completion;
     stale_attempt.final_job_attempt += 1;
     assert_eq!(
-        replay_client
+        object_replay_client
             .complete_lease(stale_attempt)
             .await
             .unwrap_err()
