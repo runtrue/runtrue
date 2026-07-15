@@ -547,7 +547,18 @@ where
             };
             let hydrated = match hydration {
                 Ok(Ok(digest)) if !cancelled => digest,
-                _ => {
+                result => {
+                    if !cancelled {
+                        match &result {
+                            Ok(Err(error)) => {
+                                eprintln!("runtrue-runner: source hydration failed: {error}");
+                            }
+                            Err(error) => {
+                                eprintln!("runtrue-runner: source hydration task failed: {error}");
+                            }
+                            Ok(Ok(_)) => {}
+                        }
+                    }
                     let (final_state, error_code, result_domain) = if cancelled {
                         (
                             "canceled",
