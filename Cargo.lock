@@ -2712,8 +2712,10 @@ name = "runtrue"
 version = "0.1.0"
 dependencies = [
  "runtrue-bisim",
+ "runtrue-execution",
  "runtrue-model",
  "runtrue-policy",
+ "runtrue-provider-contract",
  "runtrue-replay",
  "runtrue-workflow-ir",
 ]
@@ -2945,6 +2947,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 1.0.61",
+]
+
+[[package]]
+name = "runtrue-execution"
+version = "0.1.0"
+dependencies = [
+ "runtrue-model",
+ "serde",
+ "serde_json",
  "thiserror 1.0.61",
 ]
 
@@ -3229,6 +3241,16 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "runtrue-provider-contract"
+version = "0.1.0"
+dependencies = [
+ "runtrue-model",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.61",
 ]
 
 [[package]]

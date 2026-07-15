@@ -10,8 +10,10 @@ repository = "https://github.com/runtrue/runtrue"
 
 [dependencies]
 runtrue-bisim.workspace = true
+runtrue-execution.workspace = true
 runtrue-model.workspace = true
 runtrue-policy.workspace = true
+runtrue-provider-contract.workspace = true
 runtrue-replay.workspace = true
 runtrue-workflow-ir.workspace = true
 

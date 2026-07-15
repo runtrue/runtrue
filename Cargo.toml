@@ -19,6 +19,7 @@ members = [
   "crates/debug-session",
   "crates/deploy",
   "crates/engine",
+  "crates/execution",
   "crates/executor-firecracker",
   "crates/executor-dispatch",
   "crates/executor-oci",
@@ -36,6 +37,7 @@ members = [
   "crates/output-lifecycle",
   "crates/policy",
   "crates/protocol",
+  "crates/provider-contract",
   "crates/replay",
   "crates/reports",
   "crates/runtrue",
@@ -70,6 +72,7 @@ runtrue-debug-session = { path = "crates/debug-session" }
 runtrue-deploy = { path = "crates/deploy" }
 runtrue-audit = { path = "crates/audit" }
 runtrue-engine = { path = "crates/engine" }
+runtrue-execution = { path = "crates/execution" }
 runtrue-executor-dispatch = { path = "crates/executor-dispatch" }
 runtrue-executor-firecracker = { path = "crates/executor-firecracker" }
 runtrue-executor-oci = { path = "crates/executor-oci" }
@@ -87,6 +90,7 @@ runtrue-oidc = { path = "crates/oidc" }
 runtrue-output-lifecycle = { path = "crates/output-lifecycle" }
 runtrue-policy = { path = "crates/policy" }
 runtrue-protocol = { path = "crates/protocol" }
+runtrue-provider-contract = { path = "crates/provider-contract" }
 runtrue-replay = { path = "crates/replay" }
 runtrue-reports = { path = "crates/reports" }
 runtrue = { path = "crates/runtrue" }
