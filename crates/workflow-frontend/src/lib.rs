@@ -7,9 +7,12 @@
 #![forbid(unsafe_code)]
 
 use runtrue_model::ContentDigest;
-use std::{error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt};
 
 const MAX_FRONTEND_ID_BYTES: usize = 128;
+const MAX_FRONTENDS: usize = 16;
+const MAX_DISCOVERY_ROOTS: usize = 64;
+const MAX_WORKFLOW_PATH_BYTES: usize = 1024;
 const MAX_REPORT_MEDIA_TYPE_BYTES: usize = 255;
 const MAX_REPORT_BYTES: usize = 1024 * 1024;
 
@@ -68,6 +71,107 @@ impl fmt::Display for WorkflowFrontendValidationError {
 
 impl Error for WorkflowFrontendValidationError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowFrontendRegistryError {
+    TooManyFrontends,
+    TooManyDiscoveryRoots,
+    InvalidDiscoveryRoot,
+    InvalidWorkflowPath,
+    AmbiguousFrontend,
+}
+
+impl fmt::Display for WorkflowFrontendRegistryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::TooManyFrontends => "workflow frontend registry exceeds its frontend bound",
+            Self::TooManyDiscoveryRoots => {
+                "workflow frontend registry exceeds its discovery-root bound"
+            }
+            Self::InvalidDiscoveryRoot => "workflow frontend discovery root is invalid",
+            Self::InvalidWorkflowPath => "workflow frontend path is invalid",
+            Self::AmbiguousFrontend => "multiple workflow frontends claim the same path",
+        })
+    }
+}
+
+impl Error for WorkflowFrontendRegistryError {}
+
+/// Validated collection of source-language frontends supplied by the binary's
+/// composition root. Discovery metadata lives with each adapter so the trusted
+/// server and planner do not acquire source-language-specific paths.
+pub struct WorkflowFrontendRegistry<'a> {
+    frontends: Vec<&'a dyn WorkflowSourceFrontend>,
+    discovery_roots: Vec<&'static str>,
+}
+
+impl<'a> WorkflowFrontendRegistry<'a> {
+    pub fn new(
+        frontends: &[&'a dyn WorkflowSourceFrontend],
+    ) -> Result<Self, WorkflowFrontendRegistryError> {
+        if frontends.len() > MAX_FRONTENDS {
+            return Err(WorkflowFrontendRegistryError::TooManyFrontends);
+        }
+        let mut discovery_roots = BTreeSet::new();
+        for frontend in frontends {
+            for root in frontend.discovery_roots() {
+                if !valid_relative_path(root) {
+                    return Err(WorkflowFrontendRegistryError::InvalidDiscoveryRoot);
+                }
+                discovery_roots.insert(*root);
+                if discovery_roots.len() > MAX_DISCOVERY_ROOTS {
+                    return Err(WorkflowFrontendRegistryError::TooManyDiscoveryRoots);
+                }
+            }
+        }
+        Ok(Self {
+            frontends: frontends.to_vec(),
+            discovery_roots: discovery_roots.into_iter().collect(),
+        })
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.frontends.is_empty()
+    }
+
+    #[must_use]
+    pub fn discovery_roots(&self) -> &[&'static str] {
+        &self.discovery_roots
+    }
+
+    pub fn frontend_for(
+        &self,
+        workflow_path: &str,
+    ) -> Result<Option<&'a dyn WorkflowSourceFrontend>, WorkflowFrontendRegistryError> {
+        if !valid_relative_path(workflow_path) {
+            return Err(WorkflowFrontendRegistryError::InvalidWorkflowPath);
+        }
+        let mut matches = self
+            .frontends
+            .iter()
+            .copied()
+            .filter(|frontend| frontend.supports(workflow_path));
+        let selected = matches.next();
+        if matches.next().is_some() {
+            return Err(WorkflowFrontendRegistryError::AmbiguousFrontend);
+        }
+        Ok(selected)
+    }
+}
+
+fn valid_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= MAX_WORKFLOW_PATH_BYTES
+        && !path.starts_with('/')
+        && !path.ends_with('/')
+        && !path
+            .chars()
+            .any(|character| matches!(character, '\\' | '\0'))
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
 impl PreparedWorkflowSource {
     /// Validate the complete frontend result against the exact source supplied
     /// to the adapter. The trusted planner calls this before consuming any
@@ -118,6 +222,10 @@ impl PreparedWorkflowSource {
 
 /// A replaceable source adapter injected by the composition root.
 pub trait WorkflowSourceFrontend: Send + Sync {
+    /// Repository directories inspected for workflows owned by this adapter.
+    /// Every returned path is validated by `WorkflowFrontendRegistry`.
+    fn discovery_roots(&self) -> &'static [&'static str];
+
     fn supports(&self, workflow_path: &str) -> bool;
 
     fn prepare(
@@ -131,6 +239,30 @@ pub trait WorkflowSourceFrontend: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestFrontend {
+        roots: &'static [&'static str],
+        suffix: &'static str,
+    }
+
+    impl WorkflowSourceFrontend for TestFrontend {
+        fn discovery_roots(&self) -> &'static [&'static str] {
+            self.roots
+        }
+
+        fn supports(&self, workflow_path: &str) -> bool {
+            workflow_path.ends_with(self.suffix)
+        }
+
+        fn prepare(
+            &self,
+            _source: &str,
+            _workflow_path: &str,
+            _options: &WorkflowFrontendOptions,
+        ) -> Result<PreparedWorkflowSource, String> {
+            Err("not used by registry tests".to_owned())
+        }
+    }
 
     fn prepared(source: &str) -> PreparedWorkflowSource {
         let native_yaml = "version: 1\njobs: {}\n".to_owned();
@@ -200,5 +332,57 @@ mod tests {
             value.validate_for(source),
             Err(WorkflowFrontendValidationError::ReportDigestMismatch)
         );
+    }
+
+    #[test]
+    fn registry_owns_deduplicated_discovery_and_exact_selection() {
+        let yaml = TestFrontend {
+            roots: &[".foreign/workflows"],
+            suffix: ".yaml",
+        };
+        let yml = TestFrontend {
+            roots: &[".foreign/workflows"],
+            suffix: ".yml",
+        };
+        let registry = WorkflowFrontendRegistry::new(&[&yaml, &yml]).unwrap();
+        assert_eq!(registry.discovery_roots(), &[".foreign/workflows"]);
+        assert!(registry
+            .frontend_for(".foreign/workflows/ci.yaml")
+            .unwrap()
+            .is_some());
+        assert!(registry
+            .frontend_for(".runtrue/workflows/ci.json")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn registry_rejects_unsafe_roots_paths_and_ambiguous_ownership() {
+        let unsafe_frontend = TestFrontend {
+            roots: &["../workflows"],
+            suffix: ".yaml",
+        };
+        assert!(matches!(
+            WorkflowFrontendRegistry::new(&[&unsafe_frontend]),
+            Err(WorkflowFrontendRegistryError::InvalidDiscoveryRoot)
+        ));
+
+        let first = TestFrontend {
+            roots: &["workflows"],
+            suffix: ".yaml",
+        };
+        let second = TestFrontend {
+            roots: &["other"],
+            suffix: ".yaml",
+        };
+        let registry = WorkflowFrontendRegistry::new(&[&first, &second]).unwrap();
+        assert!(matches!(
+            registry.frontend_for("workflows/ci.yaml"),
+            Err(WorkflowFrontendRegistryError::AmbiguousFrontend)
+        ));
+        assert!(matches!(
+            registry.frontend_for("workflows/../ci.yaml"),
+            Err(WorkflowFrontendRegistryError::InvalidWorkflowPath)
+        ));
     }
 }

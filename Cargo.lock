@@ -3450,6 +3450,7 @@ dependencies = [
  "runtrue-storage",
  "runtrue-trusted-planner",
  "runtrue-workflow-ast",
+ "runtrue-workflow-frontend",
  "runtrue-workflow-ir",
  "rusqlite",
  "rustls-pki-types",

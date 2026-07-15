@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "runtrue_server"
 path = "src/lib.rs"
 
+[features]
+default = ["github-actions"]
+github-actions = ["dep:runtrue-gha-import"]
+
 [dependencies]
 runtrue-attest.workspace = true
 runtrue-artifacts.workspace = true
@@ -23,7 +27,7 @@ runtrue-compiler.workspace = true
 runtrue-cache.workspace = true
 runtrue-control-plane.workspace = true
 runtrue-git.workspace = true
-runtrue-gha-import.workspace = true
+runtrue-gha-import = { workspace = true, optional = true }
 runtrue-lifecycle.workspace = true
 runtrue-lock.workspace = true
 runtrue-model.workspace = true
@@ -39,6 +43,7 @@ runtrue-storage.workspace = true
 runtrue-trusted-planner.workspace = true
 runtrue-workflow-ir.workspace = true
 runtrue-workflow-ast.workspace = true
+runtrue-workflow-frontend.workspace = true
 axum.workspace = true
 base64ct.workspace = true
 clap.workspace = true

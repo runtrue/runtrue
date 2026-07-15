@@ -5,7 +5,8 @@ use runtrue_scm::{
     PullRequestAction, PullRequestEvent, RepositoryIdentity, WorkflowSourceError,
 };
 use runtrue_workflow_frontend::{
-    PreparedWorkflowSource, WorkflowFrontendOptions, WorkflowFrontendReport, WorkflowSourceFrontend,
+    PreparedWorkflowSource, WorkflowFrontendOptions, WorkflowFrontendRegistry,
+    WorkflowFrontendReport, WorkflowSourceFrontend,
 };
 use std::{fs, path::Path, process::Command};
 
@@ -80,6 +81,10 @@ struct FixedFrontend {
 }
 
 impl WorkflowSourceFrontend for FixedFrontend {
+    fn discovery_roots(&self) -> &'static [&'static str] {
+        &[".runtrue/workflows"]
+    }
+
     fn supports(&self, _workflow_path: &str) -> bool {
         true
     }
@@ -355,9 +360,10 @@ fn trusted_planner_rejects_dishonest_frontend_integrity_metadata() {
         generation: 1,
         dishonest_input_digest: true,
     };
+    let frontends = WorkflowFrontendRegistry::new(&[&frontend]).unwrap();
 
     let error = TrustedPlanner::new(&repository)
-        .with_source_frontend(&frontend)
+        .with_source_frontends(&frontends)
         .capsule(
             &push,
             WORKFLOW_PATH,
@@ -388,8 +394,9 @@ fn frontend_generation_is_bound_into_capsule_and_approval_identity() {
             generation,
             dishonest_input_digest: false,
         };
+        let frontends = WorkflowFrontendRegistry::new(&[&frontend]).unwrap();
         TrustedPlanner::new(&repository)
-            .with_source_frontend(&frontend)
+            .with_source_frontends(&frontends)
             .capsule(
                 &push,
                 WORKFLOW_PATH,

@@ -11,6 +11,7 @@ use runtrue_control_plane::{
     ScmProposedAnalysisRecord, ScmProposedAnalysisStatus, ScmRepositoryLinkRecord,
     ScmSourceIdentity, SignedCapsuleRecord, SourceSnapshotRecord, SourceSnapshotState,
 };
+#[cfg(feature = "github-actions")]
 use runtrue_gha_import::GithubActionsFrontend;
 use runtrue_git::{
     CredentialRequest, GitCredential, GitCredentialProvider, GitError, GitLimits, GitRepository,
@@ -35,6 +36,7 @@ use runtrue_trusted_planner::{
     ProposedAnalysisFailure, ProposedWorkflowAnalysis, ReusableWorkflowProviderError,
     ReusableWorkflowSourceProvider, TrustedPlanner, TrustedPlannerError, DEFAULT_LOCKFILE_PATH,
 };
+use runtrue_workflow_frontend::{WorkflowFrontendRegistry, WorkflowSourceFrontend};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -43,7 +45,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -55,7 +57,6 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
 pub const DEFAULT_SCM_WORKFLOW_PATH: &str = ".runtrue/workflows/ci.yaml";
 const SCM_WORKFLOW_DIRECTORY: &str = ".runtrue/workflows";
-const GITHUB_WORKFLOW_DIRECTORY: &str = ".github/workflows";
 const MAX_SCM_WORKFLOWS: usize = 64;
 const SCM_TASK_KIND: &str = "scm.event";
 const SCM_CONTINUATION_TASK_KIND: &str = "scm.approval.continue";
@@ -67,7 +68,21 @@ const MAX_TASK_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_DEFINITION_DIFF_LINES_PER_SIDE: usize = 80;
 const MAX_DEFINITION_DIFF_BYTES: usize = 16 * 1024;
 const APPROVAL_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+#[cfg(feature = "github-actions")]
 static GITHUB_ACTIONS_FRONTEND: GithubActionsFrontend = GithubActionsFrontend;
+#[cfg(feature = "github-actions")]
+static REGISTERED_WORKFLOW_FRONTENDS: [&'static dyn WorkflowSourceFrontend; 1] =
+    [&GITHUB_ACTIONS_FRONTEND];
+#[cfg(not(feature = "github-actions"))]
+static REGISTERED_WORKFLOW_FRONTENDS: [&'static dyn WorkflowSourceFrontend; 0] = [];
+
+fn workflow_frontends() -> &'static WorkflowFrontendRegistry<'static> {
+    static REGISTRY: OnceLock<WorkflowFrontendRegistry<'static>> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        WorkflowFrontendRegistry::new(&REGISTERED_WORKFLOW_FRONTENDS)
+            .expect("compiled workflow frontend registry must be valid")
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2140,7 +2155,7 @@ impl ScmTaskWorker {
             endpoints: &self.config.github_provider_endpoints,
         };
         let mut planner = TrustedPlanner::new(prepared_source.repository.repository())
-            .with_source_frontend(&GITHUB_ACTIONS_FRONTEND)
+            .with_source_frontends(workflow_frontends())
             .with_reusable_source_provider(&reusable_source_provider)
             .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
         if let Some(image) = &self.config.default_job_container_image {
@@ -2678,7 +2693,7 @@ impl ScmTaskWorker {
             endpoints: &self.config.github_provider_endpoints,
         };
         let mut planner = TrustedPlanner::new(continuation_repository.repository())
-            .with_source_frontend(&GITHUB_ACTIONS_FRONTEND)
+            .with_source_frontends(workflow_frontends())
             .with_reusable_source_provider(&reusable_source_provider)
             .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
         if let Some(image) = &self.config.default_job_container_image {
@@ -2739,7 +2754,7 @@ impl ScmTaskWorker {
                 approval: workflow_approval,
             };
             let mut planner = TrustedPlanner::new(continuation_repository.repository())
-                .with_source_frontend(&GITHUB_ACTIONS_FRONTEND)
+                .with_source_frontends(workflow_frontends())
                 .with_reusable_source_provider(&reusable_source_provider)
                 .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
             if let Some(image) = &self.config.default_job_container_image {
@@ -3817,15 +3832,17 @@ fn workflow_path_allowed(config: &ScmWorkerConfig, path: &str) -> bool {
     if path == config.workflow_path {
         return true;
     }
-    let is_workflow_directory = [SCM_WORKFLOW_DIRECTORY, GITHUB_WORKFLOW_DIRECTORY]
-        .into_iter()
-        .any(|directory| {
-            path.strip_prefix(directory)
-                .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1)
-        });
-    normalize_relative_path(path).ok().as_deref() == Some(path)
-        && is_workflow_directory
-        && (path.ends_with(".yml") || path.ends_with(".yaml"))
+    if normalize_relative_path(path).ok().as_deref() != Some(path) {
+        return false;
+    }
+    let native_workflow = path
+        .strip_prefix(SCM_WORKFLOW_DIRECTORY)
+        .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1)
+        && (path.ends_with(".yml") || path.ends_with(".yaml"));
+    let registered_frontend = workflow_frontends()
+        .frontend_for(path)
+        .is_ok_and(|frontend| frontend.is_some());
+    native_workflow || registered_frontend
 }
 
 fn workflow_identity_suffix<'a>(config: &ScmWorkerConfig, path: &'a str) -> &'a [u8] {
@@ -3862,7 +3879,9 @@ fn discover_workflow_paths(
         Err(error) => return Err(TaskFailure::from_git_snapshot(error)),
     };
     let mut paths = BTreeSet::new();
-    for directory in [SCM_WORKFLOW_DIRECTORY, GITHUB_WORKFLOW_DIRECTORY] {
+    for directory in std::iter::once(SCM_WORKFLOW_DIRECTORY)
+        .chain(workflow_frontends().discovery_roots().iter().copied())
+    {
         paths.extend(
             repository
                 .regular_files_under(trusted_commit, directory, MAX_SCM_WORKFLOWS)
@@ -3876,7 +3895,7 @@ fn discover_workflow_paths(
     }
     if paths.is_empty() {
         return Err(TaskFailure::terminal(
-            "repository contains no Runtrue or GitHub Actions workflows",
+            "repository contains no workflows supported by the configured frontends",
         ));
     }
     if paths.len() > MAX_SCM_WORKFLOWS {
@@ -4190,7 +4209,7 @@ mod tests {
             &["config", "user.email", "worker@runtrue.invalid"],
         );
         git(&repository_path, &["config", "user.name", "Worker Test"]);
-        let workflow_directory = repository_path.join(GITHUB_WORKFLOW_DIRECTORY);
+        let workflow_directory = repository_path.join(".github/workflows");
         fs::create_dir_all(&workflow_directory).unwrap();
         fs::write(
             workflow_directory.join("ci.yml"),

@@ -39,6 +39,10 @@ pub struct ImportOptions {
 pub struct GithubActionsFrontend;
 
 impl WorkflowSourceFrontend for GithubActionsFrontend {
+    fn discovery_roots(&self) -> &'static [&'static str] {
+        &[".github/workflows"]
+    }
+
     fn supports(&self, workflow_path: &str) -> bool {
         workflow_path.starts_with(".github/workflows/")
             || workflow_path.ends_with(".github.yml")

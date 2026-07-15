@@ -24,7 +24,7 @@ use runtrue_scm::{
     TrustedWorkflowSelection, WorkflowDefinitionApprovalEvidence,
     WorkflowDefinitionApprovalVerifier, WorkflowSourceInputs,
 };
-use runtrue_workflow_frontend::{WorkflowFrontendOptions, WorkflowSourceFrontend};
+use runtrue_workflow_frontend::{WorkflowFrontendOptions, WorkflowFrontendRegistry};
 use runtrue_workflow_ir::SourceTrust;
 
 pub struct TrustedPlanner<'a> {
@@ -35,7 +35,7 @@ pub struct TrustedPlanner<'a> {
     source_tree_digest: Option<ContentDigest>,
     scm_api_url: Option<String>,
     default_job_container_image: Option<String>,
-    source_frontend: Option<&'a dyn WorkflowSourceFrontend>,
+    source_frontends: Option<&'a WorkflowFrontendRegistry<'a>>,
 }
 
 impl<'a> TrustedPlanner<'a> {
@@ -49,7 +49,7 @@ impl<'a> TrustedPlanner<'a> {
             source_tree_digest: None,
             scm_api_url: None,
             default_job_container_image: None,
-            source_frontend: None,
+            source_frontends: None,
         }
     }
 
@@ -67,7 +67,7 @@ impl<'a> TrustedPlanner<'a> {
             source_tree_digest: None,
             scm_api_url: None,
             default_job_container_image: None,
-            source_frontend: None,
+            source_frontends: None,
         }
     }
 
@@ -109,8 +109,8 @@ impl<'a> TrustedPlanner<'a> {
     /// kernel. This is the seam used when an integration moves to a separate
     /// repository or deployment artifact.
     #[must_use]
-    pub fn with_source_frontend(mut self, frontend: &'a dyn WorkflowSourceFrontend) -> Self {
-        self.source_frontend = Some(frontend);
+    pub fn with_source_frontends(mut self, frontends: &'a WorkflowFrontendRegistry<'a>) -> Self {
+        self.source_frontends = Some(frontends);
         self
     }
 
@@ -487,8 +487,11 @@ impl<'a> TrustedPlanner<'a> {
             }
         })?;
         let frontend = self
-            .source_frontend
-            .filter(|frontend| frontend.supports(workflow_path));
+            .source_frontends
+            .map(|frontends| frontends.frontend_for(workflow_path))
+            .transpose()
+            .map_err(|error| TrustedPlannerError::WorkflowFrontend(error.to_string()))?
+            .flatten();
         let prepared = frontend
             .map(|frontend| {
                 frontend.prepare(
