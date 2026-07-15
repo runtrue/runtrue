@@ -5,7 +5,7 @@ use crate::{
     CapabilityCallContext, DirectoryGrant, FilesystemAccess, HandleAuthenticationKey, Run, RunPre,
     WasmComponentArtifact, WasmError, WasmExecutionOutput, WasmExecutorConfig, WasmLimits,
     WasmTarget, COMPILER_SETTINGS, MAX_RETAINED_AOT_CACHE_EVENTS, SECURITY_MITIGATION_PROFILE,
-    WASMTIME_VERSION, WIT_SOURCE, WIT_WORLD,
+    WASI_VERSION, WASMTIME_VERSION, WIT_SOURCE, WIT_WORLD,
 };
 use crate::{
     capabilities::InvocationGrants,
@@ -289,6 +289,8 @@ impl WasmExecutor {
             |state: &mut HostState| state,
         )
         .map_err(|error| WasmError::Link(error.to_string()))?;
+        wasmtime_wasi::p3::add_to_linker(&mut linker)
+            .map_err(|error| WasmError::Link(error.to_string()))?;
         let remaining = timeout.saturating_sub(total_started.elapsed());
         if remaining.is_zero() {
             return Ok(WasmExecutionOutput {
@@ -460,6 +462,7 @@ impl WasmExecutor {
             component_digest,
             wit_world: WIT_WORLD.to_owned(),
             wit_digest: ContentDigest::sha256(WIT_SOURCE),
+            wasi_version: WASI_VERSION.to_owned(),
             wasmtime_version: WASMTIME_VERSION.to_owned(),
             target_triple: self.target.target_triple.clone(),
             cpu_feature_floor: self.target.cpu_feature_floor.clone(),
@@ -537,6 +540,8 @@ impl WasmExecutor {
             |state: &mut HostState| state,
         )
         .map_err(|error| WasmError::Link(error.to_string()))?;
+        wasmtime_wasi::p3::add_to_linker(&mut linker)
+            .map_err(|error| WasmError::Link(error.to_string()))?;
         let pre = linker.instantiate_pre(component).map_err(|_| {
             WasmError::Link("component does not implement the exact WIT world".to_owned())
         })?;
@@ -773,6 +778,7 @@ fn runtime_config(
     let mut config = Config::new();
     config
         .wasm_component_model(true)
+        .wasm_component_model_async(true)
         .consume_fuel(true)
         .epoch_interruption(true)
         .max_wasm_stack(limits.max_wasm_stack_bytes)
@@ -800,6 +806,7 @@ pub(crate) fn expected_compatibility(target: &WasmTarget) -> BTreeMap<String, St
             target.cpu_feature_floor.clone(),
         ),
         ("target_triple".to_owned(), target.target_triple.clone()),
+        ("wasi_version".to_owned(), WASI_VERSION.to_owned()),
         ("wasmtime_version".to_owned(), WASMTIME_VERSION.to_owned()),
         ("wit_world".to_owned(), WIT_WORLD.to_owned()),
     ])

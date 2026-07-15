@@ -48,7 +48,10 @@ pub use rooted_fs::RootedFilesystemAdapter;
 pub const WIT_WORLD: &str = "runtrue:action/run@1.0.0";
 
 /// Pinned Wasmtime runtime used to compile and execute components.
-pub const WASMTIME_VERSION: &str = "36.0.12";
+pub const WASMTIME_VERSION: &str = "46.0.1";
+
+/// Final WASI generation linked into the component runtime.
+pub const WASI_VERSION: &str = "0.3.0";
 
 /// Source of the versioned host contract, embedded for admission and cache
 /// key derivation.
@@ -57,7 +60,7 @@ pub const WIT_SOURCE: &str = include_str!("../wit/action.wit");
 pub const COMPONENT_MEDIA_TYPE: &str = "application/wasm";
 pub const COMPILER_SETTINGS: &str =
     "cranelift-speed-and-size;nan-canonicalization;memory-reservation=0;growth-reservation=0;no-threads;no-simd;fuel;epoch";
-pub const SECURITY_MITIGATION_PROFILE: &str = "runtrue-wasm-deny-ambient-v1";
+pub const SECURITY_MITIGATION_PROFILE: &str = "runtrue-wasm-wasi-p3-deny-ambient-v1";
 const MAX_RETAINED_AOT_CACHE_EVENTS: usize = 1_024;
 const MAX_CAPABILITY_GRANTS: usize = 256;
 

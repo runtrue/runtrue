@@ -43,6 +43,17 @@ fn state(adapters: CapabilityAdapters) -> HostState {
 }
 
 #[test]
+fn wasi_03_context_does_not_inherit_process_configuration() {
+    let mut state = state(CapabilityAdapters::new());
+    let mut cli = wasmtime_wasi::cli::WasiCliView::cli(&mut state);
+    use wasmtime_wasi::p3::bindings::cli::environment::Host as _;
+
+    assert!(cli.get_environment().unwrap().is_empty());
+    assert!(cli.get_arguments().unwrap().is_empty());
+    assert_eq!(cli.get_initial_cwd().unwrap(), None);
+}
+
+#[test]
 fn output_requires_duplicate_free_canonical_json() {
     let mut state = state(CapabilityAdapters::new());
     assert!(state.set_output(br#"{"b":1,"a":2}"#.to_vec()).is_err());

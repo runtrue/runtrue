@@ -12,6 +12,8 @@ use runtrue_model::SecretReference;
 use runtrue_workflow_ir::NetworkPermission;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use wasmtime::component::ResourceTable;
+use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use zeroize::{Zeroize as _, Zeroizing};
 pub(crate) struct HostState {
     input: Zeroizing<Vec<u8>>,
@@ -29,6 +31,8 @@ pub(crate) struct HostState {
     pub(super) oidc_audiences: BTreeMap<u64, String>,
     sensitive_log_values: Vec<Zeroizing<Vec<u8>>>,
     pub store_limits: AggregateStoreLimits,
+    wasi_ctx: WasiCtx,
+    wasi_resources: ResourceTable,
 }
 
 pub(crate) struct HostInvocation {
@@ -44,6 +48,8 @@ pub(crate) struct HostInvocation {
 }
 impl HostState {
     pub(crate) fn new(invocation: HostInvocation) -> Self {
+        let mut wasi = WasiCtx::builder();
+        wasi.allow_tcp(false).allow_udp(false);
         Self {
             input: Zeroizing::new(invocation.input),
             output: None,
@@ -60,6 +66,8 @@ impl HostState {
             oidc_audiences: invocation.oidc_audiences,
             sensitive_log_values: Vec::new(),
             store_limits: invocation.store_limits,
+            wasi_ctx: wasi.build(),
+            wasi_resources: ResourceTable::new(),
         }
     }
 
@@ -140,6 +148,15 @@ impl HostState {
             return Err("capability response exceeds the configured byte limit".to_owned());
         }
         Ok(value)
+    }
+}
+
+impl WasiView for HostState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi_ctx,
+            table: &mut self.wasi_resources,
+        }
     }
 }
 

@@ -3,11 +3,13 @@
 This crate is Runtrue's embedded WebAssembly Component backend. It accepts only
 digest-pinned components implementing `runtrue:action/run@1.0.0`, verifies their
 exact signed image manifest and expected image-signing key, and then compiles
-them with the security-patched Wasmtime 36.0.12 runtime.
+them with the pinned Wasmtime 46.0.1 runtime and final WASI 0.3.0 host.
 
-The guest receives no WASI linker and therefore has no ambient filesystem,
-network, environment, clock, random, process, or secret access. The only host
-imports are those in [`wit/action.wit`](wit/action.wit). Filesystem, network,
+The guest receives a fresh WASI context with no inherited filesystem, network,
+environment, arguments, working directory, standard streams, process, or
+secret access. TCP and UDP are disabled. WASI clocks and randomness use the
+standard runtime implementations. Runtrue-specific host imports are defined in
+[`wit/action.wit`](wit/action.wit). Filesystem, network,
 secret, and OIDC access must be both declared in the step capability set and
 backed by an explicitly installed adapter. Grants are represented by
 invocation-local authenticated handles; unknown or forged handles fail closed.
@@ -29,7 +31,7 @@ keeps native AOT bytes bound to the machine-code target and lets the cache
 enforce Unix owner-only directory/file modes and no-follow opens; platforms
 without those checks fail closed during cache setup.
 
-The AOT key binds the component and WIT digests, Wasmtime version, target
+The AOT key binds the component and WIT digests, WASI and Wasmtime versions, target
 triple, CPU feature floor, compiler settings, mitigation profile, and
 Wasmtime's engine compatibility hash. Cache metadata and serialized component
 artifacts are HMAC-authenticated, size-bounded, and checked as component AOT

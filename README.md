@@ -50,8 +50,8 @@ Execution boundaries:
 - A rootless Podman OCI backend with exact image/signature admission,
   read-only roots, user namespaces, seccomp, capability removal, bounded
   output/time/resources, and cleanup verification.
-- A Wasmtime 36.0.12 Component backend with signed digest-pinned components,
-  no ambient WASI surface, authenticated capability handles, rooted Linux
+- A Wasmtime 46.0.1 Component backend with signed digest-pinned components,
+  a deny-ambient WASI 0.3 host, authenticated capability handles, rooted Linux
   `openat2` filesystem access, bounded adapters, and authenticated AOT cache.
 - A Firecracker/jailer boundary with signed image sets, an authenticated guest
   protocol, copy-on-write job state, and signed sterile snapshot restore that

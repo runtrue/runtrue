@@ -29,6 +29,7 @@ pub struct AotCacheKey {
     pub component_digest: ContentDigest,
     pub wit_world: String,
     pub wit_digest: ContentDigest,
+    pub wasi_version: String,
     pub wasmtime_version: String,
     pub target_triple: String,
     pub cpu_feature_floor: String,
