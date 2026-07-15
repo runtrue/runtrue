@@ -45,27 +45,55 @@ It excludes:
 A raw hypervisor, container, process, or memory snapshot is not a Checkpoint
 until the Checkpoint pipeline proves and records these exclusions.
 
-### 2. Quiescence and construction
+### 2. Guest-visible credential taint
+
+Broker-only external operations do not expose credential material to guest
+state. If policy releases any guest-visible secret or derivative credential,
+however, every guest-mutable state location reachable from that release point
+is tainted. An adversarial Program can encode, encrypt, compress, split, or
+transform the value, so expiry, redaction, secret scanning, and malware scanning
+cannot prove its exclusion.
+
+A resumable Checkpoint or Hermetic or Exact Replay Bundle may not contain
+tainted state. Taint can be removed only by either:
+
+- discarding all affected guest-mutable state back to an authenticated
+  generation created before release and destroying the tainted runtime; or
+- a future runtime-enforced information-flow or safe-serialization profile
+  whose soundness is part of the admitted security boundary.
+
+An Evidence-only bundle may retain permitted metadata about the release but not
+the tainted payload. This restriction is an explicit compatibility cost of
+tools that require raw credentials; scanners remain defense in depth, not a
+noninterference proof.
+
+### 3. Quiescence and construction
 
 Checkpoint creation is a fenced Session transition:
 
-1. Stop admission of new child Executions and capability calls.
-2. Wait for running children to finish or cancel them under the Capsule policy.
-3. Resolve, reject, or mark terminal every external operation; an indeterminate
+1. Fence admission of new child Executions without revoking authority from a
+   child that is already admitted.
+2. Under Capsule policy, either let each running child finish using its existing
+   fence or durably cancel it, then await its terminal cleanup.
+3. Reject new capability calls, drain broker activity, and durably classify
+   every in-flight external operation.
+4. Resolve or reject every external operation; a pending or indeterminate
    operation blocks a resumable Checkpoint.
-4. Revoke and destroy guest-visible credentials, handles, and connections.
-5. Flush and atomically freeze the declared workspace generation.
-6. Walk content without following symlinks or crossing undeclared mounts.
-7. Apply exclusion, size, file-type, ownership, malware, and secret scanners.
-8. Construct the canonical manifest and authenticated object graph.
-9. Encrypt under the tenant Checkpoint key generation and publish atomically.
-10. Destroy the previous live Session incarnation and record cleanup Evidence.
+5. Revoke and destroy guest-visible credentials, handles, and connections.
+6. Enforce the guest-visible credential-taint rule above.
+7. Flush and atomically freeze the declared workspace generation.
+8. Walk content without following symlinks or crossing undeclared mounts.
+9. Apply exclusion, size, file-type, ownership, malware, and secret scanners.
+10. Construct the canonical manifest and authenticated object graph.
+11. Encrypt under the tenant Checkpoint key generation and publish atomically.
+12. Destroy the previous live Session incarnation and record cleanup Evidence.
 
-Failure before atomic publication leaves the prior workspace generation active
-or moves the Session to a terminal integrity state; it never exposes a partial
-Checkpoint as restorable.
+Failure before atomic publication may return the prior workspace generation to
+active only through ADR 0008's recovery transition with a new fence and freshly
+issued authority. Otherwise it moves the Session through destruction to a
+terminal integrity state. It never exposes a partial Checkpoint as restorable.
 
-### 3. Identity and encryption
+### 4. Identity and encryption
 
 Each Checkpoint has two distinct identities:
 
@@ -83,7 +111,7 @@ Keys are versioned, rotatable, and separate from object-store credentials.
 Deleting a tenant key is not a substitute for enforcing retention or deleting
 stored ciphertext. Cross-tenant copy, restore, and equality queries are denied.
 
-### 4. Restoration
+### 5. Restoration
 
 Restore requires an authorized Session Capsule that names the exact Checkpoint
 state digest and a compatible runtime profile. The Provider verifies signature,
@@ -98,14 +126,14 @@ the Checkpoint.
 Restoration never mutates the Checkpoint. Subsequent work produces a new
 workspace generation and, if suspended again, a new Checkpoint identity.
 
-### 5. Sterile templates are different
+### 6. Sterile templates are different
 
 A tenant-derived Checkpoint can resume only authorized state for that tenant.
 It can never become a globally shared sterile template, warm-pool source,
 runner image, or other tenant's input. A sterile template is constructed before
 tenant execution through the separate ADR 0013 publication process.
 
-### 6. Replay Bundle contract
+### 7. Replay Bundle contract
 
 A **Replay Bundle** is a secret-free, immutable manifest that binds an
 Execution Capsule, Program, admitted inputs, runtime profile, relevant
@@ -125,6 +153,9 @@ Every bundle declares one reproducibility grade:
 Hermetic and Exact are different proofs, not marketing synonyms. Evidence-only
 is explicitly not a reproducibility claim. A missing, expired, redacted,
 mutable, or indeterminate interaction prevents the stronger grades.
+Guest-visible credential taint also prevents the stronger grades unless all
+affected state was safely discarded or excluded by an admitted sound mechanism
+under Section 2.
 
 Replay runs are new Executions. They receive no original credential or effect
 authority. Recorded external responses are served only by a bounded replay
@@ -132,13 +163,13 @@ adapter, and external mutations are disabled unless a new Capsule explicitly
 authorizes a new real operation, in which case the run is no longer an exact
 replay of the original effect history.
 
-### 7. Retention and verification
+### 8. Retention and verification
 
 Checkpoint payloads and Replay Bundle payloads follow tenant retention policy.
 Their manifests retain digests and tombstones sufficient to distinguish
 expired material from corruption or never-published material. Expiration of a
-required object downgrades replay availability; it never silently changes the
-declared historical grade.
+required object downgrades current replay availability and verification status;
+it never changes the declared historical grade.
 
 Runtrue publishes positive and adversarial vectors for canonical manifests,
 encryption binding, exclusion scans, restore fencing, missing objects,
