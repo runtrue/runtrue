@@ -10,12 +10,16 @@ rust-version.workspace = true
 name = "runtrue"
 path = "src/main.rs"
 
+[features]
+default = ["github-actions"]
+github-actions = ["dep:runtrue-gha-import"]
+
 [dependencies]
 runtrue-bisim.workspace = true
 runtrue-compiler.workspace = true
 runtrue-engine.workspace = true
 runtrue-expression.workspace = true
-runtrue-gha-import.workspace = true
+runtrue-gha-import = { workspace = true, optional = true }
 runtrue-lock.workspace = true
 runtrue-model.workspace = true
 runtrue-replay.workspace = true

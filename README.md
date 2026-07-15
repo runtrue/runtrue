@@ -202,6 +202,12 @@ workflows on a trusted or disposable host.
 
 ## GitHub Actions import
 
+The released server and CLI composition enables the `github-actions` frontend
+feature by default. Core-only builds can omit the adapter with
+`--no-default-features`; the private-repository dependency and extraction rules
+are defined in
+[`docs/architecture/workflow-frontend-extraction.md`](docs/architecture/workflow-frontend-extraction.md).
+
 Analyze a workflow and emit native YAML only if no blocking compatibility
 finding remains:
 

@@ -1,7 +1,10 @@
+use super::super::CliError;
+#[cfg(feature = "github-actions")]
 use super::super::{
-    absolute, display_path, print_json, read_bounded_file, CliError, GithubImportArgs, ImportArgs,
+    absolute, display_path, print_json, read_bounded_file, GithubImportArgs, ImportArgs,
     ImportSource, EXIT_OK, EXIT_VALIDATION,
 };
+#[cfg(feature = "github-actions")]
 use runtrue_gha_import::{import_github_actions, ImportResult, MAX_GITHUB_WORKFLOW_BYTES};
 use rustix::{
     fd::OwnedFd,
@@ -18,12 +21,14 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+#[cfg(feature = "github-actions")]
 pub(crate) fn import_workflow(workspace: &Path, args: ImportArgs) -> Result<u8, CliError> {
     match args.source {
         ImportSource::Github(args) => import_github(workspace, args),
     }
 }
 
+#[cfg(feature = "github-actions")]
 fn import_github(workspace: &Path, args: GithubImportArgs) -> Result<u8, CliError> {
     let input = absolute(workspace, args.workflow.clone());
     let bytes = read_bounded_file(
@@ -112,6 +117,7 @@ fn import_github(workspace: &Path, args: GithubImportArgs) -> Result<u8, CliErro
     })
 }
 
+#[cfg(feature = "github-actions")]
 fn print_human_import(workspace: &Path, args: &GithubImportArgs, result: &ImportResult) {
     print!("{}", result.report.render_human());
     let Some(yaml) = &result.native_yaml else {
@@ -184,6 +190,7 @@ impl Drop for PreparedAtomicOutput {
     }
 }
 
+#[cfg(feature = "github-actions")]
 fn ensure_distinct_output_paths(paths: &[&Path]) -> Result<(), CliError> {
     let mut normalized = Vec::with_capacity(paths.len());
     for path in paths {

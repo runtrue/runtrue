@@ -12,7 +12,9 @@ pub(super) use bisim::bisim;
 pub(super) use capsule::capsule;
 pub(super) use compare::compare_capsule;
 pub(super) use doctor::doctor;
-pub(super) use import::{import_workflow, write_atomic_output};
+#[cfg(feature = "github-actions")]
+pub(super) use import::import_workflow;
+pub(super) use import::write_atomic_output;
 pub(super) use init::init;
 pub(super) use replay::replay;
 pub(super) use run::{run, validate_local_capsule};

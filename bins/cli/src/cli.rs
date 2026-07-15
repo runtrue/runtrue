@@ -17,9 +17,10 @@ mod reusable;
 #[path = "strict_json.rs"]
 mod strict_json;
 
+#[cfg(feature = "github-actions")]
+use commands::import_workflow;
 use commands::{
-    bisim, capsule, compare_capsule, doctor, import_workflow, init, replay, validate,
-    write_atomic_output,
+    bisim, capsule, compare_capsule, doctor, init, replay, validate, write_atomic_output,
 };
 use error::CliError;
 use output::{
@@ -66,6 +67,7 @@ impl Cli {
             Command::CompareCapsule(args) => args.json,
             Command::Bisim(args) => args.json,
             Command::Doctor(args) => args.json,
+            #[cfg(feature = "github-actions")]
             Command::Import(args) => args.wants_json(),
             Command::Submit(args) => args.json,
             Command::Seal(args) => args.wants_json(),
@@ -94,6 +96,7 @@ enum Command {
     /// Inspect local configuration, security boundaries, and backend availability.
     Doctor(DoctorArgs),
     /// Import a foreign workflow through a fail-closed compatibility front end.
+    #[cfg(feature = "github-actions")]
     Import(ImportArgs),
     /// Compile locally, prove exact remote capsule parity, and create a remote run.
     Submit(remote::SubmitArgs),
@@ -212,12 +215,14 @@ struct DoctorArgs {
     json: bool,
 }
 
+#[cfg(feature = "github-actions")]
 #[derive(Debug, Args)]
 struct ImportArgs {
     #[command(subcommand)]
     source: ImportSource,
 }
 
+#[cfg(feature = "github-actions")]
 impl ImportArgs {
     const fn wants_json(&self) -> bool {
         match &self.source {
@@ -226,12 +231,14 @@ impl ImportArgs {
     }
 }
 
+#[cfg(feature = "github-actions")]
 #[derive(Debug, Subcommand)]
 enum ImportSource {
     /// Analyze and import a GitHub Actions workflow.
     Github(GithubImportArgs),
 }
 
+#[cfg(feature = "github-actions")]
 #[derive(Debug, Args)]
 struct GithubImportArgs {
     /// GitHub Actions workflow YAML file.
@@ -305,6 +312,7 @@ fn execute(cli: Cli) -> Result<u8, CliError> {
         Command::CompareCapsule(args) => compare_capsule(&workspace, args),
         Command::Bisim(args) => bisim(&workspace, args),
         Command::Doctor(args) => doctor(&workspace, args),
+        #[cfg(feature = "github-actions")]
         Command::Import(args) => import_workflow(&workspace, args),
         Command::Submit(args) => remote::execute(&workspace, args),
         Command::Seal(args) => approve::execute(&workspace, args),

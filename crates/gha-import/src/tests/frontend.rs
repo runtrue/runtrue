@@ -10,6 +10,10 @@ fn github_frontend_is_deterministic_and_binds_translation_identity() {
             "a".repeat(64)
         )),
     };
+    assert_eq!(
+        GithubActionsFrontend.discovery_roots(),
+        &[".github/workflows"]
+    );
     let first = GithubActionsFrontend
         .prepare(source, ".github/workflows/ci.yml", &options)
         .unwrap();
