@@ -2,12 +2,17 @@
 
 **Run local. Run remote. Run true.**
 
-Runtrue is a security-first CI/CD implementation in Rust. It compiles a
-strict native workflow into an immutable **Capsule**, binds approval through a
-**Seal** to that exact Capsule, and keeps execution outside the control-plane
-process. The **Bisim** conformance suite verifies that local and remote engines
-preserve the same behavior, while a secret-free **Replay Bundle** makes an
-execution reproducible on a developer machine.
+Runtrue is a trust-preserving execution system in Rust. It binds an immutable
+**Program** and exact runtime contract into an **Execution Capsule** or
+**Session Capsule**, then binds approval through a **Seal** to that exact
+subject. The **Bisim** conformance suite compares portable Provider behavior,
+while a graded, credential-free **Replay Bundle** makes admitted execution
+state reproducible on a developer machine.
+
+CI workflows—and GitHub Actions workflows in particular—remain Runtrue's first
+main use case. They are implemented as a source frontend and orchestration
+integration over the public execution boundary, so the adapter can move to a
+separate repository without moving GitHub concepts into the execution kernel.
 
 The canonical product vocabulary is defined in the
 [Runtrue naming contract](docs/adr/0005-runtrue-naming.md).
@@ -25,6 +30,15 @@ v0.x support boundaries are listed below.
 
 Workflow and planning:
 
+- A domain-neutral public Rust facade for canonical Program, runtime,
+  Execution, Session, Capsule, Seal, Provider, capability, external-effect,
+  Checkpoint, Replay Bundle, Evidence, warm-pool, failure, and Bisim contracts.
+  The generic kernel has no workflow, SCM, GitHub, executor, database, or
+  transport dependency.
+- Exact runtime inventory matching is separate from expiring capacity hints;
+  Session children use bounded reservations and fenced single-winner workspace
+  publication; warm runtime members are one-shot and can never become sterile
+  after assignment begins.
 - Strict, bounded workflow-v1 YAML decoding with unknown/duplicate-field
   rejection, typed values, deny-by-default permissions, expressions, DAGs,
   conditions, static matrices, retries, services, caches, and artifact
@@ -36,8 +50,10 @@ Workflow and planning:
   target-branch workflow by default; proposed workflow changes are independently
   compiled and risk-analyzed and require an exact matching approval subject
   before they can be selected.
-- A bounded, fail-closed GitHub Actions importer with `SUPPORTED`, `EMULATED`,
-  `REQUIRES_GITHUB`, `UNSAFE`, and `UNSUPPORTED` findings.
+- A bounded, fail-closed GitHub Actions frontend with `SUPPORTED`, `EMULATED`,
+  `REQUIRES_GITHUB`, `UNSAFE`, and `UNSUPPORTED` findings. Standard
+  `.github/workflows/*.yml` files are discovered directly; translated input,
+  native output, and compatibility report identities are digest-bound.
 
 Execution boundaries:
 
