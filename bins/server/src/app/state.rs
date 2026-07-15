@@ -325,11 +325,7 @@ impl AppState {
             token_endpoint,
             jwks_uri: format!("{}/api/v3/meta", config.web_origin),
             redirect_uri,
-            scopes: vec![
-                "read:user".to_owned(),
-                "read:org".to_owned(),
-                "repo".to_owned(),
-            ],
+            scopes: github_oauth_scopes(),
             mfa_claim: serde_json::json!({}),
             status: "active".to_owned(),
             configuration_digest: ContentDigest::sha256([]),
@@ -537,6 +533,13 @@ impl AppState {
         self.request_timeout = request_timeout;
         self
     }
+}
+
+pub(super) fn github_oauth_scopes() -> Vec<String> {
+    ["read:org", "read:user", "repo"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(Debug, Error)]

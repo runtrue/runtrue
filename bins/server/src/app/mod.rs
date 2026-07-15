@@ -161,6 +161,13 @@ mod tests {
     }
 
     #[test]
+    fn github_oauth_scopes_are_canonical_and_sorted() {
+        let scopes = state::github_oauth_scopes();
+        assert_eq!(scopes, ["read:org", "read:user", "repo"]);
+        assert!(scopes.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
     fn browser_return_forms_and_html_are_strictly_local_and_escaped() {
         assert!(valid_return_to("/ui/session?tab=active"));
         for invalid in [
