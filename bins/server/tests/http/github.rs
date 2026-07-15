@@ -724,6 +724,109 @@ async fn github_browser_manages_organization_secrets_and_variables_in_tenant_sco
 }
 
 #[tokio::test]
+async fn github_browser_sets_an_arbitrary_repository_relative_workflow_directory() {
+    let (control, oidc, _, _, application) = github_human_application();
+    control
+        .create_repository(&tenant_repository(
+            "repo-browser-workflow",
+            "tenant-browser",
+            "browser-workflow",
+        ))
+        .unwrap();
+    let (login_cookie, oidc_state, nonce) = begin_human_login(&application).await;
+    oidc.respond(&nonce, "subject-browser");
+    let login = finish_human_login(&application, &login_cookie, &oidc_state).await;
+    let cookies = browser_cookie_header(&login);
+    let session = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/session")
+                .header("cookie", &cookies)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let csrf = json_body(session).await["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let settings_uri = "/api/v1/ui/repositories/repo-browser-workflow/settings";
+    let inherited = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(settings_uri)
+                .header("cookie", &cookies)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(inherited.status(), StatusCode::OK);
+    let inherited = json_body(inherited).await;
+    assert_eq!(inherited["workflow_directory"], ".runtrue/workflows");
+    assert_eq!(inherited["workflow_directory_inherited"], true);
+
+    let save = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/ui/repositories/repo-browser-workflow/workflow-directory")
+                .header("cookie", &cookies)
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&workflow_directory=automation%2Fworkflows"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(save.status(), StatusCode::OK);
+    assert_eq!(
+        control
+            .repository_workflow_directory("tenant-browser", "repo-browser-workflow")
+            .unwrap()
+            .as_deref(),
+        Some("automation/workflows")
+    );
+
+    let settings = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(settings_uri)
+                .header("cookie", &cookies)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let settings = json_body(settings).await;
+    assert_eq!(settings["workflow_directory"], "automation/workflows");
+    assert_eq!(settings["workflow_directory_inherited"], false);
+
+    let traversal = application
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/ui/repositories/repo-browser-workflow/workflow-directory")
+                .header("cookie", &cookies)
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&workflow_directory=..%2Fworkflows"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(traversal.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn browser_run_detail_requires_a_session_and_returns_tenant_scoped_jobs() {
     let (control, oidc, _, _, application) = github_human_application();
     control

@@ -686,6 +686,17 @@ svg { display: block; }
 .repository-section-heading h2 { margin: 0 0 var(--space-1); font-size: var(--text-xl); }
 .repository-section-heading p { margin: 0; color: var(--muted); font-size: var(--text-sm); }
 .repository-section-heading p strong { color: var(--fg); font-weight: 500; }
+.repository-settings-card { margin-bottom: var(--space-6); padding: var(--space-6); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+.repository-settings-card h3 { margin: 0 0 var(--space-2); font-size: var(--text-lg); }
+.repository-settings-card p { margin: 0; color: var(--muted); font-size: var(--text-sm); }
+.workflow-location-card { display: grid; grid-template-columns: minmax(220px, .7fr) minmax(320px, 1.3fr); gap: var(--space-6); }
+.workflow-location-card label { display: grid; gap: var(--space-2); color: var(--fg); font-size: var(--text-sm); font-weight: 600; }
+.workflow-location-card input { width: 100%; min-height: 44px; padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--fg); font: inherit; font-family: var(--font-mono); font-size: var(--text-sm); }
+.workflow-location-card input:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+.workflow-location-card small { color: var(--muted); font-size: var(--text-xs); font-weight: 400; }
+.repository-settings-actions { grid-column: 2; display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+.repository-settings-actions p { max-width: 52ch; font-size: var(--text-xs); }
+.repository-settings-actions code { color: var(--fg); font-family: var(--font-mono); }
 .danger-zone { display: flex; align-items: center; justify-content: space-between; gap: var(--space-6); padding: var(--space-6); border: 1px solid color-mix(in oklab, var(--danger), transparent 62%); border-radius: var(--radius-lg); background: color-mix(in oklab, var(--danger), transparent 97%); }
 .danger-zone h3 { margin: 0 0 var(--space-2); font-size: var(--text-lg); }
 .danger-zone p { margin: 0; color: var(--muted); max-width: 52rem; }
@@ -895,6 +906,9 @@ svg { display: block; }
   .repository-section-heading,
   .workflow-detail-heading,
   .workflow-plan-bar { align-items: stretch; flex-direction: column; }
+  .workflow-location-card { grid-template-columns: 1fr; }
+  .repository-settings-actions { grid-column: 1; align-items: stretch; flex-direction: column; }
+  .repository-settings-actions .btn { width: 100%; }
   .section-actions-inline { align-items: stretch; flex-direction: column; }
   .section-actions-inline .btn { width: 100%; }
   .workflow-triggers { max-width: none; justify-content: flex-start; }

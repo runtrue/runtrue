@@ -55,8 +55,7 @@ use zeroize::Zeroizing;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-pub const DEFAULT_SCM_WORKFLOW_PATH: &str = ".runtrue/workflows/ci.yaml";
-const SCM_WORKFLOW_DIRECTORY: &str = ".runtrue/workflows";
+pub const DEFAULT_SCM_WORKFLOW_DIRECTORY: &str = ".runtrue/workflows";
 const MAX_SCM_WORKFLOWS: usize = 64;
 const SCM_TASK_KIND: &str = "scm.event";
 const SCM_CONTINUATION_TASK_KIND: &str = "scm.approval.continue";
@@ -96,7 +95,7 @@ struct ScmWorkflowTaskPayload {
 pub struct ScmWorkerConfig {
     pub mirror_root: PathBuf,
     pub worker_id: String,
-    pub workflow_path: String,
+    pub workflow_directory: String,
     pub policy_version_ids: Vec<String>,
     pub max_attempts: u32,
     pub lease_duration: Duration,
@@ -120,7 +119,7 @@ impl ScmWorkerConfig {
         Self {
             mirror_root: mirror_root.into(),
             worker_id: worker_id.into(),
-            workflow_path: DEFAULT_SCM_WORKFLOW_PATH.to_owned(),
+            workflow_directory: DEFAULT_SCM_WORKFLOW_DIRECTORY.to_owned(),
             policy_version_ids: vec![DEFAULT_POLICY_VERSION.to_owned()],
             max_attempts: 5,
             lease_duration: Duration::from_secs(5 * 60),
@@ -1982,9 +1981,6 @@ impl ScmTaskWorker {
         }
         let workflow_payload = serde_json::from_slice::<ScmWorkflowTaskPayload>(&payload).ok();
         let (event, requested_workflow_path) = if let Some(payload) = workflow_payload {
-            if !workflow_path_allowed(&self.config, &payload.workflow_path) {
-                return Err(TaskFailure::terminal("SCM workflow task path is not allowed").into());
-            }
             (payload.event, Some(payload.workflow_path))
         } else {
             (
@@ -2031,6 +2027,17 @@ impl ScmTaskWorker {
             return Err(
                 TaskFailure::terminal("normalized SCM repository identity mismatch").into(),
             );
+        }
+        let configured_workflow_directory = self
+            .control_plane
+            .repository_workflow_directory(&repository.tenant_id, &repository.id)
+            .map_err(TaskFailure::control)?
+            .unwrap_or_else(|| self.config.workflow_directory.clone());
+        if requested_workflow_path
+            .as_deref()
+            .is_some_and(|path| !workflow_path_allowed(&configured_workflow_directory, path))
+        {
+            return Err(TaskFailure::terminal("SCM workflow task path is not allowed").into());
         }
 
         if let Some(result) = self.handle_proposed_workflow_action(
@@ -2093,14 +2100,14 @@ impl ScmTaskWorker {
             let paths = discover_workflow_paths(
                 prepared_source.repository.repository(),
                 discovery_commit,
-                &self.config,
+                &configured_workflow_directory,
             )?;
             if paths.len() > 1 {
                 let identity = StableIdentity::new(&event, &repository);
                 let followups = paths
                     .into_iter()
                     .map(|workflow_path| {
-                        let suffix = workflow_identity_suffix(&self.config, &workflow_path);
+                        let suffix = workflow_identity_suffix(&workflow_path);
                         Ok(DurableTask {
                             id: identity.id("scm-workflow-task", b"workflow-task", suffix),
                             kind: SCM_TASK_KIND.to_owned(),
@@ -2225,7 +2232,7 @@ impl ScmTaskWorker {
         }
 
         let identity = StableIdentity::new(&event, &repository);
-        let workflow_suffix = workflow_identity_suffix(&self.config, &workflow_path);
+        let workflow_suffix = workflow_identity_suffix(&workflow_path);
         let analysis_id = identity.id("scm-analysis", b"analysis", workflow_suffix);
         let primary_role = if matches!(event.event_type, EventType::PullRequest { .. }) {
             ScmExecutionRole::TrustedBase
@@ -2574,8 +2581,20 @@ impl ScmTaskWorker {
                 })
             }
         };
+        let pending_repository = self
+            .control_plane
+            .repository(&pending.repository_id)
+            .map_err(TaskFailure::control)?;
+        let configured_workflow_directory = self
+            .control_plane
+            .repository_workflow_directory(&pending_repository.tenant_id, &pending_repository.id)
+            .map_err(TaskFailure::control)?
+            .unwrap_or_else(|| self.config.workflow_directory.clone());
         if pending.context.source_identity.policy_version_ids != self.config.policy_version_ids
-            || !workflow_path_allowed(&self.config, &pending.context.source_identity.workflow_path)
+            || !workflow_path_allowed(
+                &configured_workflow_directory,
+                &pending.context.source_identity.workflow_path,
+            )
         {
             return self.close_stale_continuation(
                 task,
@@ -3828,29 +3847,21 @@ impl<'a> StableIdentity<'a> {
     }
 }
 
-fn workflow_path_allowed(config: &ScmWorkerConfig, path: &str) -> bool {
-    if path == config.workflow_path {
-        return true;
-    }
+fn workflow_path_allowed(configured_workflow_directory: &str, path: &str) -> bool {
     if normalize_relative_path(path).ok().as_deref() != Some(path) {
         return false;
     }
-    let native_workflow = path
-        .strip_prefix(SCM_WORKFLOW_DIRECTORY)
-        .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1)
-        && (path.ends_with(".yml") || path.ends_with(".yaml"));
-    let registered_frontend = workflow_frontends()
-        .frontend_for(path)
-        .is_ok_and(|frontend| frontend.is_some());
-    native_workflow || registered_frontend
+    let in_configured_directory = path
+        .strip_prefix(configured_workflow_directory)
+        .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1);
+    if !in_configured_directory || !(path.ends_with(".yml") || path.ends_with(".yaml")) {
+        return false;
+    }
+    workflow_frontends().frontend_for(path).is_ok()
 }
 
-fn workflow_identity_suffix<'a>(config: &ScmWorkerConfig, path: &'a str) -> &'a [u8] {
-    if path == config.workflow_path {
-        b""
-    } else {
-        path.as_bytes()
-    }
+fn workflow_identity_suffix(path: &str) -> &[u8] {
+    path.as_bytes()
 }
 
 fn proposed_identity_suffix(workflow_suffix: &[u8]) -> Vec<u8> {
@@ -3867,32 +3878,18 @@ fn proposed_identity_suffix(workflow_suffix: &[u8]) -> Vec<u8> {
 fn discover_workflow_paths(
     repository: &GitRepository,
     trusted_commit: &str,
-    config: &ScmWorkerConfig,
+    configured_workflow_directory: &str,
 ) -> Result<Vec<String>, TaskFailure> {
-    let configured_exists = match repository.read_blob(trusted_commit, &config.workflow_path) {
-        Ok(_) => true,
-        Err(runtrue_git::GitError::PathNotFound)
-            if config.workflow_path == DEFAULT_SCM_WORKFLOW_PATH =>
-        {
-            false
-        }
-        Err(error) => return Err(TaskFailure::from_git_snapshot(error)),
-    };
-    let mut paths = BTreeSet::new();
-    for directory in std::iter::once(SCM_WORKFLOW_DIRECTORY)
-        .chain(workflow_frontends().discovery_roots().iter().copied())
-    {
-        paths.extend(
-            repository
-                .regular_files_under(trusted_commit, directory, MAX_SCM_WORKFLOWS)
-                .map_err(TaskFailure::from_git_snapshot)?
-                .into_iter()
-                .filter(|path| workflow_path_allowed(config, path)),
-        );
-    }
-    if configured_exists {
-        paths.insert(config.workflow_path.clone());
-    }
+    let paths = repository
+        .regular_files_under(
+            trusted_commit,
+            configured_workflow_directory,
+            MAX_SCM_WORKFLOWS,
+        )
+        .map_err(TaskFailure::from_git_snapshot)?
+        .into_iter()
+        .filter(|path| workflow_path_allowed(configured_workflow_directory, path))
+        .collect::<BTreeSet<_>>();
     if paths.is_empty() {
         return Err(TaskFailure::terminal(
             "repository contains no workflows supported by the configured frontends",
@@ -3927,9 +3924,9 @@ fn source_snapshot_id(
 }
 
 fn validate_config(config: &ScmWorkerConfig) -> Result<(), ScmWorkerBuildError> {
-    let normalized = normalize_relative_path(&config.workflow_path)
-        .map_err(|_| ScmWorkerBuildError::InvalidConfiguration("invalid workflow path"))?;
-    if normalized != config.workflow_path
+    let normalized = normalize_relative_path(&config.workflow_directory)
+        .map_err(|_| ScmWorkerBuildError::InvalidConfiguration("invalid workflow directory"))?;
+    if normalized != config.workflow_directory
         || config.worker_id.is_empty()
         || config.worker_id.len() > 512
         || config.worker_id.bytes().any(|byte| byte.is_ascii_control())
@@ -4220,11 +4217,43 @@ mod tests {
         git(&repository_path, &["commit", "--quiet", "-m", "workflow"]);
         let commit = git(&repository_path, &["rev-parse", "HEAD"]);
         let repository = GitRepository::open(&repository_path, GitLimits::default()).unwrap();
-        let config = ScmWorkerConfig::new(directory.path().join("mirrors"), "worker-1");
+        assert_eq!(
+            discover_workflow_paths(&repository, &commit, ".github/workflows").unwrap(),
+            vec![".github/workflows/ci.yml"]
+        );
+    }
+
+    #[test]
+    fn configured_directory_discovers_every_supported_workflow_beneath_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository_path = directory.path().join("repository");
+        private_directory(&repository_path);
+        git(&repository_path, &["init", "--quiet"]);
+        git(
+            &repository_path,
+            &["config", "user.email", "worker@runtrue.invalid"],
+        );
+        git(&repository_path, &["config", "user.name", "Worker Test"]);
+        let workflow_directory = repository_path.join("automation/workflows/nested");
+        fs::create_dir_all(&workflow_directory).unwrap();
+        fs::write(workflow_directory.join("build.yaml"), "version: 1\n").unwrap();
+        fs::write(
+            workflow_directory.join("review.github.yml"),
+            "name: Review\n",
+        )
+        .unwrap();
+        fs::write(workflow_directory.join("notes.txt"), "not a workflow\n").unwrap();
+        git(&repository_path, &["add", "."]);
+        git(&repository_path, &["commit", "--quiet", "-m", "workflows"]);
+        let commit = git(&repository_path, &["rev-parse", "HEAD"]);
+        let repository = GitRepository::open(&repository_path, GitLimits::default()).unwrap();
 
         assert_eq!(
-            discover_workflow_paths(&repository, &commit, &config).unwrap(),
-            vec![".github/workflows/ci.yml"]
+            discover_workflow_paths(&repository, &commit, "automation/workflows").unwrap(),
+            vec![
+                "automation/workflows/nested/build.yaml",
+                "automation/workflows/nested/review.github.yml",
+            ]
         );
     }
 
@@ -4417,20 +4446,21 @@ mod tests {
                 "https://github.com/octo/runtrue.git",
             ],
         );
+        fs::create_dir_all(repository_path.join(DEFAULT_SCM_WORKFLOW_DIRECTORY)).unwrap();
         fs::write(
-            repository_path.join("ci.yaml"),
+            repository_path.join(DEFAULT_SCM_WORKFLOW_DIRECTORY).join("ci.yaml"),
             b"version: 1\nname: base\non:\n  pull_request: {}\njobs:\n  build:\n    runner: { isolation: microvm }\n    steps:\n      - run: { command: [\"true\"] }\n",
         )
         .unwrap();
-        git(&repository_path, &["add", "ci.yaml"]);
+        git(&repository_path, &["add", ".runtrue/workflows/ci.yaml"]);
         git(&repository_path, &["commit", "--quiet", "-m", "base"]);
         let base = git(&repository_path, &["rev-parse", "HEAD"]);
         fs::write(
-            repository_path.join("ci.yaml"),
+            repository_path.join(DEFAULT_SCM_WORKFLOW_DIRECTORY).join("ci.yaml"),
             b"version: 1\nname: proposed\non:\n  pull_request: {}\njobs:\n  build:\n    trust: trusted-only\n    runner: { isolation: native }\n    steps:\n      - run: { command: [\"true\"] }\n",
         )
         .unwrap();
-        git(&repository_path, &["add", "ci.yaml"]);
+        git(&repository_path, &["add", ".runtrue/workflows/ci.yaml"]);
         git(&repository_path, &["commit", "--quiet", "-m", "proposed"]);
         let source = git(&repository_path, &["rev-parse", "HEAD"]);
 
@@ -4473,7 +4503,7 @@ mod tests {
             }),
             issue_comment: None,
             check_run: None,
-            changed_paths: vec!["ci.yaml".to_owned()],
+            changed_paths: vec![".runtrue/workflows/ci.yaml".to_owned()],
             received_unix_ms: NOW - 100,
             raw_payload_digest: ContentDigest::sha256(b"raw"),
             normalized_digest: ContentDigest::sha256(b"placeholder"),
@@ -4509,7 +4539,6 @@ mod tests {
             })
             .unwrap();
         let mut config = ScmWorkerConfig::new(directory.path(), "scm-worker");
-        config.workflow_path = "ci.yaml".to_owned();
         config.policy_version_ids = vec!["policy-v1".to_owned()];
         let worker = ScmTaskWorker::new(
             Arc::clone(&control),

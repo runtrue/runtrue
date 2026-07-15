@@ -9,7 +9,7 @@ use crate::runner_certificates::RunnerCertificateAuthority;
 use crate::runner_service::{
     RunnerControlConfig, RunnerControlService, RunnerDataPlane, RunnerServiceError,
 };
-use crate::scm_worker::GitHubInstallationTokenProvider;
+use crate::scm_worker::{GitHubInstallationTokenProvider, DEFAULT_SCM_WORKFLOW_DIRECTORY};
 use rand_core::OsRng;
 use runtrue_attest::CapsuleSigningKey;
 use runtrue_auth::{SessionPolicy, TokenHasher};
@@ -176,6 +176,7 @@ pub struct AppState {
     pub(in crate::app) authorization: Arc<CedarAuthorizationEngine>,
     pub(in crate::app) runner_data_plane: Option<Arc<RunnerDataPlane>>,
     pub(in crate::app) scm_credential_provider: Option<Arc<dyn GitHubInstallationTokenProvider>>,
+    pub(in crate::app) scm_workflow_directory: String,
     pub(in crate::app) human_oidc: Option<Arc<HumanOidcState>>,
     pub(in crate::app) github_installation: Option<Arc<GitHubInstallationState>>,
     pub(in crate::app) github_setup_key: Zeroizing<[u8; 32]>,
@@ -246,6 +247,7 @@ impl AppState {
             authorization: Arc::new(authorization),
             runner_data_plane: None,
             scm_credential_provider: None,
+            scm_workflow_directory: DEFAULT_SCM_WORKFLOW_DIRECTORY.to_owned(),
             human_oidc: None,
             github_installation: None,
             github_setup_key,
@@ -259,6 +261,19 @@ impl AppState {
     ) -> Self {
         self.scm_credential_provider = Some(provider);
         self
+    }
+
+    pub fn with_scm_workflow_directory(
+        mut self,
+        workflow_directory: String,
+    ) -> Result<Self, ServerBuildError> {
+        let normalized = runtrue_model::normalize_relative_path(&workflow_directory)
+            .map_err(|_| ServerBuildError::InvalidScmWorkflowDirectory)?;
+        if normalized != workflow_directory || normalized.len() > 1024 {
+            return Err(ServerBuildError::InvalidScmWorkflowDirectory);
+        }
+        self.scm_workflow_directory = workflow_directory;
+        Ok(self)
     }
 
     #[must_use]
@@ -546,6 +561,8 @@ pub(super) fn github_oauth_scopes() -> Vec<String> {
 pub enum ServerBuildError {
     #[error("bootstrap token must contain 1 to 4096 safe bytes")]
     InvalidBootstrapToken,
+    #[error("SCM workflow directory must be a normalized repository-relative path")]
+    InvalidScmWorkflowDirectory,
     #[error("operating system randomness is unavailable")]
     RandomnessUnavailable,
     #[error("invalid SCM webhook configuration: {0}")]

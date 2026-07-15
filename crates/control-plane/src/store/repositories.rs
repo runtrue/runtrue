@@ -196,6 +196,78 @@ impl ControlPlane {
         Ok(rows)
     }
 
+    /// Return the repository-specific workflow directory, if one overrides the
+    /// server-wide default.
+    pub fn repository_workflow_directory(
+        &self,
+        tenant_id: &str,
+        repository_id: &str,
+    ) -> Result<Option<String>, ControlPlaneError> {
+        validate_text("repository workflow tenant", tenant_id)?;
+        validate_text("repository workflow repository", repository_id)?;
+        let connection = self.connection()?;
+        let workflow_directory: Option<String> = connection
+            .query_row(
+                "SELECT workflow_directory FROM repository_workflow_settings
+                 WHERE tenant_id = ?1 AND repository_id = ?2",
+                params![tenant_id, repository_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(ControlPlaneError::from)?;
+        match workflow_directory {
+            Some(directory)
+                if directory.len() <= 1024
+                    && normalize_relative_path(&directory).ok().as_deref()
+                        == Some(directory.as_str()) =>
+            {
+                Ok(Some(directory))
+            }
+            Some(_) => Err(ControlPlaneError::CorruptState(
+                "repository workflow directory".to_owned(),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Set the repository-relative directory containing workflow files.
+    /// Paths are stored in canonical form so equivalent spellings cannot
+    /// create different task identities.
+    pub fn set_repository_workflow_directory(
+        &self,
+        tenant_id: &str,
+        repository_id: &str,
+        workflow_directory: &str,
+        now_unix_ms: u64,
+    ) -> Result<String, ControlPlaneError> {
+        validate_text("repository workflow tenant", tenant_id)?;
+        validate_text("repository workflow repository", repository_id)?;
+        let normalized = normalize_relative_path(workflow_directory).map_err(|_| {
+            ControlPlaneError::InvalidInput("workflow directory must be repository-relative")
+        })?;
+        if normalized != workflow_directory || normalized.len() > 1024 {
+            return Err(ControlPlaneError::InvalidInput(
+                "workflow directory must be a normalized repository-relative path",
+            ));
+        }
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "INSERT INTO repository_workflow_settings
+             (repository_id, tenant_id, workflow_directory, updated_unix_ms)
+             SELECT id, tenant_id, ?3, ?4 FROM repositories
+             WHERE tenant_id = ?1 AND id = ?2
+             ON CONFLICT(repository_id) DO UPDATE SET
+                 workflow_directory = excluded.workflow_directory,
+                 updated_unix_ms = excluded.updated_unix_ms
+             WHERE repository_workflow_settings.tenant_id = excluded.tenant_id",
+            params![tenant_id, repository_id, normalized, to_i64(now_unix_ms)?,],
+        )?;
+        if changed != 1 {
+            return Err(not_found("repository", repository_id));
+        }
+        Ok(normalized)
+    }
+
     pub fn create_scm_installation(
         &self,
         record: &ScmInstallationRecord,

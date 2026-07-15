@@ -19,9 +19,9 @@ use crate::app::{
     require_writable_control_plane, require_writable_human_auth, revoke_api_token,
     revoke_github_installation, rotate_secret, route_not_found, save_browser_organization_secret,
     save_browser_organization_variable, save_browser_repository_secret,
-    save_browser_repository_variable, start_github_installation_from_ui, sync_github_installation,
-    uninstall_browser_repository, AppState, API_BODY_BYTES, BROWSER_MUTATION_BODY_BYTES,
-    MAX_CREATE_CAPSULE_BODY_BYTES,
+    save_browser_repository_variable, save_browser_repository_workflow_directory,
+    start_github_installation_from_ui, sync_github_installation, uninstall_browser_repository,
+    AppState, API_BODY_BYTES, BROWSER_MUTATION_BODY_BYTES, MAX_CREATE_CAPSULE_BODY_BYTES,
 };
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::{self as axum_middleware};
@@ -193,6 +193,10 @@ pub fn router(state: AppState) -> Router {
             .route(
                 "/api/v1/ui/repositories/:repository_id/variables/delete",
                 post(delete_browser_repository_variable),
+            )
+            .route(
+                "/api/v1/ui/repositories/:repository_id/workflow-directory",
+                post(save_browser_repository_workflow_directory),
             )
             .route(
                 "/api/v1/ui/repositories/:repository_id/uninstall",

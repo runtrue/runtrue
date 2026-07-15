@@ -1840,6 +1840,60 @@ fn tenant_collection_queries_filter_in_sql_across_control_plane_resources() {
 }
 
 #[test]
+fn repository_workflow_directory_is_tenant_scoped_and_canonical() {
+    let control = ControlPlane::open_in_memory("repository-workflow-directory", NOW).unwrap();
+    control.create_repository(&repository()).unwrap();
+
+    assert_eq!(
+        control
+            .repository_workflow_directory("tenant-1", "repo-1")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        control
+            .set_repository_workflow_directory("tenant-1", "repo-1", "automation/workflows", NOW,)
+            .unwrap(),
+        "automation/workflows"
+    );
+    assert_eq!(
+        control
+            .repository_workflow_directory("tenant-1", "repo-1")
+            .unwrap()
+            .as_deref(),
+        Some("automation/workflows")
+    );
+    assert_eq!(
+        control
+            .repository_workflow_directory("tenant-2", "repo-1")
+            .unwrap(),
+        None
+    );
+    assert!(matches!(
+        control.set_repository_workflow_directory(
+            "tenant-1",
+            "repo-1",
+            "./automation/workflows",
+            NOW + 1,
+        ),
+        Err(ControlPlaneError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        control.set_repository_workflow_directory("tenant-1", "repo-1", "../workflows", NOW + 1,),
+        Err(ControlPlaneError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        control.set_repository_workflow_directory(
+            "tenant-2",
+            "repo-1",
+            "automation/workflows",
+            NOW + 1,
+        ),
+        Err(ControlPlaneError::NotFound { .. })
+    ));
+}
+
+#[test]
 fn remote_dag_queues_roots_unlocks_successors_and_skips_failed_descendants() {
     let control = ControlPlane::open_in_memory("dag", NOW).unwrap();
     control.create_repository(&repository()).unwrap();

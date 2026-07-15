@@ -11,6 +11,7 @@ use runtrue_server::{
     GitHubOauthQuickstartConfig, HardenedGitHubOauthClient, HardenedHumanOidcClient,
     HumanOidcLimits, RunnerCertificateAuthority, RunnerControlConfig, RunnerControlService,
     RunnerEnrollmentService, ScmTaskWorker, ScmWorkerConfig, DEFAULT_RUNNER_CERTIFICATE_LIFETIME,
+    DEFAULT_SCM_WORKFLOW_DIRECTORY,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -855,6 +856,8 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let config = Config::load(Args::parse())?;
+    let scm_workflow_directory = env::var("RUNTRUE_SCM_WORKFLOW_DIRECTORY")
+        .unwrap_or_else(|_| DEFAULT_SCM_WORKFLOW_DIRECTORY.to_owned());
     let listen = config.listen;
     prepare_database_path(&config.database)?;
     let now = unix_ms()?;
@@ -875,7 +878,8 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         *security_seed,
         config.oidc_issuer.clone(),
     )?
-    .with_runner_data_plane(&config.data_root)?;
+    .with_runner_data_plane(&config.data_root)?
+    .with_scm_workflow_directory(scm_workflow_directory.clone())?;
     let browser_cookie_key = config
         .human_oidc
         .as_ref()
@@ -949,9 +953,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                 root.clone(),
                 format!("scm-worker-{}-{}", std::process::id(), hex::encode(nonce)),
             );
-            if let Ok(path) = env::var("RUNTRUE_SCM_WORKFLOW_PATH") {
-                worker_config.workflow_path = path;
-            }
+            worker_config.workflow_directory = scm_workflow_directory.clone();
             if let Ok(image) = env::var("RUNTRUE_GHA_DEFAULT_JOB_CONTAINER_IMAGE") {
                 worker_config.default_job_container_image = Some(image);
             }

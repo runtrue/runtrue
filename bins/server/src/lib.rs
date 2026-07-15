@@ -38,5 +38,5 @@ pub use scm_worker::{
     GitHubInstallationTokenProvider, GitHubMirrorSourceFetcher, GitHubRepositoryAccessToken,
     MirrorPathError, PublishedScmCheck, ScmCheckPublishError, ScmSourceFetchError,
     ScmSourceFetchRequest, ScmSourceFetcher, ScmTaskWorker, ScmWorkerBuildError, ScmWorkerConfig,
-    ScmWorkerError, ScmWorkerMetricsSnapshot, ScmWorkerTick, DEFAULT_SCM_WORKFLOW_PATH,
+    ScmWorkerError, ScmWorkerMetricsSnapshot, ScmWorkerTick, DEFAULT_SCM_WORKFLOW_DIRECTORY,
 };

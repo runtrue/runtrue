@@ -12,7 +12,6 @@ use runtrue_scm::{
 use runtrue_server::{
     AppState, FetchedScmRepository, GitHubCheckPublisher, PublishedScmCheck, ScmCheckPublishError,
     ScmSourceFetchError, ScmSourceFetchRequest, ScmSourceFetcher, ScmWorkerConfig, ScmWorkerTick,
-    DEFAULT_SCM_WORKFLOW_PATH,
 };
 use runtrue_workflow_ir::{ExecutionCapsule, Isolation};
 use std::{
@@ -29,6 +28,7 @@ use tempfile::TempDir;
 use std::os::unix::fs::PermissionsExt as _;
 
 const NOW: u64 = 100_000;
+const DEFAULT_TEST_WORKFLOW_PATH: &str = ".runtrue/workflows/ci.yaml";
 
 struct MirrorFixture {
     _root: TempDir,
@@ -119,7 +119,7 @@ impl MirrorFixture {
         git(&repository, &["config", "user.name", "SCM Worker Test"]);
         fs::create_dir_all(repository.join(".runtrue/workflows")).expect("workflow directory");
         fs::write(
-            repository.join(DEFAULT_SCM_WORKFLOW_PATH),
+            repository.join(DEFAULT_TEST_WORKFLOW_PATH),
             workflow("trusted-base", "microvm"),
         )
         .expect("base workflow");
@@ -127,7 +127,8 @@ impl MirrorFixture {
         git(&repository, &["commit", "--quiet", "-m", "base"]);
         let base = output(&repository, &["rev-parse", "HEAD"]);
 
-        fs::write(repository.join(DEFAULT_SCM_WORKFLOW_PATH), proposed).expect("proposed workflow");
+        fs::write(repository.join(DEFAULT_TEST_WORKFLOW_PATH), proposed)
+            .expect("proposed workflow");
         git(&repository, &["add", "."]);
         git(&repository, &["commit", "--quiet", "-m", "proposed"]);
         let source = output(&repository, &["rev-parse", "HEAD"]);
@@ -157,7 +158,7 @@ impl MirrorFixture {
         );
         git(&repository, &["config", "user.name", "SCM Worker Test"]);
         fs::write(
-            repository.join(DEFAULT_SCM_WORKFLOW_PATH),
+            repository.join(DEFAULT_TEST_WORKFLOW_PATH),
             b"version: 1\nname: unchanged\non:\n  pull_request: {}\njobs:\n  build:\n    runner:\n      isolation: oci\n      image: containers.example/tool:1\n    steps:\n      - run:\n          command: [\"true\"]\n",
         )
         .expect("workflow");
@@ -243,7 +244,7 @@ impl MirrorFixture {
         );
         git(&repository, &["config", "user.name", "SCM Worker Test"]);
         fs::write(
-            repository.join(DEFAULT_SCM_WORKFLOW_PATH),
+            repository.join(DEFAULT_TEST_WORKFLOW_PATH),
             workflow("primary", "microvm"),
         )
         .expect("primary workflow");
@@ -515,6 +516,32 @@ fn trusted_workflow_discovery_fans_out_independent_idempotent_runs() {
 }
 
 #[test]
+fn repository_workflow_directory_overrides_the_server_default() {
+    let fixture = MirrorFixture::push();
+    let control = Arc::new(ControlPlane::open_in_memory("installation-1", 1).unwrap());
+    register_repository(&control);
+    control
+        .set_repository_workflow_directory("tenant-1", "repo-1", ".runtrue/workflows", NOW)
+        .unwrap();
+    let state = test_state(Arc::clone(&control));
+    enqueue(
+        &control,
+        "event-repository-workflow",
+        &fixture.push_event(),
+        NOW,
+    );
+    let mut config = ScmWorkerConfig::new(&fixture.root, "repository-workflow-worker");
+    config.workflow_directory = "server/default/does-not-exist".to_owned();
+    let worker = state.scm_task_worker(config).unwrap();
+
+    let run_id = completed_run(worker.process_once_at(NOW).unwrap(), false);
+    let run = control.run(&run_id).unwrap();
+    let capsule = control.signed_capsule(&run.capsule_id).unwrap();
+    let decoded: ExecutionCapsule = serde_json::from_slice(&capsule.canonical_capsule).unwrap();
+    assert_eq!(decoded.workflow.source_path, ".runtrue/workflows/ci.yaml");
+}
+
+#[test]
 fn authenticated_github_fetch_builds_and_atomically_binds_exact_source_snapshot() {
     let fixture = MirrorFixture::push();
     let database_directory = tempfile::tempdir().unwrap();
@@ -645,7 +672,7 @@ fn issue_comment_gate_reuses_the_trusted_default_revision_through_continuation()
         ContentDigest::sha256(event.canonical_normalized_bytes().expect("canonical event"));
     enqueue(&control, "event-issue-comment", &event, NOW);
     let mut config = ScmWorkerConfig::new(directory.path().join("mirrors"), "comment-worker");
-    config.workflow_path = workflow_path;
+    config.workflow_directory = workflow_path.rsplit_once('/').unwrap().0.to_owned();
     let worker = state
         .scm_task_worker_with_source_fetcher(config, fetcher)
         .unwrap();
@@ -1047,6 +1074,7 @@ fn standard_github_actions_workflow_is_discovered_planned_and_replanned_after_ap
     let (control_plane, state, mut config) = setup(&fixture.root, "worker-proposed-approval");
     let default_image = "docker.io/library/node@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2".to_owned();
     config.default_job_container_image = Some(default_image.clone());
+    config.workflow_directory = ".github/workflows".to_owned();
     enqueue(
         &control_plane,
         "event-proposed-approval",
@@ -1331,7 +1359,7 @@ fn event(event_type: EventType, source: String, base: Option<String>) -> EventEn
         }),
         issue_comment: None,
         check_run: None,
-        changed_paths: vec![DEFAULT_SCM_WORKFLOW_PATH.to_owned()],
+        changed_paths: vec![DEFAULT_TEST_WORKFLOW_PATH.to_owned()],
         received_unix_ms: NOW - 100,
         raw_payload_digest: ContentDigest::sha256(b"raw webhook bytes"),
         normalized_digest: ContentDigest::sha256(b"placeholder"),

@@ -69,8 +69,12 @@ pub(super) const MIGRATION_28: &str =
     include_str!("../../migrations/0028_scm_check_revision_journal.sql");
 pub(super) const MIGRATION_29: &str =
     include_str!("../../migrations/0029_execution_credential_taint.sql");
+pub(super) const MIGRATION_30: &str =
+    include_str!("../../migrations/0030_repository_workflow_settings.sql");
+pub(super) const MIGRATION_31: &str =
+    include_str!("../../migrations/0031_repository_workflow_directories.sql");
 #[cfg(test)]
-pub(super) const CURRENT_SCHEMA_VERSION: u32 = 29;
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 31;
 
 fn open_secure_database_file(path: &Path) -> Result<(File, DatabaseIdentity), ControlPlaneError> {
     let parent = path
@@ -270,6 +274,8 @@ impl ControlPlane {
             MIGRATION_27,
             MIGRATION_28,
             MIGRATION_29,
+            MIGRATION_30,
+            MIGRATION_31,
         ];
         if usize::try_from(version).map_or(true, |version| version > migrations.len()) {
             return Err(ControlPlaneError::UnsupportedSchemaVersion(version));

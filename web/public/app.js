@@ -263,7 +263,7 @@
       button.classList.toggle("active", active);
       if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
     });
-    if (["secrets", "variables"].includes(section)) loadRepositorySettings();
+    if (["secrets", "variables", "settings"].includes(section)) loadRepositorySettings();
   }
 
   function renderRepositorySettings() {
@@ -275,6 +275,13 @@
     byId("repository-variables-body").innerHTML = settings.variables.map((variable) => { const value = typeof variable.value === "string" ? variable.value : JSON.stringify(variable.value); return `<tr><td><strong class="mono setting-name">${escapeHtml(variable.name)}</strong></td><td class="setting-value"><code title="${escapeHtml(value)}">${escapeHtml(value)}</code></td><td class="setting-version">${escapeHtml(variable.version)}</td><td class="setting-updated">${escapeHtml(formatDate(variable.updated_unix_ms))}</td><td><div class="setting-actions"><button class="setting-action" type="button" data-setting-scope="repository" data-edit-variable="${escapeHtml(variable.name)}">Edit</button><button class="setting-action danger-text" type="button" data-setting-scope="repository" data-delete-setting="variable" data-setting-name="${escapeHtml(variable.name)}">Delete</button></div></td></tr>`; }).join("");
     byId("repository-variables-empty").hidden = settings.variables.length > 0;
     byId("repository-variables-body").closest("table").hidden = settings.variables.length === 0;
+    byId("repository-workflow-directory").value = settings.workflow_directory || "";
+    byId("repository-workflow-directory-help").textContent = state.repositorySettings
+      ? settings.workflow_directory_inherited
+        ? "Using the server default. Saving creates an override for this repository."
+        : "This repository overrides the server default."
+      : "Loading workflow location…";
+    byId("save-repository-workflow-directory").disabled = !state.repositorySettings;
   }
 
   function renderOrganizationSettings() {
@@ -310,6 +317,25 @@
       renderRepositorySettings();
     } catch (error) { showToast(error.message || "Could not load repository settings."); }
     finally { state.repositorySettingsLoading = false; }
+  }
+
+  async function saveRepositoryWorkflowDirectory(event) {
+    event.preventDefault();
+    if (!state.activeRepository) return;
+    const input = byId("repository-workflow-directory");
+    const button = byId("save-repository-workflow-directory");
+    const workflowDirectory = input.value.trim();
+    if (!workflowDirectory) return input.reportValidity();
+    button.disabled = true; button.textContent = "Saving…";
+    try {
+      const body = new URLSearchParams({ csrf_token: state.data.session.csrfToken, workflow_directory: workflowDirectory });
+      const response = await fetch(`/api/v1/ui/repositories/${encodeURIComponent(state.activeRepository.id)}/workflow-directory`, { method: "POST", body, credentials: "same-origin" });
+      if (!response.ok) { const problem = await response.json().catch(() => null); throw new Error(problem?.detail || "Could not save the workflow location."); }
+      state.repositorySettings = null;
+      await loadRepositorySettings(true);
+      showToast("Workflow location saved.");
+    } catch (error) { showToast(error.message || "The workflow location could not be saved."); }
+    finally { button.disabled = false; button.textContent = "Save location"; }
   }
 
   function openUninstallRepository() {
@@ -819,6 +845,7 @@
     byId("add-organization-secret").addEventListener("click", () => openOrganizationSetting("secret"));
     byId("add-organization-variable").addEventListener("click", () => openOrganizationSetting("variable"));
     byId("repository-setting-form").addEventListener("submit", saveRepositorySetting);
+    byId("repository-workflow-directory-form").addEventListener("submit", saveRepositoryWorkflowDirectory);
     byId("close-repository-setting").addEventListener("click", () => byId("repository-setting-dialog").close());
     byId("cancel-repository-setting").addEventListener("click", () => byId("repository-setting-dialog").close());
     byId("cancel-delete-setting").addEventListener("click", () => byId("delete-setting-dialog").close());

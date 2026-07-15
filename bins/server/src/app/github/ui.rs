@@ -629,12 +629,100 @@ pub(in crate::app) async fn browser_repository_settings(
         Ok(items) => items,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let mut response = Json(json!({ "secrets": secrets, "variables": variables })).into_response();
+    let workflow_directory_override = match state
+        .control_plane
+        .repository_workflow_directory(&context.tenant_id, &repository.id)
+    {
+        Ok(path) => path,
+        Err(error) => return control_plane_problem(&request_id, error),
+    };
+    let workflow_directory_inherited = workflow_directory_override.is_none();
+    let workflow_directory =
+        workflow_directory_override.unwrap_or_else(|| state.scm_workflow_directory.clone());
+    let mut response = Json(json!({
+        "secrets": secrets,
+        "variables": variables,
+        "workflow_directory": workflow_directory,
+        "workflow_directory_inherited": workflow_directory_inherited,
+    }))
+    .into_response();
     response
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     protect_sensitive_response(&mut response);
     response
+}
+
+pub(in crate::app) async fn save_browser_repository_workflow_directory(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(repository_id): Path<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(_) => return invalid_object_problem(&request_id, "the form body is invalid"),
+    };
+    let presented_csrf = match browser_csrf_input(&request_id, &headers, Ok(body.clone())) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let now = match now_unix_ms(&request_id) {
+        Ok(now) => now,
+        Err(response) => return response,
+    };
+    let (context, _, _) = match authenticated_browser_session(
+        &state,
+        &request_id,
+        &headers,
+        SCM_WRITE_SCOPE,
+        Some(&presented_csrf),
+        now,
+    ) {
+        Ok(session) => session,
+        Err(response) => return *response,
+    };
+    let repository = match browser_repository(&state, &request_id, &context, &repository_id) {
+        Ok(repository) => repository,
+        Err(response) => return response.into_response(),
+    };
+    let workflow_directory = match form_value(&body, "workflow_directory") {
+        Ok(Some(value)) if !value.is_empty() && value.len() <= 1024 => value,
+        _ => return invalid_object_problem(&request_id, "workflow directory is required"),
+    };
+    if let Err(response) = authorize_browser_resource(
+        &state,
+        &request_id,
+        &context,
+        CedarAction::EditWorkflowSettings,
+        CedarResource {
+            kind: CedarResourceKind::Repository,
+            id: repository.id.clone(),
+            tenant_id: context.tenant_id.clone(),
+            repository_id: Some(repository.id.clone()),
+            author_id: None,
+            risk_score: 0,
+            privileged: false,
+            untrusted: false,
+        },
+    ) {
+        return *response;
+    }
+    match state.control_plane.set_repository_workflow_directory(
+        &context.tenant_id,
+        &repository.id,
+        &workflow_directory,
+        now,
+    ) {
+        Ok(workflow_directory) => Json(json!({
+            "repository_id": repository.id,
+            "workflow_directory": workflow_directory,
+            "workflow_directory_inherited": false,
+        }))
+        .into_response(),
+        Err(error) => control_plane_problem(&request_id, error),
+    }
 }
 
 pub(in crate::app) async fn uninstall_browser_repository(

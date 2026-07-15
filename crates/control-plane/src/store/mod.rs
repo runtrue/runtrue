@@ -85,7 +85,7 @@ use runtrue_auth::{
     SessionRecord, TokenHasher,
 };
 use runtrue_lifecycle::{JobState, RunState};
-use runtrue_model::ContentDigest;
+use runtrue_model::{normalize_relative_path, ContentDigest};
 use runtrue_oidc::OidcGrant;
 use runtrue_policy::{
     ActivatePolicyBundle, ActivePolicyBundleState, ApprovalDecision, ApprovalRequest,
