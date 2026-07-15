@@ -8,6 +8,11 @@
 **Primary implementation language:** Rust  
 **Proposed license:** Apache-2.0 for the core platform, with a clear trademark policy and an optional contributor agreement only if later required.
 
+The detailed contract Runtrue intends to make before declaring v1 is defined
+in [Runtrue v1: long-term product and architecture](architecture/v1-long-term-design.md).
+That document makes the generic execution control plane the long-term product
+boundary and treats GitHub Actions as its first frontend and adoption path.
+
 ---
 
 ## 1. Executive summary

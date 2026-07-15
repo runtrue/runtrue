@@ -382,6 +382,9 @@ or a permissive policy result.
 
 ## Repository map
 
+- [docs/architecture/v1-long-term-design.md](docs/architecture/v1-long-term-design.md):
+  the long-term generic workload-control-plane goal, the role of GitHub Actions
+  as the first frontend, and the gates required before declaring v1.
 - [docs/technical-design.md](docs/technical-design.md): product, threat model,
   architecture, protocols, roadmap, and acceptance criteria.
 - [schemas/workflow/v1.json](schemas/workflow/v1.json): native workflow schema.
