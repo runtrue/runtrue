@@ -1,0 +1,19 @@
+[package]
+name = "runtrue"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+description = "Stable public Rust facade for Runtrue execution artifacts"
+repository = "https://github.com/runtrue/runtrue"
+
+[dependencies]
+runtrue-bisim.workspace = true
+runtrue-model.workspace = true
+runtrue-policy.workspace = true
+runtrue-replay.workspace = true
+runtrue-workflow-ir.workspace = true
+
+[lints]
+workspace = true

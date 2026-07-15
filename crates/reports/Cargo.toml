@@ -1,0 +1,21 @@
+[package]
+name = "runtrue-reports"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[[bin]]
+name = "runtrue-report"
+path = "src/main.rs"
+
+[dependencies]
+runtrue-model.workspace = true
+quick-xml = "=0.41.0"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

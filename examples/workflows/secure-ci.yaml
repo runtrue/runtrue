@@ -1,0 +1,46 @@
+version: 1
+name: secure-local-smoke
+
+"on":
+  manual: {}
+
+permissions:
+  repository: deny
+  checks: deny
+  artifacts: deny
+  registry: deny
+  network: deny
+  oidc: deny
+  cache:
+    read: deny
+    write: deny
+  secrets: []
+  signing: []
+
+jobs:
+  smoke:
+    trust: trusted-only
+    runner:
+      os: linux
+      arch: amd64
+      isolation: native
+    permissions:
+      repository: deny
+      checks: deny
+      artifacts: deny
+      registry: deny
+      network: deny
+      oidc: deny
+      cache:
+        read: deny
+        write: deny
+      secrets: []
+      signing: []
+    timeout: 1m
+    retries: 0
+    steps:
+      - id: hello
+        name: Run a local smoke test
+        run:
+          command: ["/bin/echo", "runtrue: local native smoke test"]
+        continue-on-error: false

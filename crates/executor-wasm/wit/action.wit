@@ -1,0 +1,59 @@
+package runtrue:action@1.0.0;
+
+interface host {
+  enum directory-access {
+    read,
+    write,
+    read-write,
+  }
+
+  record directory-handle {
+    id: u64,
+    scope: string,
+    access: directory-access,
+  }
+
+  record secret-handle {
+    id: u64,
+    name: string,
+    purpose: option<string>,
+  }
+
+  record oidc-handle {
+    id: u64,
+    audience: string,
+  }
+
+  /// Returns the canonical JSON object supplied as action inputs.
+  get-input: func() -> list<u8>;
+
+  /// Publishes the component's bounded canonical JSON output.
+  set-output: func(value: list<u8>) -> result<_, string>;
+
+  /// Emits a bounded UTF-8 message to the selected Runtrue log stream.
+  log: func(log-stream: string, message: string) -> result<_, string>;
+
+  /// Opaque workspace-scope handles granted for this invocation.
+  directory-handles: func() -> list<directory-handle>;
+  read-file: func(handle: u64, path: string) -> result<list<u8>, string>;
+  write-file: func(handle: u64, path: string, value: list<u8>) -> result<_, string>;
+
+  /// Opaque network handles granted for this invocation.
+  network-handles: func() -> list<u64>;
+  http-request: func(handle: u64, request: list<u8>) -> result<list<u8>, string>;
+
+  /// Opaque secret handles granted for this invocation. Secret bytes are
+  /// returned only through an explicitly configured host adapter.
+  secret-handles: func() -> list<secret-handle>;
+  read-secret: func(handle: u64) -> result<list<u8>, string>;
+
+  /// Opaque workload-identity handles granted for this invocation. Tokens are
+  /// minted just in time and only for the audience bound to the handle.
+  oidc-handles: func() -> list<oidc-handle>;
+  mint-oidc-token: func(handle: u64) -> result<list<u8>, string>;
+}
+
+world run {
+  import host;
+  export run: func();
+}

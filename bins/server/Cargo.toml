@@ -1,0 +1,77 @@
+[package]
+name = "runtrue-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[[bin]]
+name = "runtrue-server"
+path = "src/main.rs"
+
+[lib]
+name = "runtrue_server"
+path = "src/lib.rs"
+
+[dependencies]
+runtrue-attest.workspace = true
+runtrue-artifacts.workspace = true
+runtrue-auth.workspace = true
+runtrue-audit.workspace = true
+runtrue-compiler.workspace = true
+runtrue-cache.workspace = true
+runtrue-control-plane.workspace = true
+runtrue-git.workspace = true
+runtrue-lifecycle.workspace = true
+runtrue-lock.workspace = true
+runtrue-model.workspace = true
+runtrue-oidc.workspace = true
+runtrue-output-lifecycle.workspace = true
+runtrue-policy.workspace = true
+runtrue-protocol.workspace = true
+runtrue-replay.workspace = true
+runtrue-scheduler.workspace = true
+runtrue-scm.workspace = true
+runtrue-secrets.workspace = true
+runtrue-storage.workspace = true
+runtrue-trusted-planner.workspace = true
+runtrue-workflow-ir.workspace = true
+runtrue-workflow-ast.workspace = true
+axum.workspace = true
+base64ct.workspace = true
+clap.workspace = true
+hex.workspace = true
+hmac.workspace = true
+hkdf.workspace = true
+libc.workspace = true
+nix = { workspace = true, features = ["poll", "user"] }
+prost-types.workspace = true
+rand_core.workspace = true
+rcgen.workspace = true
+rusqlite.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
+tonic.workspace = true
+tower.workspace = true
+zeroize.workspace = true
+x509-parser.workspace = true
+x25519-dalek.workspace = true
+chacha20poly1305.workspace = true
+ed25519-dalek.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+runtrue-runner = { package = "runtrue-runner", path = "../runner" }
+runtrue-runner-core = { path = "../../crates/runner-core" }
+tempfile.workspace = true
+tokio-stream.workspace = true
+
+[lints]
+workspace = true

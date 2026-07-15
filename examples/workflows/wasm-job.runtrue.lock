@@ -1,0 +1,7 @@
+lock_version = 1
+
+[[component]]
+source = "wasm://registry.example/runtrue/analyze@v1"
+resolved = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+signature_identity = "release@runtrue.example"
+wit_world = "runtrue:action/run@1.0.0"

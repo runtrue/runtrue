@@ -1,0 +1,22 @@
+[package]
+name = "runtrue-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[dependencies]
+runtrue-model.workspace = true
+cedar-policy.workspace = true
+enum-ordinalize.workspace = true
+enum-ordinalize-derive.workspace = true
+psm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smol_str.workspace = true
+stacker.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

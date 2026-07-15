@@ -1,0 +1,126 @@
+name: runtrue
+
+x-runtrue-security: &runtrue-security
+  # The evaluation package uses the invoking non-root uid for bind mounts.
+  # See deploy/README.md; this is not distinct host-user isolation.
+  user: "${RUNTRUE_RUNTIME_UID:?run deploy/bootstrap.sh first}:${RUNTRUE_RUNTIME_GID:?run deploy/bootstrap.sh first}"
+  read_only: true
+  init: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 512
+  ulimits:
+    nofile:
+      soft: 4096
+      hard: 8192
+
+services:
+  server:
+    <<: *runtrue-security
+    image: "${RUNTRUE_IMAGE_REPOSITORY:-local/runtrue}-server:${RUNTRUE_IMAGE_TAG:-0.1.0}"
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile.server
+      args:
+        RUNTRUE_VERSION: "${RUNTRUE_IMAGE_TAG:-0.1.0}"
+        RUNTRUE_REVISION: "${RUNTRUE_IMAGE_REVISION:-unknown}"
+    environment:
+      RUNTRUE_LISTEN: 0.0.0.0:8080
+      RUNTRUE_DATABASE: /var/lib/runtrue/server/control-plane.sqlite
+      RUNTRUE_DATA_ROOT: /var/lib/runtrue/server/blobs
+      RUNTRUE_INSTALLATION_ID: "${RUNTRUE_INSTALLATION_ID:-single-node-evaluation}"
+      RUNTRUE_BOOTSTRAP_TOKEN_FILE: /run/runtrue-secrets/bootstrap.token
+      RUNTRUE_SECURITY_KEY_FILE: /var/lib/runtrue/server/security.key
+      RUNTRUE_OIDC_ISSUER: "http://127.0.0.1:${RUNTRUE_HTTP_PORT:-8080}/oidc"
+    ports:
+      - "127.0.0.1:${RUNTRUE_HTTP_PORT:-8080}:8080"
+    expose:
+      - "8080"
+    volumes:
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/server"
+        target: /var/lib/runtrue/server
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/secrets"
+        target: /run/runtrue-secrets
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/keys/security.key"
+        target: /var/lib/runtrue/server/security.key
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+      - /run:size=16m,mode=0755,noexec,nosuid,nodev
+    healthcheck:
+      test: ["CMD", "/usr/bin/timeout", "3", "/usr/local/bin/runtrue-healthcheck"]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 1g
+    cpus: 2.0
+    networks:
+      - control
+
+  backup:
+    <<: *runtrue-security
+    profiles:
+      - tools
+    image: "${RUNTRUE_IMAGE_REPOSITORY:-local/runtrue}-backup:${RUNTRUE_IMAGE_TAG:-0.1.0}"
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile.backup
+      args:
+        RUNTRUE_VERSION: "${RUNTRUE_IMAGE_TAG:-0.1.0}"
+        RUNTRUE_REVISION: "${RUNTRUE_IMAGE_REVISION:-unknown}"
+    network_mode: none
+    volumes:
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/server"
+        target: /var/lib/runtrue/server
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/keys"
+        target: /run/runtrue-keys
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/recovery-config"
+        target: /etc/runtrue/recovery-config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/backups"
+        target: /var/backups/runtrue
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/restores"
+        target: /var/lib/runtrue/restores
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+    command: ["--help"]
+    restart: "no"
+    mem_limit: 1g
+    cpus: 1.0
+
+networks:
+  control:
+    internal: true
+    driver: bridge

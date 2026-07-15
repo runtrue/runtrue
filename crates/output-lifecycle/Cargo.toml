@@ -1,0 +1,24 @@
+[package]
+name = "runtrue-output-lifecycle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[dependencies]
+runtrue-artifacts.workspace = true
+runtrue-cache.workspace = true
+runtrue-control-plane.workspace = true
+runtrue-git.workspace = true
+runtrue-model.workspace = true
+runtrue-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

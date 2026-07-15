@@ -1,0 +1,2034 @@
+openapi: 3.1.0
+info:
+  title: Runtrue API
+  version: 0.1.0
+  description: >-
+    Preliminary control-plane contract. Mutation responses may include
+    Idempotency-Replayed. Secret values and enrollment bearer tokens are never
+    returned by read endpoints. Enrolled-runner secret and OIDC broker RPCs
+    use the separately versioned `runtrue.runner.v1.RunnerControl` protobuf
+    contract; they require mTLS plus a live certificate-owned Open session and
+    are intentionally not modeled as HTTP endpoints here.
+servers:
+  - url: https://ci.example.com
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      operationId: health
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+  /readyz:
+    get:
+      operationId: readiness
+      security: []
+      responses:
+        '200':
+          description: Durable control plane is ready
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /.well-known/openid-configuration:
+    get:
+      operationId: getOidcDiscovery
+      security: []
+      responses:
+        '200':
+          description: Workload identity issuer metadata
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OidcDiscovery'}
+  /oidc/jwks.json:
+    get:
+      operationId: getOidcJwks
+      security: []
+      responses:
+        '200':
+          description: Active OIDC verification keys
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/JwkSet'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /webhooks/github:
+    post:
+      operationId: ingestGithubWebhook
+      security: []
+      parameters:
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          schema: {type: string, maxLength: 256}
+        - name: X-GitHub-Event
+          in: header
+          required: true
+          schema: {type: string, maxLength: 128}
+        - name: X-GitHub-Delivery
+          in: header
+          required: true
+          schema: {type: string, maxLength: 256}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        '202': {description: Authenticated event durably accepted}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/UnprocessableEntity'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /auth/github/app/callback:
+    get:
+      operationId: finishGithubAppInstallation
+      security: []
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema: {type: string, minLength: 43, maxLength: 256}
+        - name: installation_id
+          in: query
+          required: true
+          schema: {type: integer, format: uint64, minimum: 1}
+        - name: setup_action
+          in: query
+          required: false
+          schema: {type: string, enum: [install, update]}
+      responses:
+        '303': {description: Exact installation verified and redirected to its bound local return path}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '502': {description: Bounded GitHub provider verification failed}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /auth/login:
+    get:
+      operationId: beginGithubOauthLogin
+      security: []
+      parameters:
+        - name: return_to
+          in: query
+          required: false
+          schema: {type: string, pattern: '^/(?!/)', maxLength: 2048}
+      responses:
+        '302': {description: Redirect to GitHub OAuth with state, nonce, and S256 challenge}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /auth/callback:
+    get:
+      operationId: finishGithubOauthLogin
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 8192}
+        - name: state
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 1024}
+      responses:
+        '303': {description: Verified GitHub identity session created}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/scm/github:
+    get:
+      operationId: getGithubAppStatus
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          schema: {type: string, maxLength: 8192}
+      responses:
+        '200':
+          description: Tenant-filtered, credential-free installation and repository status
+          content:
+            application/json:
+              schema: {type: object}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/scm/github/setup-transactions:
+    post:
+      operationId: createGithubAppSetupTransaction
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                tenant_id: {type: string, maxLength: 8192}
+                return_path: {type: string, pattern: '^/[^\\#]*$', maxLength: 2048}
+      responses:
+        '201':
+          description: One-use setup state durably reserved
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, install_url, expires_unix_ms, replayed]
+                properties:
+                  id: {type: string}
+                  install_url: {type: string, format: uri}
+                  expires_unix_ms: {type: integer, format: uint64}
+                  replayed: {type: boolean}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/scm/github/installations/{installation_id}/sync:
+    post:
+      operationId: syncGithubAppInstallation
+      parameters:
+        - name: installation_id
+          in: path
+          required: true
+          schema: {type: string, maxLength: 8192}
+        - name: tenant_id
+          in: query
+          required: false
+          schema: {type: string, maxLength: 8192}
+      responses:
+        '200': {description: Provider-verified installation and selected repository catalog reconciled}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '502': {description: Bounded GitHub provider verification failed}
+  /api/v1/scm/github/installations/{installation_id}:
+    delete:
+      operationId: revokeGithubAppInstallation
+      parameters:
+        - name: installation_id
+          in: path
+          required: true
+          schema: {type: string, maxLength: 8192}
+        - name: tenant_id
+          in: query
+          required: false
+          schema: {type: string, maxLength: 8192}
+      responses:
+        '204': {description: Runtrue access revoked; provider-side uninstall remains operator controlled}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /ui/github/installations/start:
+    post:
+      operationId: startGithubAppInstallationFromUi
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [csrf_token, idempotency_key]
+              properties:
+                csrf_token: {type: string}
+                idempotency_key: {type: string}
+      responses:
+        '303': {description: Redirect to the exact provider-owned installation URL}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /ui/github/repositories/link:
+    post:
+      operationId: linkGithubRepositoryFromUi
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [csrf_token, installation_id, external_repository_id]
+              properties:
+                csrf_token: {type: string}
+                installation_id: {$ref: '#/components/schemas/Identifier'}
+                external_repository_id: {type: string, pattern: '^[1-9][0-9]*$'}
+      responses:
+        '303': {description: Selected provider repository onboarded and linked}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/repositories:
+    get:
+      operationId: listRepositories
+      responses:
+        '200':
+          description: Repository page
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RepositoryPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      operationId: createRepository
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateRepositoryRequest'}
+      responses:
+        '201':
+          description: Repository created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Repository'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/repositories/{repository_id}:
+    get:
+      operationId: getRepository
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+      responses:
+        '200':
+          description: Repository
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Repository'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/repositories/{repository_id}/capsules:
+    post:
+      operationId: createCapsule
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateCapsuleRequest'}
+      responses:
+        '201':
+          description: Workflow compiled and exact canonical capsule signed
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutionCapsule'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/capsules/{capsule_id}:
+    get:
+      operationId: getCapsule
+      parameters:
+        - {$ref: '#/components/parameters/CapsuleId'}
+      responses:
+        '200':
+          description: Signed execution capsule
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutionCapsule'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/capsules/{capsule_id}/runs:
+    post:
+      operationId: createRun
+      parameters:
+        - {$ref: '#/components/parameters/CapsuleId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateRunRequest'}
+      responses:
+        '201':
+          description: Authorized run and jobs durably created
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Run'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/runs:
+    get:
+      operationId: listRuns
+      parameters:
+        - name: repository_id
+          in: query
+          schema: {$ref: '#/components/schemas/Identifier'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Stable ID-ordered run page
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/runs/{run_id}:
+    get:
+      operationId: getRun
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+      responses:
+        '200':
+          description: Run
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Run'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/runs/{run_id}/logs:
+    get:
+      operationId: getRunLogs
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 10000, default: 1000}
+      responses:
+        '200':
+          description: Ordered, redacted runner log frames for the authorized run
+          headers:
+            Cache-Control:
+              description: Run logs are never stored by intermediaries.
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 10000
+                items: {$ref: '#/components/schemas/RunLogFrame'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/runs/{run_id}/cancel:
+    post:
+      operationId: cancelRun
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CancelRunRequest'}
+      responses:
+        '202':
+          description: Cancellation durably requested
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Run'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/runs/{run_id}/replay-bundle:
+    post:
+      operationId: createReplayBundle
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '201':
+          description: Canonical replay bundle sealed and stored
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReplayBundleMetadata'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+    get:
+      operationId: getReplayBundle
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+      responses:
+        '200':
+          description: Canonical sealed replay envelope
+          content:
+            application/vnd.runtrue.replay+json:
+              schema: {type: object}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/approval-requests:
+    get:
+      operationId: listApprovalRequests
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, approved, denied, expired, consumed]
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Stable ID-ordered approval page
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApprovalPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/approval-requests/{approval_id}:
+    get:
+      operationId: getApprovalRequest
+      parameters:
+        - {$ref: '#/components/parameters/ApprovalId'}
+      responses:
+        '200':
+          description: Approval request
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApprovalRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/approval-requests/{approval_id}/decisions:
+    post:
+      operationId: decideApproval
+      parameters:
+        - {$ref: '#/components/parameters/ApprovalId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ApprovalDecisionRequest'}
+      responses:
+        '201':
+          description: Exact-subject decision and any bounded SCM continuation task durably recorded; no repository I/O occurs in this request
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApprovalRequest'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/runner-pools:
+    get:
+      operationId: listRunnerPools
+      responses:
+        '200':
+          description: Runner pools
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunnerPoolItems'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      operationId: createRunnerPool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [id, tenant_id, name]
+              properties:
+                id: {$ref: '#/components/schemas/Identifier'}
+                tenant_id: {$ref: '#/components/schemas/Identifier'}
+                name: {type: string, minLength: 1, maxLength: 8192}
+                region: {type: ['string', 'null'], minLength: 1, maxLength: 8192}
+      responses:
+        '201':
+          description: Active runner pool created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunnerPool'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/runner-pools/trust/capsule-key:
+    get:
+      operationId: getRunnerCapsuleTrustKey
+      responses:
+        '200':
+          description: Current Ed25519 capsule verification key for runner trust configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [key_id, algorithm, public_key_hex]
+                properties:
+                  key_id: {$ref: '#/components/schemas/Digest'}
+                  algorithm: {type: string, const: ed25519}
+                  public_key_hex: {type: string, pattern: '^[0-9a-f]{64}$'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/runner-pools/{runner_pool_id}:
+    get:
+      operationId: getRunnerPool
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+      responses:
+        '200':
+          description: Runner pool
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunnerPool'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/runner-pools/{runner_pool_id}/enrollment-tokens:
+    post:
+      operationId: createRunnerEnrollmentToken
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateEnrollmentTokenRequest'}
+      responses:
+        '201':
+          description: One-time bearer value; it is not replayed on an idempotent retry
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Cache-Control:
+              description: One-time bearer responses are never cacheable.
+              schema: {type: string, const: no-store}
+            Pragma:
+              description: Legacy cache prevention for the one-time bearer response.
+              schema: {type: string, const: no-cache}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EnrollmentToken'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/runners:
+    get:
+      operationId: listRunners
+      responses:
+        '200':
+          description: Runners
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunnerItems'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/runners/{runner_id}:
+    get:
+      operationId: getRunner
+      parameters:
+        - {$ref: '#/components/parameters/RunnerId'}
+      responses:
+        '200':
+          description: Runner
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Runner'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/runners/{runner_id}/drain:
+    post:
+      operationId: drainRunner
+      parameters:
+        - {$ref: '#/components/parameters/RunnerId'}
+      responses:
+        '202':
+          description: Runner durably entered draining state
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Runner'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/scopes/{scope}/secrets:
+    get:
+      operationId: listSecretMetadata
+      parameters:
+        - {$ref: '#/components/parameters/Scope'}
+      responses:
+        '200':
+          description: Secret references and metadata only
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretMetadataItems'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      operationId: createSecret
+      parameters:
+        - {$ref: '#/components/parameters/Scope'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateSecretRequest'}
+      responses:
+        '201':
+          description: Secret encrypted or external reference stored; value is omitted
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretMetadata'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/scopes/{scope}/secrets/{name}:
+    parameters:
+      - {$ref: '#/components/parameters/Scope'}
+      - {$ref: '#/components/parameters/Name'}
+    get:
+      operationId: getSecretMetadata
+      responses:
+        '200':
+          description: Secret metadata only
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretMetadata'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      operationId: rotateSecret
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RotateSecretRequest'}
+      responses:
+        '200':
+          description: New immutable encrypted version stored; value is omitted
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretMetadata'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+    delete:
+      operationId: deleteSecret
+      responses:
+        '200':
+          description: Secret tombstoned; value is omitted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretMetadata'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/scopes/{scope}/variables/{name}:
+    parameters:
+      - {$ref: '#/components/parameters/Scope'}
+      - {$ref: '#/components/parameters/Name'}
+    get:
+      operationId: getVariable
+      responses:
+        '200':
+          description: Current variable version
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Variable'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      operationId: putVariable
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PutVariableRequest'}
+      responses:
+        '200':
+          description: New immutable variable version stored
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Variable'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+    delete:
+      operationId: deleteVariable
+      responses:
+        '204': {description: Current variable deleted}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/cache/entries/{cache_entry_id}/promote:
+    post:
+      operationId: promoteCacheEntry
+      parameters:
+        - {$ref: '#/components/parameters/CacheEntryId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CachePromotionRequest'}
+      responses:
+        '202':
+          description: Promotion validation durably queued; no promotion is implied
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PromotionRequest'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/artifacts/{artifact_id}/promote:
+    post:
+      operationId: promoteArtifact
+      parameters:
+        - {$ref: '#/components/parameters/ArtifactId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ArtifactPromotionRequest'}
+      responses:
+        '202':
+          description: Promotion validation durably queued; no promotion is implied
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PromotionRequest'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/artifacts/{artifact_id}:
+    get:
+      operationId: getArtifact
+      parameters:
+        - {$ref: '#/components/parameters/ArtifactId'}
+      responses:
+        '200':
+          description: Tenant-authorized immutable artifact metadata
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Artifact'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/artifacts/{artifact_id}/provenance:
+    get:
+      operationId: getArtifactProvenance
+      parameters:
+        - {$ref: '#/components/parameters/ArtifactId'}
+      responses:
+        '200':
+          description: Verified provenance statement and signer identity
+          content:
+            application/json:
+              schema: {type: object}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/artifacts/{artifact_id}/download-tickets:
+    post:
+      operationId: createArtifactDownloadTicket
+      parameters:
+        - {$ref: '#/components/parameters/ArtifactId'}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                ttl_seconds: {type: integer, minimum: 1, maximum: 900, default: 300}
+      responses:
+        '201':
+          description: One-use principal-scoped artifact download ticket
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ArtifactDownloadTicket'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/artifact-downloads/{token}:
+    get:
+      operationId: downloadArtifact
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 256}
+      responses:
+        '200':
+          description: One-use verified attachment stream
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /auth/oidc/login:
+    get:
+      operationId: beginHumanOidcLogin
+      security: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+        - name: provider_id
+          in: query
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+        - name: return_to
+          in: query
+          required: false
+          schema: {type: string, pattern: '^/(?!/)', maxLength: 2048}
+      responses:
+        '302': {description: Redirect to the configured provider with state, nonce, and S256 challenge}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /auth/oidc/callback:
+    get:
+      operationId: finishHumanOidcLogin
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 8192}
+        - name: state
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 1024}
+      responses:
+        '303': {description: Verified pre-provisioned identity session created}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /auth/session/refresh:
+    post:
+      operationId: refreshBrowserSession
+      security:
+        - browserRefresh: []
+          browserCsrf: []
+      parameters:
+        - {$ref: '#/components/parameters/CsrfToken'}
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: '#/components/schemas/CsrfMutation'}
+      responses:
+        '204': {description: Session credentials atomically rotated}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /auth/session/logout:
+    post:
+      operationId: logoutBrowserSession
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - {$ref: '#/components/parameters/CsrfToken'}
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: '#/components/schemas/CsrfMutation'}
+      responses:
+        '204': {description: Browser session durably revoked and cookies cleared}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/session:
+    get:
+      operationId: getBrowserSession
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      responses:
+        '200':
+          description: Current authenticated browser session and form-bound CSRF value
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BrowserSessionStatus'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/policy-status:
+    get:
+      operationId: getBrowserPolicyStatus
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      responses:
+        '200':
+          description: Exact verified policy snapshot used for this status request
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BrowserPolicyStatus'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /ui/session:
+    get:
+      operationId: getBrowserSessionPage
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      responses:
+        '200':
+          description: Escaped server-rendered session page
+          content:
+            text/html: {schema: {type: string}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /ui/policy:
+    get:
+      operationId: getBrowserPolicyPage
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      responses:
+        '200':
+          description: Escaped server-rendered active-policy status page
+          content:
+            text/html: {schema: {type: string}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/ui/github:
+    get:
+      operationId: getGithubBrowserState
+      security:
+        - browserAccess: []
+      parameters:
+        - name: catalog
+          in: query
+          required: false
+          schema: {type: boolean, default: false}
+        - name: organization
+          in: query
+          required: false
+          schema: {type: string, minLength: 1, maxLength: 256}
+      responses:
+        '200': {description: Credential-free GitHub installation, catalog, and repository state}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/ui/organization/settings:
+    get:
+      operationId: getBrowserOrganizationSettings
+      security:
+        - browserAccess: []
+      responses:
+        '200': {description: Tenant-scoped secret metadata and variables; secret values are omitted}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/ui/organization/secrets:
+    post:
+      operationId: saveBrowserOrganizationSecret
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: Organization secret created or rotated}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/ui/organization/secrets/delete:
+    post:
+      operationId: deleteBrowserOrganizationSecret
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '204': {description: Organization secret deleted}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/ui/organization/variables:
+    post:
+      operationId: saveBrowserOrganizationVariable
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: Organization variable created or replaced}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/ui/organization/variables/delete:
+    post:
+      operationId: deleteBrowserOrganizationVariable
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '204': {description: Organization variable deleted}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/ui/repositories/{repository_id}/settings:
+    get:
+      operationId: getBrowserRepositorySettings
+      security:
+        - browserAccess: []
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+      responses:
+        '200': {description: Repository-scoped secret metadata and variables; secret values are omitted}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/ui/repositories/{repository_id}/secrets:
+    post:
+      operationId: saveBrowserRepositorySecret
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: Repository secret created or rotated}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/ui/repositories/{repository_id}/secrets/delete:
+    post:
+      operationId: deleteBrowserRepositorySecret
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '204': {description: Repository secret deleted}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/ui/repositories/{repository_id}/variables:
+    post:
+      operationId: saveBrowserRepositoryVariable
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: Repository variable created or replaced}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/ui/repositories/{repository_id}/variables/delete:
+    post:
+      operationId: deleteBrowserRepositoryVariable
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '204': {description: Repository variable deleted}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/ui/repositories/{repository_id}/uninstall:
+    post:
+      operationId: uninstallBrowserRepository
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: Local GitHub repository link suspended}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/ui/runs/{run_id}:
+    get:
+      operationId: getBrowserRunDetail
+      security:
+        - browserAccess: []
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+      responses:
+        '200': {description: Tenant-scoped run, jobs, bounded logs, and workflow approval detail}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/ui/approvals/{approval_id}/decisions:
+    post:
+      operationId: decideBrowserWorkflowApproval
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - {$ref: '#/components/parameters/ApprovalId'}
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: Workflow approval decision recorded}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/policies/{policy_id}/versions:
+    post:
+      operationId: createPolicyVersion
+      parameters:
+        - {$ref: '#/components/parameters/PolicyId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreatePolicyVersionRequest'}
+      responses:
+        '201':
+          description: Immutable policy version stored
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PolicyVersion'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/audit-events:
+    get:
+      operationId: listAuditEvents
+      parameters:
+        - name: cursor
+          in: query
+          description: Last observed audit sequence
+          schema: {type: string, pattern: '^[0-9]+$', maxLength: 20}
+        - name: action
+          in: query
+          schema: {type: string, minLength: 1, maxLength: 8192}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Verified sequence-ordered audit page
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/api-tokens:
+    get:
+      operationId: listApiTokens
+      parameters:
+        - name: tenant_id
+          in: query
+          schema: {$ref: '#/components/schemas/Identifier'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Tenant-scoped API token metadata; bearer values are never returned
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApiTokenPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      operationId: createApiToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateApiTokenRequest'}
+      responses:
+        '201':
+          description: One-time bearer value and durable token metadata
+          headers:
+            Cache-Control:
+              description: One-time bearer responses are never cacheable.
+              schema: {type: string, const: no-store}
+            Pragma:
+              description: Legacy cache prevention for the one-time bearer response.
+              schema: {type: string, const: no-cache}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IssuedApiToken'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/api-tokens/{token_id}:
+    delete:
+      operationId: revokeApiToken
+      parameters:
+        - name: token_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+      responses:
+        '204': {description: Token revoked; delegated descendants become unusable through ancestry validation}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    browserAccess:
+      type: apiKey
+      in: cookie
+      name: runtrue_access
+    browserRefresh:
+      type: apiKey
+      in: cookie
+      name: runtrue_refresh
+    browserCsrf:
+      type: apiKey
+      in: cookie
+      name: runtrue_csrf
+  requestBodies:
+    BrowserFormMutation:
+      required: true
+      content:
+        application/x-www-form-urlencoded:
+          schema:
+            type: object
+            required: [csrf_token]
+            properties:
+              csrf_token: {type: string, minLength: 1, maxLength: 8192}
+            additionalProperties:
+              type: string
+              maxLength: 1048576
+  headers:
+    IdempotencyReplayed:
+      description: Whether this response represents an earlier durable mutation
+      schema: {type: string, enum: ['true', 'false']}
+  parameters:
+    RepositoryId:
+      name: repository_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    CapsuleId:
+      name: capsule_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    ApprovalId:
+      name: approval_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    RunnerPoolId:
+      name: runner_pool_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    RunnerId:
+      name: runner_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    CacheEntryId:
+      name: cache_entry_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    ArtifactId:
+      name: artifact_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    PolicyId:
+      name: policy_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    Scope:
+      name: scope
+      in: path
+      required: true
+      description: Encoded scope, for example repository:repo_01 or environment:production
+      schema: {type: string, minLength: 1, maxLength: 8192}
+    Name:
+      name: name
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 8192}
+    Cursor:
+      name: cursor
+      in: query
+      schema: {type: string, minLength: 1, maxLength: 8192}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Optional mutation key scoped to the operation and resource
+      schema: {type: string, minLength: 1, maxLength: 200}
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Must exactly match the record-bound token also accepted as the csrf_token form field.
+      schema: {type: string, minLength: 1, maxLength: 1024}
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Unauthorized:
+      description: Bearer or webhook authentication failed
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Forbidden:
+      description: Authenticated principal is not authorized
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    NotFound:
+      description: Resource not found
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Conflict:
+      description: Idempotency subject, immutable state, approval subject, lease, or fence conflict
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    PayloadTooLarge:
+      description: Request body exceeds the endpoint bound
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    UnprocessableEntity:
+      description: Authenticated webhook is unsupported or malformed
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    ServiceUnavailable:
+      description: Durable service or configured integration unavailable
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+  schemas:
+    Identifier:
+      type: string
+      minLength: 1
+      maxLength: 8192
+    Digest:
+      type: string
+      pattern: '^sha256:[0-9a-f]{64}$'
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string, enum: [ok, ready]}
+    CsrfMutation:
+      type: object
+      additionalProperties: false
+      properties:
+        csrf_token: {type: string, minLength: 1, maxLength: 1024}
+    BrowserSessionStatus:
+      type: object
+      additionalProperties: false
+      required: [principal_id, tenant_id, device_id, access_generation, access_expires_unix_ms, refresh_expires_unix_ms, absolute_expires_unix_ms, mfa_authenticated_unix_ms, csrf_token]
+      properties:
+        principal_id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        device_id: {$ref: '#/components/schemas/Identifier'}
+        access_generation: {type: integer, minimum: 1}
+        access_expires_unix_ms: {type: integer, minimum: 1}
+        refresh_expires_unix_ms: {type: integer, minimum: 1}
+        absolute_expires_unix_ms: {type: integer, minimum: 1}
+        mfa_authenticated_unix_ms: {type: ['integer', 'null'], minimum: 0}
+        csrf_token:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Returned only to the authenticated same-origin browser under no-store for a subsequent form/header mutation.
+    BrowserPolicyStatus:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, policy_epoch, decision_cache_generation, active_policy_digest]
+      properties:
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        policy_epoch: {type: integer, minimum: 0}
+        decision_cache_generation: {type: integer, minimum: 0}
+        active_policy_digest:
+          oneOf:
+            - {$ref: '#/components/schemas/Digest'}
+            - {type: 'null'}
+    Repository:
+      type: object
+      additionalProperties: false
+      required: [id, owner, name, default_branch, visibility]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        owner: {type: string}
+        name: {type: string}
+        default_branch: {type: string}
+        visibility: {type: string}
+    CreateRepositoryRequest:
+      type: object
+      additionalProperties: false
+      required: [owner, name]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        owner: {type: string, minLength: 1, maxLength: 8192}
+        name: {type: string, minLength: 1, maxLength: 8192}
+        default_branch: {type: string, minLength: 1, maxLength: 8192, default: main}
+        visibility: {type: string, minLength: 1, maxLength: 8192, default: private}
+    RepositoryPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Repository'}
+        next_cursor: {type: ['string', 'null']}
+    CreateCapsuleRequest:
+      type: object
+      additionalProperties: false
+      required: [source_commit, workflow_yaml, event]
+      properties:
+        source_commit: {type: string, minLength: 1, maxLength: 8192}
+        base_commit: {type: ['string', 'null'], maxLength: 8192}
+        workflow_path:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          default: .runtrue/workflows/ci.yaml
+        workflow_yaml: {type: string, minLength: 1, maxLength: 1048576}
+        event: {type: object}
+        lockfile_toml:
+          type: ['string', 'null']
+          maxLength: 4194304
+          description: Exact strict `.runtrue.lock` TOML compiled into the signed capsule.
+        reusable_workflows:
+          type: array
+          maxItems: 256
+          items: {$ref: '#/components/schemas/ReusableWorkflowSource'}
+          description: Exact authenticated source bytes for every `[[workflow]]` lock entry; total decoded source bytes are limited to 8 MiB.
+        selected_job:
+          type: ['string', 'null']
+          minLength: 1
+          maxLength: 8192
+          description: Optional job or matrix base id, including its dependency closure.
+    ReusableWorkflowSource:
+      type: object
+      additionalProperties: false
+      required: [reference, commit, source_hex]
+      properties:
+        reference: {type: string, minLength: 1, maxLength: 4096}
+        commit: {type: string, minLength: 1, maxLength: 128}
+        source_hex:
+          type: string
+          maxLength: 2097152
+          pattern: '^[0-9a-f]*$'
+          description: Lowercase hex encoding of at most 1 MiB of exact reusable-workflow bytes.
+    ExecutionCapsule:
+      type: object
+      additionalProperties: false
+      required: [id, repository_id, digest, status, workflow_digest, lock_digest, risk_score, approval_required, approval_requests, parity_grade, created_at, signature, capsule]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        repository_id: {$ref: '#/components/schemas/Identifier'}
+        digest: {$ref: '#/components/schemas/Digest'}
+        status: {type: string, const: signed}
+        workflow_digest: {$ref: '#/components/schemas/Digest'}
+        lock_digest:
+          oneOf:
+            - {$ref: '#/components/schemas/Digest'}
+            - {type: 'null'}
+        risk_score: {type: integer, minimum: 0, maximum: 100}
+        approval_required: {type: boolean}
+        approval_requests:
+          type: array
+          maxItems: 32
+          items: {$ref: '#/components/schemas/CapsuleApprovalRequest'}
+        parity_grade: {}
+        created_at: {type: string, format: date-time}
+        signature: {type: object}
+        capsule: {type: object}
+    CreateRunRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        priority: {type: integer, format: int32, default: 0}
+        source_snapshot_id:
+          allOf: [{$ref: '#/components/schemas/Identifier'}]
+          description: Required for a remote capsule whose signed context contains a source-tree digest; rejected for an unbound capsule.
+    CapsuleApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [id, approval_kind, subject_digest, status]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        approval_kind: {type: string, enum: [workflow-definition, privileged-execution]}
+        subject_digest: {$ref: '#/components/schemas/Digest'}
+        status: {type: string, enum: [pending, approved, denied, expired, consumed]}
+    CancelRunRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason: {type: string, maxLength: 8192}
+    Run:
+      type: object
+      additionalProperties: false
+      required: [id, capsule_id, status, created_at, started_at, completed_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        capsule_id: {$ref: '#/components/schemas/Identifier'}
+        status: {type: string}
+        created_at: {type: string, format: date-time}
+        started_at: {type: ['string', 'null'], format: date-time}
+        completed_at: {type: ['string', 'null'], format: date-time}
+    RunPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Run'}
+        next_cursor: {type: ['string', 'null']}
+    RunLogFrame:
+      type: object
+      additionalProperties: false
+      required: [execution_lease_id, fencing_generation, job_attempt, step_id, stream, sequence, monotonic_nanoseconds, wall_time_unix_ms, payload, redaction_state]
+      properties:
+        execution_lease_id: {$ref: '#/components/schemas/Identifier'}
+        fencing_generation: {type: integer, minimum: 1}
+        job_attempt: {type: integer, minimum: 1}
+        step_id: {$ref: '#/components/schemas/Identifier'}
+        stream: {type: string, enum: [stdout, stderr]}
+        sequence: {type: integer, minimum: 0}
+        monotonic_nanoseconds: {type: integer, minimum: 0}
+        wall_time_unix_ms: {type: integer, minimum: 0}
+        payload:
+          type: array
+          maxItems: 65536
+          items: {type: integer, minimum: 0, maximum: 255}
+          description: Redacted frame payload serialized as bytes.
+        redaction_state: {type: string, minLength: 1, maxLength: 8192}
+    CreateApiTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [principal_id, name, scopes, ttl_seconds]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        principal_id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string, minLength: 1, maxLength: 8192}
+        scopes:
+          type: array
+          uniqueItems: true
+          maxItems: 256
+          items: {type: string, minLength: 1, maxLength: 8192}
+        ttl_seconds: {type: integer, minimum: 1, maximum: 31536000}
+    ApiToken:
+      type: object
+      additionalProperties: false
+      required: [id, principal_id, tenant_id, name, scopes, created_at, expires_at, last_used_at, revoked_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        principal_id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string}
+        scopes:
+          type: array
+          uniqueItems: true
+          items: {type: string}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        last_used_at: {type: ['string', 'null'], format: date-time}
+        revoked_at: {type: ['string', 'null'], format: date-time}
+    IssuedApiToken:
+      type: object
+      additionalProperties: false
+      required: [token, token_type, id, principal_id, tenant_id, name, scopes, created_at, expires_at, last_used_at, revoked_at]
+      properties:
+        token: {type: string, writeOnly: true}
+        token_type: {type: string, const: Bearer}
+        id: {$ref: '#/components/schemas/Identifier'}
+        principal_id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string}
+        scopes:
+          type: array
+          uniqueItems: true
+          items: {type: string}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        last_used_at: {type: ['string', 'null'], format: date-time}
+        revoked_at: {type: ['string', 'null'], format: date-time}
+      description: The bearer token is returned once and never appears in metadata reads.
+    ApiTokenPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/ApiToken'}
+        next_cursor: {type: ['string', 'null']}
+    ReplayBundleMetadata:
+      type: object
+      additionalProperties: false
+      required: [id, digest, run_id, download_url, expires_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        digest: {$ref: '#/components/schemas/Digest'}
+        run_id: {$ref: '#/components/schemas/Identifier'}
+        download_url: {type: string, format: uri-reference}
+        expires_at: {type: string, format: date-time}
+    ApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [id, subject_digest, approval_kind, status, risk_score, expires_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        subject_digest: {$ref: '#/components/schemas/Digest'}
+        approval_kind: {type: string}
+        status: {type: string, enum: [pending, approved, denied, expired, consumed]}
+        risk_score: {type: integer, minimum: 0, maximum: 100}
+        expires_at: {type: ['string', 'null'], format: date-time}
+    ApprovalDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [decision, subject_digest, reason, rule_id]
+      properties:
+        decision: {type: string, enum: [approve, deny]}
+        subject_digest: {$ref: '#/components/schemas/Digest'}
+        reason: {type: string, minLength: 1, maxLength: 2000}
+        rule_id: {type: string, minLength: 1, maxLength: 8192}
+    ApprovalPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/ApprovalRequest'}
+        next_cursor: {type: ['string', 'null']}
+    RunnerPool:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, name, status, created_unix_ms]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string}
+        region: {type: ['string', 'null']}
+        status: {type: string, enum: [active, disabled]}
+        created_unix_ms: {type: integer, minimum: 0}
+    RunnerPoolItems:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/RunnerPool'}}
+    Runner:
+      type: object
+      required: [id, tenant_id, pool_id, os, arch, isolation_backends, logical_cpus, memory_bytes, storage_bytes, verified_capabilities, self_reported_capabilities, status, active_jobs, used_cpus, used_memory_bytes, used_storage_bytes, locality, last_heartbeat_unix_ms, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        pool_id: {$ref: '#/components/schemas/Identifier'}
+        os: {type: string}
+        arch: {type: string}
+        isolation_backends: {type: array, items: {type: string}, uniqueItems: true}
+        logical_cpus: {type: integer, minimum: 0}
+        memory_bytes: {type: integer, minimum: 0}
+        storage_bytes: {type: integer, minimum: 0}
+        region: {type: ['string', 'null']}
+        verified_capabilities: {type: array, items: {type: string}, uniqueItems: true}
+        self_reported_capabilities: {type: array, items: {type: string}, uniqueItems: true}
+        status: {type: string, enum: [online, draining, quarantined, offline, revoked]}
+        active_jobs: {type: integer, minimum: 0}
+        used_cpus: {type: integer, minimum: 0}
+        used_memory_bytes: {type: integer, minimum: 0}
+        used_storage_bytes: {type: integer, minimum: 0}
+        locality: {type: array, items: {$ref: '#/components/schemas/Digest'}, uniqueItems: true}
+        last_heartbeat_unix_ms: {type: integer, minimum: 0}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    RunnerItems:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Runner'}}
+    CreateEnrollmentTokenRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        expires_in_seconds: {type: integer, minimum: 60, maximum: 3600, default: 600}
+    EnrollmentToken:
+      type: object
+      additionalProperties: false
+      required: [token, expires_at]
+      properties:
+        token: {type: string, writeOnly: true}
+        expires_at: {type: string, format: date-time}
+    SecretMetadata:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, scope, name, provider, secret_type, status, created_unix_ms, updated_unix_ms]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        scope: {type: string}
+        name: {type: string}
+        provider: {type: string}
+        provider_reference: {type: string}
+        secret_type: {type: string}
+        status: {type: string, enum: [active, tombstoned]}
+        current_version: {type: integer, minimum: 1}
+        created_unix_ms: {type: integer, minimum: 0}
+        updated_unix_ms: {type: integer, minimum: 0}
+    SecretMetadataItems:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/SecretMetadata'}}
+    CreateSecretRequest:
+      type: object
+      additionalProperties: false
+      required: [name, secret_type]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 8192}
+        secret_type: {type: string, minLength: 1, maxLength: 8192}
+        provider: {type: string, minLength: 1, maxLength: 8192, default: built-in}
+        value: {type: string, writeOnly: true, maxLength: 1048576}
+        provider_reference: {type: string, maxLength: 8192}
+      description: Built-in secrets require value and forbid provider_reference; external providers require provider_reference and forbid value.
+    RotateSecretRequest:
+      type: object
+      additionalProperties: false
+      required: [value]
+      properties:
+        value: {type: string, writeOnly: true, maxLength: 1048576}
+    PutVariableRequest:
+      type: object
+      additionalProperties: false
+      required: [value]
+      properties:
+        value: {}
+    Variable:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, scope, name, value, version, updated_unix_ms]
+      properties:
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        scope: {type: string}
+        name: {type: string}
+        value: {}
+        version: {type: integer, minimum: 1}
+        updated_unix_ms: {type: integer, minimum: 0}
+    CachePromotionRequest:
+      type: object
+      additionalProperties: false
+      required: [target_trust_domain, evidence]
+      properties:
+        target_trust_domain: {type: string, minLength: 1, maxLength: 8192}
+        evidence: {type: object}
+    ArtifactPromotionRequest:
+      type: object
+      additionalProperties: false
+      required: [target_classification]
+      properties:
+        target_classification:
+          type: string
+          enum: [quarantined, verified-test-output, release-candidate, promoted-release, public]
+        approval_id: {type: string, maxLength: 8192}
+    Artifact:
+      type: object
+      additionalProperties: false
+      required: [artifact_id, tenant_id, repository_id, run_id, job_id, job_attempt, step_id, output_name, content_digest, manifest_digest, provenance_digest, size_bytes, media_type, classification, scan_state, retention_until_unix_seconds, legal_hold, state, created_unix_ms]
+      properties:
+        artifact_id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        repository_id: {$ref: '#/components/schemas/Identifier'}
+        run_id: {$ref: '#/components/schemas/Identifier'}
+        job_id: {$ref: '#/components/schemas/Identifier'}
+        job_attempt: {type: integer, minimum: 1}
+        step_id: {$ref: '#/components/schemas/Identifier'}
+        output_name: {$ref: '#/components/schemas/Identifier'}
+        content_digest: {$ref: '#/components/schemas/Digest'}
+        manifest_digest: {$ref: '#/components/schemas/Digest'}
+        provenance_digest: {$ref: '#/components/schemas/Digest'}
+        size_bytes: {type: integer, minimum: 0}
+        media_type: {type: string}
+        classification: {type: string}
+        scan_state: {type: string, enum: [pending, passed, failed, waived]}
+        retention_until_unix_seconds: {type: integer, minimum: 0}
+        legal_hold: {type: boolean}
+        state: {type: string, enum: [available, quarantined, retired]}
+        created_unix_ms: {type: integer, minimum: 0}
+    ArtifactDownloadTicket:
+      type: object
+      additionalProperties: false
+      required: [token, artifact_id, expires_unix_ms, download_path]
+      properties:
+        token: {type: string}
+        artifact_id: {$ref: '#/components/schemas/Identifier'}
+        expires_unix_ms: {type: integer, minimum: 0}
+        download_path: {type: string}
+    PromotionRequest:
+      type: object
+      additionalProperties: false
+      required: [id, kind, source_id, target, evidence, status, created_unix_ms]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        kind: {type: string, enum: [cache, artifact]}
+        source_id: {$ref: '#/components/schemas/Identifier'}
+        target: {}
+        evidence: {}
+        status: {type: string, enum: [pending, completed, failed]}
+        created_unix_ms: {type: integer, minimum: 0}
+    CreatePolicyVersionRequest:
+      type: object
+      additionalProperties: false
+      required: [source, mode]
+      properties:
+        source: {type: string, minLength: 1, maxLength: 1048576}
+        mode: {type: string, enum: [draft, shadow, enforce]}
+    PolicyVersion:
+      type: object
+      additionalProperties: false
+      required: [id, policy_id, version, source, mode, digest, created_unix_ms]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        policy_id: {$ref: '#/components/schemas/Identifier'}
+        version: {type: integer, minimum: 1}
+        source: {type: string}
+        mode: {type: string, enum: [draft, shadow, enforce]}
+        digest: {$ref: '#/components/schemas/Digest'}
+        created_unix_ms: {type: integer, minimum: 0}
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required: [sequence, installation_id, data, event_hash]
+      properties:
+        sequence: {type: integer, minimum: 1}
+        installation_id: {$ref: '#/components/schemas/Identifier'}
+        previous_hash:
+          oneOf:
+            - {$ref: '#/components/schemas/Digest'}
+            - {type: 'null'}
+        data:
+          type: object
+          required: [observed_unix_ms, tenant_id, actor, action, resource, result, request_id, metadata]
+          properties:
+            observed_unix_ms: {type: integer, minimum: 0}
+            tenant_id: {$ref: '#/components/schemas/Identifier'}
+            actor: {type: object}
+            action: {type: string}
+            resource: {type: object}
+            result: {type: string}
+            request_id: {type: string}
+            decision_id: {type: string}
+            metadata: {type: object}
+        event_hash: {$ref: '#/components/schemas/Digest'}
+    AuditPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AuditEvent'}}
+        next_cursor: {type: ['string', 'null']}
+    OidcDiscovery:
+      type: object
+      additionalProperties: false
+      required: [issuer, jwks_uri, subject_types_supported, id_token_signing_alg_values_supported]
+      properties:
+        issuer: {type: string, format: uri}
+        jwks_uri: {type: string, format: uri}
+        subject_types_supported: {type: array, items: {type: string}}
+        id_token_signing_alg_values_supported: {type: array, items: {type: string}}
+    Jwk:
+      type: object
+      additionalProperties: false
+      required: [kty, crv, alg, use, kid, x]
+      properties:
+        kty: {type: string, const: OKP}
+        crv: {type: string, const: Ed25519}
+        alg: {type: string, const: EdDSA}
+        use: {type: string, const: sig}
+        kid: {$ref: '#/components/schemas/Digest'}
+        x: {type: string}
+    JwkSet:
+      type: object
+      additionalProperties: false
+      required: [keys]
+      properties:
+        keys: {type: array, items: {$ref: '#/components/schemas/Jwk'}}
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail, request_id]
+      properties:
+        type: {type: string, format: uri}
+        title: {type: string}
+        status: {type: integer, minimum: 400, maximum: 599}
+        detail: {type: string}
+        request_id: {type: string}

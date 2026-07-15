@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+package runtrue.runner.v2;
+
+import "google/protobuf/timestamp.proto";
+
+service RunnerObjectTransfer {
+  rpc RequestSourceTicket(SourceTicketRequest) returns (SourceTicketResponse);
+  rpc DownloadObject(ObjectDownloadRequest) returns (stream ObjectDownloadFrame);
+  rpc UploadObject(stream ObjectUploadFrame) returns (ObjectUploadResponse);
+  rpc CompleteLease(CompleteLeaseRequest) returns (CompleteLeaseResponse);
+}
+
+// Generation two object framing sends authorization/binding metadata exactly
+// once. Generation-one RPCs remain unchanged for N-1 compatibility.
+message ObjectUploadFrame {
+  oneof body {
+    ObjectUploadHeader header = 1;
+    ObjectChunk chunk = 2;
+  }
+}
+
+message ObjectUploadHeader {
+  string ticket_id = 1;
+  string ticket_kind = 2;
+  string execution_lease_id = 3;
+  uint64 fencing_generation = 4;
+  string job_id = 5;
+  uint32 job_attempt = 6;
+  string step_id = 7;
+  string digest_algorithm = 8;
+  bytes digest = 9;
+  uint64 size_bytes = 10;
+}
+
+message ObjectUploadResponse {
+  string digest_algorithm = 1;
+  bytes digest = 2;
+  uint64 size_bytes = 3;
+  bool already_present = 4;
+}
+
+message ObjectChunk {
+  uint64 offset = 1;
+  bytes payload = 2;
+}
+
+message SourceTicketRequest {
+  string execution_lease_id = 1;
+  uint64 fencing_generation = 2;
+  string job_id = 3;
+  uint32 job_attempt = 4;
+}
+
+message SourceTicketResponse {
+  string ticket_id = 1;
+  string digest_algorithm = 2;
+  bytes tree_manifest_digest = 3;
+  uint64 maximum_bytes = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message ObjectDownloadRequest {
+  string ticket_id = 1;
+  string execution_lease_id = 2;
+  uint64 fencing_generation = 3;
+  string job_id = 4;
+  uint32 job_attempt = 5;
+  string digest_algorithm = 6;
+  bytes digest = 7;
+}
+
+message ObjectDownloadFrame {
+  oneof body {
+    ObjectDownloadHeader header = 1;
+    ObjectChunk chunk = 2;
+  }
+}
+
+message ObjectDownloadHeader {
+  string digest_algorithm = 1;
+  bytes digest = 2;
+  uint64 size_bytes = 3;
+}
+
+enum LeaseFinalState {
+  LEASE_FINAL_STATE_UNSPECIFIED = 0;
+  LEASE_FINAL_STATE_SUCCEEDED = 1;
+  LEASE_FINAL_STATE_FAILED = 2;
+  LEASE_FINAL_STATE_CANCELED = 3;
+  LEASE_FINAL_STATE_TIMED_OUT = 4;
+}
+
+enum CommittedObjectKind {
+  COMMITTED_OBJECT_KIND_UNSPECIFIED = 0;
+  COMMITTED_OBJECT_KIND_CACHE = 1;
+  COMMITTED_OBJECT_KIND_ARTIFACT = 2;
+}
+
+message CommittedObject {
+  CommittedObjectKind kind = 1;
+  string object_id = 2;
+  optional string declaration_name = 3;
+  uint32 job_attempt = 4;
+}
+
+message CompleteLeaseRequest {
+  string lease_id = 1;
+  uint64 fencing_generation = 2;
+  uint64 installation_fencing_epoch = 3;
+  LeaseFinalState final_state = 4;
+  optional int32 exit_code = 5;
+  string error_code = 6;
+  string result_digest_algorithm = 7;
+  bytes result_digest = 8;
+  repeated CommittedObject committed_objects = 9;
+  google.protobuf.Timestamp completed_at = 10;
+  // Last attempt observed for the signed job; zero only when no attempt ran.
+  uint32 final_job_attempt = 11;
+  // Number of log frames sent on Open before this completion. New runners use
+  // this as a cross-RPC persistence barrier; legacy runners leave it zero.
+  uint32 expected_log_frames = 12;
+}
+
+message CompleteLeaseResponse {
+  bool accepted = 1;
+  LeaseFinalState resulting_job_state = 2;
+}

@@ -1,0 +1,30 @@
+[package]
+name = "runtrue-runtime-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[dependencies]
+runtrue-artifacts.workspace = true
+runtrue-attest.workspace = true
+runtrue-cache.workspace = true
+runtrue-engine.workspace = true
+runtrue-model.workspace = true
+runtrue-storage.workspace = true
+runtrue-workflow-ir.workspace = true
+hex.workspace = true
+libc.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+runtrue-compiler.workspace = true
+
+[lints]
+workspace = true

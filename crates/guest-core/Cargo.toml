@@ -1,0 +1,23 @@
+[package]
+name = "runtrue-guest-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[dependencies]
+runtrue-attest = { path = "../attest" }
+runtrue-model = { path = "../model" }
+runtrue-workflow-ir = { path = "../workflow-ir" }
+hmac.workspace = true
+hex.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

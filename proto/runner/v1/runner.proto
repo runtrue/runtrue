@@ -1,0 +1,506 @@
+syntax = "proto3";
+
+package runtrue.runner.v1;
+
+option java_multiple_files = true;
+option java_package = "dev.runtrue.runner.v1";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+service RunnerControl {
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  rpc RotateCertificate(RotateCertificateRequest) returns (RotateCertificateResponse);
+  rpc Open(stream RunnerMessage) returns (stream ControlMessage);
+  rpc FetchExecutionCapsule(FetchExecutionCapsuleRequest) returns (FetchExecutionCapsuleResponse);
+  rpc RequestSecretLease(SecretLeaseRequest) returns (SecretLeaseResponse);
+  rpc RevokeSecretLease(RevokeSecretLeaseRequest) returns (google.protobuf.Empty);
+  rpc MintOidcToken(OidcTokenRequest) returns (OidcTokenResponse);
+  rpc RequestCacheTicket(CacheTicketRequest) returns (CacheTicketResponse);
+  rpc CommitCacheEntry(CommitCacheEntryRequest) returns (CommitCacheEntryResponse);
+  rpc RequestArtifactTicket(ArtifactTicketRequest) returns (ArtifactTicketResponse);
+  rpc CommitArtifact(CommitArtifactRequest) returns (CommitArtifactResponse);
+  rpc UploadBlob(stream UploadBlobChunk) returns (UploadBlobResponse);
+  rpc DownloadBlob(DownloadBlobRequest) returns (stream BlobChunk);
+  rpc CompleteLease(CompleteLeaseRequest) returns (CompleteLeaseResponse);
+}
+
+message Digest {
+  string algorithm = 1;
+  bytes value = 2;
+}
+
+message EnrollRequest {
+  string enrollment_token = 1;
+  bytes certificate_signing_request = 2;
+  RunnerInventory inventory = 3;
+  optional AttestationEvidence attestation = 4;
+  // Supported generation range. Legacy runners omit both fields; a new server
+  // then treats inventory.protocol_version as a singleton range.
+  uint32 protocol_min = 5;
+  uint32 protocol_max = 6;
+  // Request an auto-removing identity for disposable test workers. The
+  // control plane removes it after it is offline and has no lease history.
+  bool ephemeral = 7;
+}
+
+message EnrollResponse {
+  string runner_id = 1;
+  bytes certificate_chain_pem = 2;
+  google.protobuf.Timestamp certificate_expires_at = 3;
+  string runner_pool_id = 4;
+  uint32 protocol_min = 5;
+  uint32 protocol_max = 6;
+  // Server-derived digest of the durable accepted inventory and pool binding.
+  // Older servers omit this field and older runners safely ignore it.
+  Digest authoritative_posture_digest = 7;
+  // Newest common generation selected by the server. Older servers omit this
+  // field; the runner then derives the selection from the returned range.
+  uint32 selected_protocol_version = 8;
+}
+
+message RotateCertificateRequest {
+  string runner_id = 1;
+  bytes certificate_signing_request = 2;
+  optional AttestationEvidence attestation = 3;
+}
+
+message RotateCertificateResponse {
+  bytes certificate_chain_pem = 1;
+  google.protobuf.Timestamp certificate_expires_at = 2;
+  // Echoes the exact CSR journaled by the control plane for replay safety.
+  Digest csr_digest = 3;
+  Digest certificate_fingerprint = 4;
+}
+
+message RunnerInventory {
+  string hostname = 1;
+  string os = 2;
+  string architecture = 3;
+  uint32 logical_cpus = 4;
+  uint64 memory_bytes = 5;
+  uint64 local_storage_bytes = 6;
+  repeated string isolation_backends = 7;
+  repeated Capability capabilities = 8;
+  Digest runner_binary_digest = 9;
+  Digest runner_image_digest = 10;
+  string runner_version = 11;
+  string engine_version = 12;
+  uint32 protocol_version = 13;
+  string region = 14;
+  map<string, string> labels = 15;
+}
+
+message Capability {
+  string key = 1;
+  string json_value = 2;
+  string evidence_source = 3;
+}
+
+message AttestationEvidence {
+  string kind = 1;
+  bytes evidence = 2;
+  bytes endorsement = 3;
+  Digest nonce = 4;
+}
+
+message RunnerMessage {
+  oneof body {
+    RunnerHello hello = 1;
+    Heartbeat heartbeat = 2;
+    LeaseDecision lease_decision = 3;
+    JobStateUpdate job_state = 4;
+    StepStateUpdate step_state = 5;
+    LogBatch log_batch = 6;
+    CancellationAck cancellation_ack = 7;
+    LocalitySummary locality = 8;
+    RunnerHealth health = 9;
+  }
+}
+
+message ControlMessage {
+  oneof body {
+    ControlHello hello = 1;
+    LeaseOffer lease_offer = 2;
+    CancelLease cancel_lease = 3;
+    DrainRunner drain_runner = 4;
+    RotateCertificateNow rotate_certificate = 5;
+    InvalidateContent invalidate_content = 6;
+  }
+}
+
+message RunnerHello {
+  string runner_id = 1;
+  string connection_id = 2;
+  uint32 protocol_version = 3;
+  RunnerInventory inventory = 4;
+}
+
+message ControlHello {
+  string connection_id = 1;
+  google.protobuf.Duration heartbeat_interval = 2;
+  google.protobuf.Timestamp server_time = 3;
+  uint64 installation_fencing_epoch = 4;
+}
+
+message Heartbeat {
+  string runner_id = 1;
+  string connection_id = 2;
+  repeated ActiveLease active_leases = 3;
+  google.protobuf.Timestamp observed_at = 4;
+}
+
+message ActiveLease {
+  string lease_id = 1;
+  uint64 fencing_generation = 2;
+  string state = 3;
+}
+
+message LeaseOffer {
+  string lease_id = 1;
+  string job_id = 2;
+  string runner_id = 3;
+  uint64 fencing_generation = 4;
+  uint64 installation_fencing_epoch = 5;
+  Digest capsule_digest = 6;
+  bytes capsule_signature = 7;
+  string capsule_signing_key_id = 8;
+  google.protobuf.Timestamp issued_at = 9;
+  google.protobuf.Timestamp accept_by = 10;
+  google.protobuf.Timestamp expires_at = 11;
+  RunnerRequirements requirements = 12;
+  string secret_broker_audience = 13;
+  // Immutable execution deadline derived from the signed job timeout plus
+  // bounded setup grace. Unlike expires_at, heartbeats never extend it.
+  google.protobuf.Timestamp hard_deadline = 14;
+}
+
+message RunnerRequirements {
+  string os = 1;
+  string architecture = 2;
+  string isolation_floor = 3;
+  uint32 cpu = 4;
+  uint64 memory_bytes = 5;
+  uint64 storage_bytes = 6;
+  string region = 7;
+  repeated string required_capabilities = 8;
+  Digest posture_digest = 9;
+}
+
+message LeaseDecision {
+  string lease_id = 1;
+  uint64 fencing_generation = 2;
+  bool accepted = 3;
+  string rejection_code = 4;
+  string detail = 5;
+}
+
+message FetchExecutionCapsuleRequest {
+  string lease_id = 1;
+  uint64 fencing_generation = 2;
+  Digest expected_digest = 3;
+}
+
+message FetchExecutionCapsuleResponse {
+  bytes canonical_capsule = 1;
+  Digest digest = 2;
+  bytes signature = 3;
+  string signing_key_id = 4;
+  string media_type = 5;
+}
+
+message JobStateUpdate {
+  string lease_id = 1;
+  uint64 fencing_generation = 2;
+  string state = 3;
+  google.protobuf.Timestamp observed_at = 4;
+  string error_code = 5;
+  string detail = 6;
+}
+
+message StepStateUpdate {
+  string lease_id = 1;
+  uint64 fencing_generation = 2;
+  string step_id = 3;
+  string state = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  optional int32 exit_code = 6;
+  string error_code = 7;
+  Digest output_digest = 8;
+  // One-based execution-engine attempt. Attempt zero is invalid.
+  uint32 job_attempt = 9;
+}
+
+message LogFrame {
+  string run_id = 1;
+  string job_id = 2;
+  string step_id = 3;
+  uint64 sequence = 4;
+  string stream = 5;
+  uint64 monotonic_nanoseconds = 6;
+  google.protobuf.Timestamp wall_time = 7;
+  bytes payload = 8;
+  string redaction_state = 9;
+  uint32 job_attempt = 10;
+}
+
+message LogBatch {
+  string lease_id = 1;
+  uint64 fencing_generation = 2;
+  repeated LogFrame frames = 3;
+}
+
+message SecretLeaseRequest {
+  string execution_lease_id = 1;
+  uint64 fencing_generation = 2;
+  string job_id = 3;
+  string step_id = 4;
+  string secret_metadata_id = 5;
+  string purpose = 6;
+  // Wire-compatible key carrier, not a content digest. `algorithm` MUST be
+  // `x25519` and `value` MUST be the guest's 32-byte ephemeral X25519 public
+  // key. Servers reject `sha256` here rather than ambiguously treating a
+  // digest as encryption key material.
+  Digest guest_session_key = 7;
+  uint32 job_attempt = 8;
+}
+
+message SecretLeaseResponse {
+  string secret_lease_id = 1;
+  // Version 1 is ANVSEC01 || server_ephemeral_x25519_public_key[32] ||
+  // xchacha20_nonce[24] || ciphertext_and_tag. HKDF-SHA-256 and AEAD bind the
+  // exact execution lease, generations, job, step, secret lease/metadata,
+  // purpose, and expiry as authenticated data.
+  bytes encrypted_envelope = 2;
+  // `x25519-hkdf-sha256-xchacha20poly1305-v1` for the envelope above.
+  string delivery_kind = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message RevokeSecretLeaseRequest {
+  string secret_lease_id = 1;
+  string execution_lease_id = 2;
+  uint64 fencing_generation = 3;
+  uint32 job_attempt = 4;
+}
+
+message OidcTokenRequest {
+  string execution_lease_id = 1;
+  uint64 fencing_generation = 2;
+  string job_id = 3;
+  string step_id = 4;
+  string audience = 5;
+  uint32 job_attempt = 6;
+}
+
+message OidcTokenResponse {
+  string token = 1;
+  google.protobuf.Timestamp expires_at = 2;
+  string jti = 3;
+}
+
+message CacheTicketRequest {
+  string execution_lease_id = 1;
+  uint64 fencing_generation = 2;
+  string job_id = 3;
+  string step_id = 4;
+  string operation = 5;
+  Digest cache_identity = 6;
+  string trust_domain = 7;
+  uint64 maximum_bytes = 8;
+  uint32 job_attempt = 9;
+  // Canonical JSON encoding of runtrue_cache::CacheIdentity.
+  bytes cache_identity_json = 10;
+  // Reader/writer trust domain is taken from cache_identity_json; this digest
+  // remains an exact echo/check for older callers.
+  optional Digest expected_tree_manifest_digest = 11;
+  Digest declared_inputs_digest = 12;
+  optional string user_suffix = 13;
+}
+
+message CacheTicketResponse {
+  string ticket_id = 1;
+  string endpoint = 2;
+  string bearer_token = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  uint64 maximum_bytes = 5;
+  // Present for a restore hit; canonical JSON CacheEntry. Empty is a miss.
+  bytes cache_entry_json = 6;
+  bytes cache_identity_json = 7;
+}
+
+message CommitCacheEntryRequest {
+  string execution_lease_id = 1;
+  uint64 fencing_generation = 2;
+  string ticket_id = 3;
+  Digest cache_identity = 4;
+  Digest manifest_digest = 5;
+  string trust_domain = 6;
+  uint64 size_bytes = 7;
+  optional uint64 expected_generation = 8;
+  uint32 job_attempt = 9;
+  // Canonical JSON TreeSnapshot whose full CAS graph was uploaded first.
+  bytes tree_snapshot_json = 10;
+}
+
+message CommitCacheEntryResponse {
+  string cache_entry_id = 1;
+  uint64 generation = 2;
+  string status = 3;
+}
+
+message ArtifactTicketRequest {
+  string execution_lease_id = 1;
+  uint64 fencing_generation = 2;
+  string job_id = 3;
+  string step_id = 4;
+  string name = 5;
+  string classification = 6;
+  uint64 maximum_bytes = 7;
+  uint32 job_attempt = 8;
+  Digest expected_content_digest = 9;
+}
+
+message ArtifactTicketResponse {
+  string ticket_id = 1;
+  string endpoint = 2;
+  string bearer_token = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message CommitArtifactRequest {
+  string execution_lease_id = 1;
+  uint64 fencing_generation = 2;
+  string ticket_id = 3;
+  Digest content_digest = 4;
+  Digest manifest_digest = 5;
+  uint64 size_bytes = 6;
+  string media_type = 7;
+  string classification = 8;
+  uint32 job_attempt = 9;
+  // Canonical JSON PathSnapshot whose full CAS graph was uploaded first.
+  bytes path_snapshot_json = 10;
+  reserved 11;
+  uint64 retention_until_unix_seconds = 12;
+  bool legal_hold = 13;
+}
+
+message UploadBlobChunk {
+  string execution_lease_id = 1;
+  uint64 fencing_generation = 2;
+  string job_id = 3;
+  string step_id = 4;
+  uint32 job_attempt = 5;
+  string ticket_id = 6;
+  string ticket_kind = 7; // cache or artifact
+  Digest declared_digest = 8;
+  uint64 offset = 9;
+  bytes payload = 10;
+}
+
+message UploadBlobResponse {
+  Digest digest = 1;
+  uint64 size_bytes = 2;
+  bool already_present = 3;
+}
+
+message DownloadBlobRequest {
+  string execution_lease_id = 1;
+  uint64 fencing_generation = 2;
+  string job_id = 3;
+  string step_id = 4;
+  uint32 job_attempt = 5;
+  string ticket_id = 6;
+  Digest digest = 7;
+}
+
+message BlobChunk {
+  Digest digest = 1;
+  uint64 offset = 2;
+  bytes payload = 3;
+}
+
+message CommitArtifactResponse {
+  string artifact_id = 1;
+  string status = 2;
+}
+
+message CancellationAck {
+  string lease_id = 1;
+  uint64 fencing_generation = 2;
+  google.protobuf.Timestamp observed_at = 3;
+}
+
+message CancelLease {
+  string lease_id = 1;
+  uint64 fencing_generation = 2;
+  string reason = 3;
+  google.protobuf.Duration grace_period = 4;
+}
+
+message DrainRunner {
+  string reason = 1;
+  google.protobuf.Timestamp deadline = 2;
+}
+
+message RotateCertificateNow {
+  string reason = 1;
+  google.protobuf.Timestamp deadline = 2;
+}
+
+message InvalidateContent {
+  repeated Digest digests = 1;
+  string reason = 2;
+}
+
+message LocalitySummary {
+  string runner_id = 1;
+  bytes tenant_scoped_bloom_filter = 2;
+  bytes public_content_bloom_filter = 3;
+  repeated LocalityClass classes = 4;
+  google.protobuf.Timestamp generated_at = 5;
+  // Exact immutable objects eligible for placement scoring. Bloom filters are
+  // informational only and never authorize a cache read.
+  repeated Digest content_digests = 6;
+}
+
+message LocalityClass {
+  string kind = 1;
+  uint64 bytes = 2;
+  uint64 item_count = 3;
+}
+
+message RunnerHealth {
+  string runner_id = 1;
+  double cpu_load = 2;
+  uint64 memory_available_bytes = 3;
+  uint64 storage_available_bytes = 4;
+  bool cache_healthy = 5;
+  bool kvm_healthy = 6;
+  bool oci_healthy = 7;
+  repeated string warnings = 8;
+}
+
+message CompleteLeaseRequest {
+  string lease_id = 1;
+  uint64 fencing_generation = 2;
+  uint64 installation_fencing_epoch = 3;
+  string final_state = 4;
+  optional int32 exit_code = 5;
+  string error_code = 6;
+  Digest result_digest = 7;
+  repeated string artifact_ids = 8;
+  repeated string cache_entry_ids = 9;
+  google.protobuf.Timestamp completed_at = 10;
+  // Last attempt observed for the signed job; zero only when no attempt ran.
+  uint32 final_job_attempt = 11;
+  // Number of log frames sent on Open before this completion. New runners use
+  // this as a cross-RPC persistence barrier; legacy runners leave it zero.
+  uint32 expected_log_frames = 12;
+}
+
+message CompleteLeaseResponse {
+  bool accepted = 1;
+  string resulting_job_state = 2;
+}

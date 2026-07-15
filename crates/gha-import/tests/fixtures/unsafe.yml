@@ -1,0 +1,15 @@
+name: unsafe
+on:
+  pull_request_target: {}
+jobs:
+  inspect:
+    runs-on: self-hosted
+    services:
+      docker:
+        image: docker:latest
+        options: --privileged --network host
+    steps:
+      - run: echo "${{ secrets.DEPLOY_TOKEN }}" | sudo sh
+      - uses: marketplace/example@v2
+        with:
+          password: plaintext

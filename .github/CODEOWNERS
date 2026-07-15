@@ -1,0 +1,14 @@
+# Repository-wide fallback. Replace or extend this with team aliases when the
+# repository host has stable release-engineering and security teams.
+* @Doout
+
+# Changes to these trust and release boundaries always request the owner.
+/.github/ @Doout
+/Cargo.lock @Doout
+/proto/ @Doout
+/schemas/ @Doout
+/crates/policy/ @Doout
+/crates/update/ @Doout
+/crates/executor-*/ @Doout
+/bins/runner/ @Doout
+/actions/ @Doout

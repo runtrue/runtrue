@@ -1,0 +1,6 @@
+lock_version = 1
+
+[[image]]
+source = "registry.example/runtrue/build-tools:2026.07"
+resolved = "registry.example/runtrue/build-tools@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+platform = "linux/amd64"

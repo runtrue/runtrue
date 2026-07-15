@@ -1,0 +1,28 @@
+[package]
+name = "runtrue-executor-firecracker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[dependencies]
+runtrue-attest.workspace = true
+runtrue-engine.workspace = true
+runtrue-guest-core.workspace = true
+runtrue-model.workspace = true
+runtrue-workflow-ir.workspace = true
+hex.workspace = true
+nix.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

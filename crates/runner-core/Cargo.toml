@@ -1,0 +1,19 @@
+[package]
+name = "runtrue-runner-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[dependencies]
+runtrue-attest.workspace = true
+runtrue-model.workspace = true
+runtrue-protocol.workspace = true
+runtrue-workflow-ir.workspace = true
+prost-types.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

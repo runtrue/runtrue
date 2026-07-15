@@ -1,0 +1,37 @@
+[package]
+name = "runtrue-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[[bin]]
+name = "runtrue-guest"
+path = "src/main.rs"
+
+[lib]
+name = "runtrue_guest"
+path = "src/lib.rs"
+
+[dependencies]
+runtrue-attest.workspace = true
+runtrue-engine.workspace = true
+runtrue-guest-core.workspace = true
+runtrue-model.workspace = true
+runtrue-workflow-ir.workspace = true
+clap.workspace = true
+hex.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+runtrue-executor-firecracker.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

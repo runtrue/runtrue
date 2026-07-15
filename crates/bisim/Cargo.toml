@@ -1,0 +1,21 @@
+[package]
+name = "runtrue-bisim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[dependencies]
+runtrue-engine.workspace = true
+runtrue-model.workspace = true
+runtrue-workflow-ir.workspace = true
+base64ct.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

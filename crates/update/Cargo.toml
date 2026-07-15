@@ -1,0 +1,26 @@
+[package]
+name = "runtrue-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[dependencies]
+runtrue-model.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+nix = { workspace = true, features = ["user"] }
+rand_core.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

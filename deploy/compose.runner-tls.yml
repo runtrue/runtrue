@@ -1,0 +1,140 @@
+# Opt-in, same-host runner-control and enrollment overlay. This is an
+# evaluation profile, not a production TLS or remote-runner topology.
+x-runner-security: &runner-security
+  # Deliberately shared with the evaluation server for rootless bind mounts.
+  # The hardened systemd examples use distinct service users instead.
+  user: "${RUNTRUE_RUNTIME_UID:?run deploy/bootstrap.sh first}:${RUNTRUE_RUNTIME_GID:?run deploy/bootstrap.sh first}"
+  read_only: true
+  init: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 512
+  ulimits:
+    nofile:
+      soft: 4096
+      hard: 8192
+  image: "${RUNTRUE_IMAGE_REPOSITORY:-local/runtrue}-runner:${RUNTRUE_IMAGE_TAG:-0.1.0}"
+  build:
+    context: ..
+    dockerfile: deploy/Containerfile.runner
+    args:
+      RUNTRUE_VERSION: "${RUNTRUE_IMAGE_TAG:-0.1.0}"
+      RUNTRUE_REVISION: "${RUNTRUE_IMAGE_REVISION:-unknown}"
+  environment: &runner-environment
+    # File-scoped public trust only. Runner workloads must never see the
+    # installation CA key or the control-plane server key.
+    RUNTRUE_RUNNER_CA_CERTIFICATE: /run/runtrue-runner-ca.pem
+    RUNTRUE_RUNNER_CREDENTIAL_DIRECTORY: /var/lib/runtrue/runner/credentials
+    RUNTRUE_RUNNER_STATE_DIRECTORY: /var/lib/runtrue/runner/state
+    RUNTRUE_RUNNER_WORKSPACE_DIRECTORY: /var/lib/runtrue/workspaces
+    RUNTRUE_RUNNER_CAPSULE_KEYRING: /run/runtrue-runner-trust/capsule-keys
+    # Native execution is deliberately confined to this explicitly named
+    # evaluation profile. It is not a sandbox for untrusted workflows.
+    RUNTRUE_RUNNER_TRUSTED_NATIVE: "true"
+    RUNTRUE_RUNNER_REGION: single-node-evaluation
+  tmpfs:
+    - /tmp:size=128m,mode=1777,noexec,nosuid,nodev
+    - /run:size=16m,mode=0755,noexec,nosuid,nodev
+  depends_on:
+    server:
+      condition: service_healthy
+  restart: "no"
+  stop_grace_period: 30s
+  mem_limit: 2g
+  cpus: 2.0
+  networks:
+    - control
+
+services:
+  server:
+    environment:
+      RUNTRUE_RUNNER_GRPC_LISTEN: 0.0.0.0:8443
+      RUNTRUE_RUNNER_ENROLLMENT_LISTEN: 0.0.0.0:8444
+      RUNTRUE_RUNNER_TLS_CERTIFICATE: /run/runtrue-tls/runner-server.pem
+      RUNTRUE_RUNNER_TLS_PRIVATE_KEY: /run/runtrue-tls/runner-server.key
+      RUNTRUE_RUNNER_CA_CERTIFICATE: /run/runtrue-tls/runner-ca.pem
+      RUNTRUE_RUNNER_CA_PRIVATE_KEY: /run/runtrue-tls/runner-ca.key
+    expose:
+      - "8443"
+      - "8444"
+    volumes:
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/tls"
+        target: /run/runtrue-tls
+        read_only: true
+        bind:
+          create_host_path: false
+
+  runner-enroll:
+    <<: *runner-security
+    profiles:
+      - runner-enroll
+    environment:
+      <<: *runner-environment
+      RUNTRUE_RUNNER_ENROLLMENT_ENDPOINT: https://server:8444
+      RUNTRUE_RUNNER_ENROLLMENT_TOKEN_FILE: /run/runtrue-enrollment.token
+    volumes:
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/runner"
+        target: /var/lib/runtrue/runner
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/workspaces"
+        target: /var/lib/runtrue/workspaces
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/tls/runner-ca.pem"
+        target: /run/runtrue-runner-ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/runner-secrets/enrollment.token"
+        target: /run/runtrue-enrollment.token
+        read_only: true
+        bind:
+          create_host_path: false
+    command: ["enroll"]
+
+  runner:
+    <<: *runner-security
+    profiles:
+      - runner-native-eval
+    environment:
+      <<: *runner-environment
+      RUNTRUE_RUNNER_ENDPOINT: https://server:8443
+    volumes:
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/runner"
+        target: /var/lib/runtrue/runner
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/workspaces"
+        target: /var/lib/runtrue/workspaces
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/tls/runner-ca.pem"
+        target: /run/runtrue-runner-ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/runner-trust"
+        target: /run/runtrue-runner-trust
+        read_only: true
+        bind:
+          create_host_path: false
+    command: ["daemon"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s

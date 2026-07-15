@@ -1,0 +1,30 @@
+[package]
+name = "runtrue-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[[bin]]
+name = "runtrue-image"
+path = "src/main.rs"
+
+[dependencies]
+runtrue-attest.workspace = true
+runtrue-model.workspace = true
+clap.workspace = true
+hex.workspace = true
+libc.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+name: duplicate
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      VALUE: first
+      VALUE: second
+    steps:
+      - run: "true"

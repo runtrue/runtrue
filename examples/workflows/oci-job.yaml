@@ -1,0 +1,21 @@
+version: 1
+name: locked-oci-job
+
+"on":
+  manual: {}
+
+permissions:
+  network: deny
+
+jobs:
+  test:
+    trust: trusted-only
+    runner:
+      os: linux
+      arch: amd64
+      isolation: oci
+      image: registry.example/runtrue/build-tools:2026.07
+    steps:
+      - id: test
+        run:
+          command: ["cargo", "test", "--workspace"]

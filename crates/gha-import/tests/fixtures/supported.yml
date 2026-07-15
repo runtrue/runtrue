@@ -1,0 +1,62 @@
+name: imported-ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["docs/**"]
+  workflow_dispatch: {}
+
+env:
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    env:
+      CI_MODE: strict
+    services:
+      postgres:
+        image: postgres@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        ports: [5432, "5433:5433"]
+        env:
+          POSTGRES_DB: app
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile
+        run: cargo build --locked
+        shell: bash
+        timeout-minutes: 20
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-static-v1
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: dist
+          retention-days: 3
+
+  image:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [2021, 2024]
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: containers/Dockerfile
+          push: false
+          network: none
+          tags: example:test
+          build-args: |
+            PROFILE=release

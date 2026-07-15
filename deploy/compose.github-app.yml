@@ -1,0 +1,32 @@
+# Opt-in GitHub.com / GitHub Enterprise Server integration overlay.
+#
+# The App private key stays outside the server container. A separately managed
+# signer must create the exact mode-0600 Unix socket named by
+# RUNTRUE_GITHUB_SIGNER_SOCKET before this overlay starts.
+services:
+  server:
+    environment:
+      RUNTRUE_PUBLIC_ORIGIN: "${RUNTRUE_PUBLIC_ORIGIN:?set the external Runtrue HTTPS origin}"
+      RUNTRUE_BROWSER_COOKIE_SEALING_KEY_FILE: /run/runtrue-secrets/browser-cookie.key
+      RUNTRUE_GIT_MIRROR_ROOT: /var/lib/runtrue/server/git-mirrors
+      RUNTRUE_GITHUB_APP_ID: "${RUNTRUE_GITHUB_APP_ID:?set the numeric GitHub App id}"
+      RUNTRUE_GITHUB_APP_SLUG: "${RUNTRUE_GITHUB_APP_SLUG:?set the GitHub App slug}"
+      RUNTRUE_GITHUB_WEB_ORIGIN: "${RUNTRUE_GITHUB_WEB_ORIGIN:?set the exact GitHub web HTTPS origin}"
+      RUNTRUE_GITHUB_API_ORIGIN: "${RUNTRUE_GITHUB_API_ORIGIN:?set the exact GitHub REST API origin}"
+      RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE: "${RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE:-provider://github-app/production}"
+      RUNTRUE_GITHUB_APP_JWT_PROVIDER_SOCKET: /run/runtrue-github-signer.sock
+      RUNTRUE_GITHUB_WEBHOOK_SECRET_FILE: /run/runtrue-secrets/github-webhook.secret
+    volumes:
+      - type: bind
+        source: "${RUNTRUE_GITHUB_SIGNER_SOCKET:?set the absolute host signer socket path}"
+        target: /run/runtrue-github-signer.sock
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - control
+      - scm-egress
+
+networks:
+  scm-egress:
+    driver: bridge

@@ -1,0 +1,965 @@
+use crate::{
+    credentials::RunnerCredentialStore,
+    enrollment::{generate_certificate_request, pending_rotation_response},
+    state::{ActiveLeaseMarker, RunnerStateStore, WorkspaceManager},
+    transport::RunnerTransport,
+    VerifiedInventory,
+};
+use runtrue_engine::{CancellationToken, StepStateObservation, StepStateObserver};
+use runtrue_model::ContentDigest;
+use runtrue_protocol::{supports_protocol_version, v1};
+use runtrue_runner_core::{CapsuleTrustStore, LeaseCompletion, RunnerAdmission};
+use runtrue_workflow_ir::Isolation;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tokio::{sync::mpsc as tokio_mpsc, time::MissedTickBehavior};
+
+const LOG_BATCH_FRAMES: usize = 32;
+const MAX_NATIVE_STEPS: usize = 64;
+const MAX_ADVERTISED_SOURCE_SNAPSHOTS: usize = 256;
+const LEASE_SHUTDOWN_MARGIN_MILLIS: u64 = 250;
+const ROTATION_SHUTDOWN_MARGIN_MILLIS: u64 = 30_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunMode {
+    Daemon,
+    Once,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunnerDaemonConfig {
+    pub runner_id: String,
+    pub inventory: VerifiedInventory,
+    pub trust_store: CapsuleTrustStore,
+    pub allow_trusted_native: bool,
+    pub mode: RunMode,
+    pub max_capsule_bytes: usize,
+    pub credential_store: Option<RunnerCredentialStore>,
+}
+
+use super::{
+    clock::failed_execution_outcome,
+    clock::{
+        deadline_instant, duration, now_unix_ms, random_connection_id, timestamp, timestamp_millis,
+        validate_runner_id, wait_until, ServerClock,
+    },
+    error::RunnerError,
+    executor::{JobExecutionServices, JobExecutor},
+    lifecycle::{ActiveExecution, CompletedExecution, LoopEvent},
+    observations::{step_error_code, step_state_name, DaemonStepStateObserver},
+    remote::offered_job,
+    source::hydrate_source,
+};
+
+pub struct RunnerDaemon<T, E> {
+    transport: T,
+    executor: E,
+    config: RunnerDaemonConfig,
+    state: RunnerStateStore,
+    workspaces: WorkspaceManager,
+}
+
+impl<T, E> RunnerDaemon<T, E>
+where
+    T: RunnerTransport,
+    E: JobExecutor,
+{
+    #[must_use]
+    pub fn new(
+        transport: T,
+        executor: E,
+        config: RunnerDaemonConfig,
+        state: RunnerStateStore,
+        workspaces: WorkspaceManager,
+    ) -> Self {
+        Self {
+            transport,
+            executor,
+            config,
+            state,
+            workspaces,
+        }
+    }
+
+    pub async fn run(mut self) -> Result<(), RunnerError> {
+        validate_runner_id(&self.config.runner_id)?;
+        if self.config.inventory.profile.runner_id != self.config.runner_id {
+            return Err(RunnerError::InventoryRunnerMismatch);
+        }
+        self.config.inventory.profile.validate()?;
+        self.executor.cleanup_stale()?;
+        let protocol_version = self.config.inventory.wire.protocol_version;
+        if !supports_protocol_version(protocol_version) {
+            return Err(RunnerError::InventoryProtocolMismatch);
+        }
+        self.workspaces.remove_all_stale()?;
+        self.state.clear_stale_active_marker()?;
+        if let Some(store) = self.config.credential_store.clone() {
+            store.reconcile_pending_rotation()?;
+            if store.load_pending_rotation()?.is_some() {
+                self.rotate_credentials().await?;
+                return Err(RunnerError::CertificateRotated);
+            }
+        }
+
+        let connection_id = random_connection_id()?;
+        let hello = v1::RunnerHello {
+            runner_id: self.config.runner_id.clone(),
+            connection_id: connection_id.clone(),
+            protocol_version,
+            inventory: Some(self.config.inventory.wire.clone()),
+        };
+        let control_hello = self.transport.open(hello).await?;
+        if control_hello.connection_id != connection_id {
+            return Err(RunnerError::ConnectionIdMismatch);
+        }
+        let heartbeat_period = duration(control_hello.heartbeat_interval.as_ref())?;
+        let server_time = timestamp_millis(control_hello.server_time.as_ref())?;
+        let local_time = now_unix_ms()?;
+        let clock = ServerClock::new(local_time, server_time)?;
+        self.state
+            .accept_installation_epoch(control_hello.installation_fencing_epoch)?;
+        let mut admission = RunnerAdmission::new(
+            self.config.trust_store.clone(),
+            self.config.inventory.profile.clone(),
+            control_hello.installation_fencing_epoch,
+        )?;
+        admission.set_max_capsule_bytes(self.config.max_capsule_bytes)?;
+        self.send_locality().await?;
+
+        let mut interval = tokio::time::interval(heartbeat_period);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut active: Option<ActiveExecution> = None;
+        let mut draining = false;
+        let mut drain_deadline = None;
+        let mut rotation_requested = false;
+        let mut rotation_deadline = None;
+        let mut processed_one = self.state.pending_completion()?.is_some();
+
+        loop {
+            if rotation_requested && active.is_none() {
+                self.rotate_credentials().await?;
+                return Err(RunnerError::CertificateRotated);
+            }
+            let completion_accepted = self.retry_pending_completion().await?;
+            if completion_accepted {
+                if self.config.mode == RunMode::Once && processed_one {
+                    return Ok(());
+                }
+                if draining && active.is_none() {
+                    return Ok(());
+                }
+            }
+
+            let event = if let Some(execution) = active.as_mut() {
+                tokio::select! {
+                    result = &mut execution.task => LoopEvent::ExecutionFinished(result),
+                    lifecycle = execution.lifecycle.recv(), if execution.lifecycle_open => {
+                        LoopEvent::StepLifecycle(lifecycle)
+                    }
+                    _ = interval.tick() => LoopEvent::Heartbeat,
+                    _ = wait_until(execution.hard_deadline) => LoopEvent::LeaseDeadline,
+                    _ = wait_until(drain_deadline) => LoopEvent::DrainDeadline,
+                    _ = wait_until(rotation_deadline) => LoopEvent::RotationDeadline,
+                    control = self.transport.next_control() => {
+                        LoopEvent::Control(control?)
+                    }
+                }
+            } else {
+                tokio::select! {
+                    _ = interval.tick() => LoopEvent::Heartbeat,
+                    _ = wait_until(drain_deadline) => LoopEvent::DrainDeadline,
+                    _ = wait_until(rotation_deadline) => LoopEvent::RotationDeadline,
+                    control = self.transport.next_control() => {
+                        LoopEvent::Control(control?)
+                    }
+                }
+            };
+
+            match event {
+                LoopEvent::Heartbeat => {
+                    self.send_heartbeat(&connection_id, active.as_ref()).await?;
+                }
+                LoopEvent::Control(None) => return Err(RunnerError::ControlStreamClosed),
+                LoopEvent::Control(Some(message)) => match message.body {
+                    Some(v1::control_message::Body::LeaseOffer(offer)) => {
+                        let completion_pending = self.state.pending_completion()?.is_some();
+                        if rotation_requested || draining || active.is_some() || completion_pending
+                        {
+                            let code = if rotation_requested {
+                                "certificate_rotation_pending"
+                            } else if draining {
+                                "runner_draining"
+                            } else if completion_pending {
+                                "completion_pending"
+                            } else {
+                                "runner_busy"
+                            };
+                            self.reject_offer(&offer, code).await?;
+                        } else if let Some(execution) =
+                            self.prepare_offer(&admission, &clock, *offer).await?
+                        {
+                            active = Some(execution);
+                            processed_one = true;
+                        }
+                    }
+                    Some(v1::control_message::Body::CancelLease(cancel)) => {
+                        if let Some(execution) = active.as_mut() {
+                            if execution.offer.lease_id == cancel.lease_id
+                                && execution.offer.fencing_generation == cancel.fencing_generation
+                            {
+                                execution.guard.authorize_active(
+                                    &cancel.lease_id,
+                                    cancel.fencing_generation,
+                                    execution.offer.installation_fencing_epoch,
+                                    clock.now()?,
+                                )?;
+                                execution.cancellation.cancel();
+                                self.send_cancellation_ack(&cancel).await?;
+                            }
+                        }
+                    }
+                    Some(v1::control_message::Body::DrainRunner(drain)) => {
+                        draining = true;
+                        if !rotation_requested
+                            && active.is_none()
+                            && self.state.pending_completion()?.is_none()
+                        {
+                            return Ok(());
+                        }
+                        let deadline = timestamp_millis(drain.deadline.as_ref())?;
+                        match deadline_instant(&clock, deadline, 0) {
+                            Ok(deadline) => drain_deadline = Some(deadline),
+                            Err(RunnerError::DeadlineElapsed) => {
+                                if let Some(execution) = active.as_ref() {
+                                    execution.cancellation.cancel();
+                                }
+                                drain_deadline = None;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Some(v1::control_message::Body::RotateCertificate(rotate)) => {
+                        let deadline = timestamp_millis(rotate.deadline.as_ref())?;
+                        rotation_requested = true;
+                        match deadline_instant(&clock, deadline, ROTATION_SHUTDOWN_MARGIN_MILLIS) {
+                            Ok(deadline) => rotation_deadline = Some(deadline),
+                            Err(RunnerError::DeadlineElapsed) => {
+                                if let Some(execution) = active.as_ref() {
+                                    execution.cancellation.cancel();
+                                }
+                                rotation_deadline = None;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Some(v1::control_message::Body::InvalidateContent(_)) => {
+                        // This runner has no reusable content cache yet.
+                    }
+                    Some(v1::control_message::Body::Hello(_)) | None => {
+                        return Err(RunnerError::UnexpectedControlMessage)
+                    }
+                },
+                LoopEvent::StepLifecycle(Some(message)) => {
+                    let execution = active
+                        .as_mut()
+                        .expect("step lifecycle event requires active execution");
+                    let result = self
+                        .send_step_state(&execution.offer, &message.observation)
+                        .await;
+                    match result {
+                        Ok(()) => {
+                            execution.last_job_attempt = execution
+                                .last_job_attempt
+                                .max(message.observation.job_attempt);
+                            let _ = message.response.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = message.response.send(Err(error.to_string()));
+                            return Err(error);
+                        }
+                    }
+                }
+                LoopEvent::StepLifecycle(None) => {
+                    if let Some(execution) = active.as_mut() {
+                        execution.lifecycle_open = false;
+                    }
+                }
+                LoopEvent::ExecutionFinished(result) => {
+                    let mut execution = active.take().expect("active task produced event");
+                    self.drain_step_lifecycle(&mut execution).await?;
+                    let completed = match result {
+                        Ok(Ok(outcome)) => outcome,
+                        Ok(Err(error)) => {
+                            eprintln!("runner execution failed: {error}");
+                            CompletedExecution {
+                                outcome: failed_execution_outcome(execution.last_job_attempt),
+                                committed_objects: Vec::new(),
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("runner execution task failed: {error}");
+                            CompletedExecution {
+                                outcome: failed_execution_outcome(execution.last_job_attempt),
+                                committed_objects: Vec::new(),
+                            }
+                        }
+                    };
+                    self.finish_execution(execution, completed, &clock).await?;
+                    if !rotation_requested
+                        && self.config.mode == RunMode::Once
+                        && self.state.pending_completion()?.is_none()
+                    {
+                        return Ok(());
+                    }
+                    if !rotation_requested && draining && self.state.pending_completion()?.is_none()
+                    {
+                        return Ok(());
+                    }
+                }
+                LoopEvent::LeaseDeadline => {
+                    if let Some(execution) = active.as_mut() {
+                        execution.hard_deadline = None;
+                        execution.cancellation.cancel();
+                    }
+                }
+                LoopEvent::DrainDeadline => {
+                    drain_deadline = None;
+                    if let Some(execution) = active.as_ref() {
+                        execution.cancellation.cancel();
+                    }
+                }
+                LoopEvent::RotationDeadline => {
+                    rotation_deadline = None;
+                    if let Some(execution) = active.as_ref() {
+                        execution.cancellation.cancel();
+                    }
+                }
+            }
+        }
+    }
+
+    async fn rotate_credentials(&mut self) -> Result<(), RunnerError> {
+        let store = self
+            .config
+            .credential_store
+            .clone()
+            .ok_or(RunnerError::CertificateRotationUnavailable)?;
+        let current = store.load_current()?;
+        if current.runner_id != self.config.runner_id {
+            return Err(RunnerError::InventoryRunnerMismatch);
+        }
+        let pending = match store.load_pending_rotation()? {
+            Some(pending) => pending,
+            None => {
+                let generated = generate_certificate_request()?;
+                store.begin_rotation(&current, generated.private_key_pem, generated.csr_der)?
+            }
+        };
+        if pending.runner_id != current.runner_id || pending.pool_id != current.pool_id {
+            return Err(RunnerError::InventoryRunnerMismatch);
+        }
+        if pending.response.is_none() {
+            let response = self
+                .transport
+                .rotate_certificate(v1::RotateCertificateRequest {
+                    runner_id: self.config.runner_id.clone(),
+                    certificate_signing_request: pending.csr_der.clone(),
+                    attestation: None,
+                })
+                .await?;
+            let csr_digest = ContentDigest::sha256(&pending.csr_der);
+            store.record_rotation_response(pending_rotation_response(response, &csr_digest)?)?;
+        }
+        store.install_pending_rotation()?;
+        Ok(())
+    }
+
+    async fn prepare_offer(
+        &mut self,
+        admission: &RunnerAdmission,
+        clock: &ServerClock,
+        offer: v1::LeaseOffer,
+    ) -> Result<Option<ActiveExecution>, RunnerError> {
+        if offer.runner_id != self.config.runner_id {
+            self.reject_offer(&offer, "wrong_runner").await?;
+            return Ok(None);
+        }
+        let Some(expected_digest) = offer.capsule_digest.clone() else {
+            self.reject_offer(&offer, "invalid_offer").await?;
+            return Ok(None);
+        };
+        let fetched = match self
+            .transport
+            .fetch_capsule(v1::FetchExecutionCapsuleRequest {
+                lease_id: offer.lease_id.clone(),
+                fencing_generation: offer.fencing_generation,
+                expected_digest: Some(expected_digest),
+            })
+            .await
+        {
+            Ok(fetched) => fetched,
+            Err(_) => {
+                self.reject_offer(&offer, "capsule_fetch_failed").await?;
+                return Ok(None);
+            }
+        };
+        let admitted = match admission.admit(&offer, &fetched, clock.now()?) {
+            Ok(admitted) => admitted,
+            Err(_) => {
+                self.reject_offer(&offer, "admission_rejected").await?;
+                return Ok(None);
+            }
+        };
+        let job = admitted
+            .capsule
+            .jobs
+            .iter()
+            .find(|job| job.id == admitted.job_id)
+            .ok_or_else(|| RunnerError::OfferedJobMissing(admitted.job_id.clone()))?;
+        if self.config.inventory.wire.protocol_version < 2
+            && admitted.capsule.context.source_tree_digest.is_some()
+        {
+            self.reject_offer(&offer, "protocol_generation_unsupported")
+                .await?;
+            return Ok(None);
+        }
+        if !self
+            .config
+            .inventory
+            .profile
+            .isolation_backends
+            .contains(&job.runner.isolation)
+        {
+            self.reject_offer(&offer, "unsupported_isolation").await?;
+            return Ok(None);
+        }
+        if job.runner.isolation == Isolation::Native && !self.config.allow_trusted_native {
+            self.reject_offer(&offer, "trusted_native_disabled").await?;
+            return Ok(None);
+        }
+        if job.steps.len() > MAX_NATIVE_STEPS {
+            self.reject_offer(&offer, "job_resource_limit").await?;
+            return Ok(None);
+        }
+        let broker = self.transport.broker_client();
+        if self
+            .executor
+            .preflight_with_broker(&admitted, broker.clone())
+            .is_err()
+        {
+            self.reject_offer(&offer, "executor_preflight_rejected")
+                .await?;
+            return Ok(None);
+        }
+        if clock.now()? >= admitted.accept_by_unix_ms {
+            self.reject_offer(&offer, "accept_deadline_elapsed").await?;
+            return Ok(None);
+        }
+        let hard_deadline = match deadline_instant(
+            clock,
+            admitted.hard_deadline_unix_ms,
+            LEASE_SHUTDOWN_MARGIN_MILLIS,
+        ) {
+            Ok(deadline) => deadline,
+            Err(RunnerError::DeadlineElapsed) => {
+                self.reject_offer(&offer, "lease_window_too_short").await?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+
+        let workspace = self
+            .workspaces
+            .create(&offer.lease_id, offer.fencing_generation)?;
+        let workspace_name = workspace
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| RunnerError::InvalidWorkspace(workspace.clone()))?
+            .to_owned();
+        self.state.mark_active(ActiveLeaseMarker {
+            lease_id: offer.lease_id.clone(),
+            fencing_generation: offer.fencing_generation,
+            installation_fencing_epoch: offer.installation_fencing_epoch,
+            workspace_name,
+        })?;
+        let mut guard = admitted.clone().into_guard();
+        guard.start(
+            &offer.lease_id,
+            offer.fencing_generation,
+            offer.installation_fencing_epoch,
+            clock.now()?,
+        )?;
+        if let Err(error) = self.send_decision(&offer, true, "", "").await {
+            self.state.clear_active()?;
+            self.workspaces.cleanup(&workspace)?;
+            return Err(error);
+        }
+        if admitted.capsule.context.source_tree_digest.is_some() {
+            self.send_job_state(&offer, "preparing", "", "source_hydration")
+                .await?;
+            let hydration_lease = admitted.clone();
+            let hydration_workspace = workspace.clone();
+            let hydration_manager = self.workspaces.clone();
+            let hydration_broker = broker.clone().ok_or(RunnerError::BrokerUnavailable)?;
+            let hydration_cancelled = Arc::new(AtomicBool::new(false));
+            let task_cancelled = hydration_cancelled.clone();
+            let mut hydration = tokio::task::spawn_blocking(move || {
+                hydrate_source(
+                    &hydration_lease,
+                    &hydration_workspace,
+                    &hydration_manager,
+                    hydration_broker,
+                    task_cancelled,
+                )
+            });
+            let mut cancelled = false;
+            let hydration = tokio::select! {
+                    result = &mut hydration => result,
+                    control = self.transport.next_control() => {
+                        let Some(control) = control? else {
+                            hydration_cancelled.store(true, Ordering::Release);
+                            let _ = hydration.await;
+                            return Err(RunnerError::ControlStreamClosed);
+                        };
+                        match control.body {
+                            Some(v1::control_message::Body::CancelLease(cancel))
+                                if cancel.lease_id == offer.lease_id
+                                    && cancel.fencing_generation == offer.fencing_generation =>
+                            {
+                                hydration_cancelled.store(true, Ordering::Release);
+                                self.send_cancellation_ack(&cancel).await?;
+                                cancelled = true;
+                                hydration.await
+                            }
+                            _ => {
+                                hydration_cancelled.store(true, Ordering::Release);
+                                let _ = hydration.await;
+                                return Err(RunnerError::UnexpectedControlMessage);
+                            }
+                        }
+                    }
+            };
+            let hydrated = match hydration {
+                Ok(Ok(digest)) if !cancelled => digest,
+                _ => {
+                    let (final_state, error_code, result_domain) = if cancelled {
+                        (
+                            "canceled",
+                            "canceled",
+                            b"runtrue.runner.source-cancelled.v1\0".as_slice(),
+                        )
+                    } else {
+                        (
+                            "failed",
+                            "source_integrity",
+                            b"runtrue.runner.source-integrity-failure.v1\0".as_slice(),
+                        )
+                    };
+                    let result_digest = ContentDigest::sha256(result_domain);
+                    guard.complete(
+                        &offer.lease_id,
+                        offer.fencing_generation,
+                        offer.installation_fencing_epoch,
+                        clock.now()?,
+                        LeaseCompletion {
+                            final_state: final_state.to_owned(),
+                            result_digest: result_digest.clone(),
+                        },
+                    )?;
+                    self.state.set_pending_completion_with_objects(
+                        &v1::CompleteLeaseRequest {
+                            lease_id: offer.lease_id.clone(),
+                            fencing_generation: offer.fencing_generation,
+                            installation_fencing_epoch: offer.installation_fencing_epoch,
+                            final_state: final_state.to_owned(),
+                            exit_code: None,
+                            error_code: error_code.to_owned(),
+                            result_digest: Some(v1::Digest::try_from(&result_digest)?),
+                            artifact_ids: Vec::new(),
+                            cache_entry_ids: Vec::new(),
+                            completed_at: Some(timestamp(clock.now()?)),
+                            final_job_attempt: 0,
+                            expected_log_frames: 0,
+                        },
+                        Vec::new(),
+                    )?;
+                    self.state.clear_active()?;
+                    self.workspaces.cleanup(&workspace)?;
+                    let _ = self
+                        .send_job_state(&offer, final_state, error_code, "")
+                        .await;
+                    let _ = self.retry_pending_completion().await;
+                    return Ok(None);
+                }
+            };
+            self.send_job_state(&offer, "preparing", "", hydrated.as_str())
+                .await?;
+            self.send_locality().await?;
+        }
+        self.send_job_state(&offer, "running", "", "").await?;
+
+        let cancellation = CancellationToken::default();
+        let task_cancellation = cancellation.clone();
+        let task_lease = admitted;
+        let task_workspace = workspace.clone();
+        let executor = self.executor.clone();
+        let (lifecycle_sender, lifecycle) = tokio_mpsc::channel(8);
+        let lifecycle_observer: Arc<dyn StepStateObserver> = Arc::new(DaemonStepStateObserver {
+            sender: lifecycle_sender,
+        });
+        let needs_data_plane = offered_job(&task_lease)?
+            .steps
+            .iter()
+            .any(|step| step.cache.is_some())
+            || !offered_job(&task_lease)?.outputs.is_empty();
+        let data_session = if needs_data_plane {
+            let client = broker.clone().ok_or(RunnerError::BrokerUnavailable)?;
+            Some(crate::data_plane::RemoteDataPlaneSession::new(
+                &task_lease,
+                &task_workspace,
+                client,
+            ))
+        } else {
+            None
+        };
+        let observer = data_session
+            .as_ref()
+            .map_or(lifecycle_observer.clone(), |data| {
+                data.observer(lifecycle_observer)
+            });
+        let services = JobExecutionServices {
+            broker,
+            step_state_observer: Some(observer),
+        };
+        let task = tokio::task::spawn_blocking(move || {
+            let mut outcome = executor.execute_with_services(
+                &task_lease,
+                &task_workspace,
+                task_cancellation,
+                services,
+            )?;
+            let mut committed_objects = Vec::new();
+            if let Some(data) = data_session {
+                let artifacts =
+                    data.capture_artifacts(&outcome.final_state, outcome.final_job_attempt)?;
+                let caches = data.committed_cache_objects()?;
+                outcome.artifact_ids = artifacts
+                    .iter()
+                    .map(|object| object.object_id.clone())
+                    .collect();
+                outcome.cache_entry_ids = caches
+                    .iter()
+                    .map(|object| object.object_id.clone())
+                    .collect();
+                committed_objects.extend(artifacts);
+                committed_objects.extend(caches);
+            }
+            Ok(CompletedExecution {
+                outcome,
+                committed_objects,
+            })
+        });
+        Ok(Some(ActiveExecution {
+            offer,
+            guard,
+            cancellation,
+            hard_deadline: Some(hard_deadline),
+            workspace,
+            task,
+            lifecycle,
+            lifecycle_open: true,
+            last_job_attempt: 0,
+        }))
+    }
+
+    async fn finish_execution(
+        &mut self,
+        mut execution: ActiveExecution,
+        completed: CompletedExecution,
+        clock: &ServerClock,
+    ) -> Result<(), RunnerError> {
+        let outcome = completed.outcome;
+        execution.guard.complete(
+            &execution.offer.lease_id,
+            execution.offer.fencing_generation,
+            execution.offer.installation_fencing_epoch,
+            clock.now()?,
+            LeaseCompletion {
+                final_state: outcome.final_state.clone(),
+                result_digest: outcome.result_digest.clone(),
+            },
+        )?;
+        let completed_unix_ms = clock.now()?;
+        let completion = v1::CompleteLeaseRequest {
+            lease_id: execution.offer.lease_id.clone(),
+            fencing_generation: execution.offer.fencing_generation,
+            installation_fencing_epoch: execution.offer.installation_fencing_epoch,
+            final_state: outcome.final_state.clone(),
+            exit_code: outcome.exit_code,
+            error_code: outcome.error_code.clone(),
+            result_digest: Some(v1::Digest::try_from(&outcome.result_digest)?),
+            artifact_ids: outcome.artifact_ids.clone(),
+            cache_entry_ids: outcome.cache_entry_ids.clone(),
+            completed_at: Some(timestamp(completed_unix_ms)),
+            final_job_attempt: outcome.final_job_attempt,
+            expected_log_frames: u32::try_from(outcome.log_frames.len())
+                .map_err(|_| RunnerError::LogSequenceOverflow)?,
+        };
+        self.state
+            .set_pending_completion_with_objects(&completion, completed.committed_objects)?;
+        self.workspaces.cleanup(&execution.workspace)?;
+
+        for batch in outcome.log_frames.chunks(LOG_BATCH_FRAMES) {
+            if self
+                .transport
+                .send(v1::RunnerMessage {
+                    body: Some(v1::runner_message::Body::LogBatch(v1::LogBatch {
+                        lease_id: execution.offer.lease_id.clone(),
+                        fencing_generation: execution.offer.fencing_generation,
+                        frames: batch.to_vec(),
+                    })),
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        let _ = self
+            .send_job_state(
+                &execution.offer,
+                &outcome.final_state,
+                &outcome.error_code,
+                "",
+            )
+            .await;
+        let _ = self.retry_pending_completion().await;
+        Ok(())
+    }
+
+    async fn retry_pending_completion(&mut self) -> Result<bool, RunnerError> {
+        let Some(persisted) = self.state.pending_completion_record() else {
+            return Ok(false);
+        };
+        let accepted = if self.config.inventory.wire.protocol_version >= 2 {
+            match persisted.to_wire_v2()? {
+                Some(request) => self
+                    .transport
+                    .complete_lease_v2(request)
+                    .await
+                    .map(|response| response.accepted),
+                None => self
+                    .transport
+                    .complete_lease(persisted.to_wire()?)
+                    .await
+                    .map(|response| response.accepted),
+            }
+        } else {
+            self.transport
+                .complete_lease(persisted.to_wire()?)
+                .await
+                .map(|response| response.accepted)
+        };
+        match accepted {
+            Ok(true) => {
+                self.state.clear_pending_completion()?;
+                Ok(true)
+            }
+            Ok(false) => Err(RunnerError::CompletionRejected),
+            Err(error) => {
+                eprintln!("runner completion delivery failed: {error}");
+                Ok(false)
+            }
+        }
+    }
+
+    async fn send_heartbeat(
+        &mut self,
+        connection_id: &str,
+        active: Option<&ActiveExecution>,
+    ) -> Result<(), RunnerError> {
+        let active_leases = active
+            .map(|execution| {
+                vec![v1::ActiveLease {
+                    lease_id: execution.offer.lease_id.clone(),
+                    fencing_generation: execution.offer.fencing_generation,
+                    state: "running".to_owned(),
+                }]
+            })
+            .unwrap_or_default();
+        self.transport
+            .send(v1::RunnerMessage {
+                body: Some(v1::runner_message::Body::Heartbeat(v1::Heartbeat {
+                    runner_id: self.config.runner_id.clone(),
+                    connection_id: connection_id.to_owned(),
+                    active_leases,
+                    observed_at: Some(timestamp(now_unix_ms()?)),
+                })),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn send_locality(&mut self) -> Result<(), RunnerError> {
+        let content_digests = self
+            .workspaces
+            .source_cache()
+            .locality(MAX_ADVERTISED_SOURCE_SNAPSHOTS)?
+            .iter()
+            .map(v1::Digest::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.transport
+            .send(v1::RunnerMessage {
+                body: Some(v1::runner_message::Body::Locality(v1::LocalitySummary {
+                    runner_id: self.config.runner_id.clone(),
+                    tenant_scoped_bloom_filter: Vec::new(),
+                    public_content_bloom_filter: Vec::new(),
+                    classes: vec![v1::LocalityClass {
+                        kind: "source-snapshot".to_owned(),
+                        bytes: 0,
+                        item_count: content_digests.len() as u64,
+                    }],
+                    generated_at: Some(timestamp(now_unix_ms()?)),
+                    content_digests,
+                })),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn reject_offer(
+        &mut self,
+        offer: &v1::LeaseOffer,
+        code: &str,
+    ) -> Result<(), RunnerError> {
+        self.send_decision(offer, false, code, "runner rejected the offer")
+            .await
+    }
+
+    async fn send_decision(
+        &mut self,
+        offer: &v1::LeaseOffer,
+        accepted: bool,
+        rejection_code: &str,
+        detail: &str,
+    ) -> Result<(), RunnerError> {
+        self.transport
+            .send(v1::RunnerMessage {
+                body: Some(v1::runner_message::Body::LeaseDecision(v1::LeaseDecision {
+                    lease_id: offer.lease_id.clone(),
+                    fencing_generation: offer.fencing_generation,
+                    accepted,
+                    rejection_code: rejection_code.to_owned(),
+                    detail: detail.to_owned(),
+                })),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn send_job_state(
+        &mut self,
+        offer: &v1::LeaseOffer,
+        state: &str,
+        error_code: &str,
+        detail: &str,
+    ) -> Result<(), RunnerError> {
+        self.transport
+            .send(v1::RunnerMessage {
+                body: Some(v1::runner_message::Body::JobState(v1::JobStateUpdate {
+                    lease_id: offer.lease_id.clone(),
+                    fencing_generation: offer.fencing_generation,
+                    state: state.to_owned(),
+                    observed_at: Some(timestamp(now_unix_ms()?)),
+                    error_code: error_code.to_owned(),
+                    detail: detail.to_owned(),
+                })),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn send_step_state(
+        &mut self,
+        offer: &v1::LeaseOffer,
+        observation: &StepStateObservation,
+    ) -> Result<(), RunnerError> {
+        if observation.job_id != offer.job_id {
+            return Err(RunnerError::StepLifecycleBinding);
+        }
+        let state = step_state_name(observation.to);
+        self.transport
+            .send(v1::RunnerMessage {
+                body: Some(v1::runner_message::Body::StepState(v1::StepStateUpdate {
+                    lease_id: offer.lease_id.clone(),
+                    fencing_generation: offer.fencing_generation,
+                    step_id: observation.step_id.clone(),
+                    state: state.to_owned(),
+                    observed_at: Some(timestamp(now_unix_ms()?)),
+                    exit_code: None,
+                    error_code: step_error_code(observation.to).to_owned(),
+                    output_digest: None,
+                    job_attempt: observation.job_attempt,
+                })),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn drain_step_lifecycle(
+        &mut self,
+        execution: &mut ActiveExecution,
+    ) -> Result<(), RunnerError> {
+        if !execution.lifecycle_open {
+            return Ok(());
+        }
+        let drain = async {
+            while let Some(message) = execution.lifecycle.recv().await {
+                let result = self
+                    .send_step_state(&execution.offer, &message.observation)
+                    .await;
+                match result {
+                    Ok(()) => {
+                        execution.last_job_attempt = execution
+                            .last_job_attempt
+                            .max(message.observation.job_attempt);
+                        let _ = message.response.send(Ok(()));
+                    }
+                    Err(error) => {
+                        let _ = message.response.send(Err(error.to_string()));
+                        return Err(error);
+                    }
+                }
+            }
+            execution.lifecycle_open = false;
+            Ok(())
+        };
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .map_err(|_| RunnerError::StepLifecycleDrainTimeout)?
+    }
+
+    async fn send_cancellation_ack(&mut self, cancel: &v1::CancelLease) -> Result<(), RunnerError> {
+        self.transport
+            .send(v1::RunnerMessage {
+                body: Some(v1::runner_message::Body::CancellationAck(
+                    v1::CancellationAck {
+                        lease_id: cancel.lease_id.clone(),
+                        fencing_generation: cancel.fencing_generation,
+                        observed_at: Some(timestamp(now_unix_ms()?)),
+                    },
+                )),
+            })
+            .await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;

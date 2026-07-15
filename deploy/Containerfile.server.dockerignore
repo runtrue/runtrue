@@ -1,0 +1,6 @@
+.git
+.runtrue
+target
+deploy/state
+**/*.swp
+**/.DS_Store

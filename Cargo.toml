@@ -1,0 +1,165 @@
+[workspace]
+resolver = "2"
+members = [
+  "bins/cli",
+  "bins/guest",
+  "bins/image",
+  "bins/runner",
+  "bins/server",
+  "bins/update",
+  "crates/artifacts",
+  "crates/audit",
+  "crates/backup",
+  "crates/auth",
+  "crates/attest",
+  "crates/cache",
+  "crates/compiler",
+  "crates/bisim",
+  "crates/control-plane",
+  "crates/debug-session",
+  "crates/deploy",
+  "crates/engine",
+  "crates/executor-firecracker",
+  "crates/executor-dispatch",
+  "crates/executor-oci",
+  "crates/executor-wasm",
+  "crates/expression",
+  "crates/git",
+  "crates/gha-import",
+  "crates/guest-core",
+  "crates/lifecycle",
+  "crates/lock",
+  "crates/logs",
+  "crates/model",
+  "crates/network",
+  "crates/oidc",
+  "crates/output-lifecycle",
+  "crates/policy",
+  "crates/protocol",
+  "crates/replay",
+  "crates/reports",
+  "crates/runtrue",
+  "crates/runtime-local",
+  "crates/runner-core",
+  "crates/scheduler",
+  "crates/scm",
+  "crates/secrets",
+  "crates/signing",
+  "crates/storage",
+  "crates/trusted-planner",
+  "crates/update",
+  "crates/workflow-ast",
+  "crates/workflow-ir",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.88"
+
+[workspace.dependencies]
+runtrue-artifacts = { path = "crates/artifacts" }
+runtrue-auth = { path = "crates/auth" }
+runtrue-cache = { path = "crates/cache" }
+runtrue-attest = { path = "crates/attest" }
+runtrue-compiler = { path = "crates/compiler" }
+runtrue-bisim = { path = "crates/bisim" }
+runtrue-control-plane = { path = "crates/control-plane" }
+runtrue-debug-session = { path = "crates/debug-session" }
+runtrue-deploy = { path = "crates/deploy" }
+runtrue-audit = { path = "crates/audit" }
+runtrue-engine = { path = "crates/engine" }
+runtrue-executor-dispatch = { path = "crates/executor-dispatch" }
+runtrue-executor-firecracker = { path = "crates/executor-firecracker" }
+runtrue-executor-oci = { path = "crates/executor-oci" }
+runtrue-executor-wasm = { path = "crates/executor-wasm" }
+runtrue-expression = { path = "crates/expression" }
+runtrue-git = { path = "crates/git" }
+runtrue-gha-import = { path = "crates/gha-import" }
+runtrue-guest-core = { path = "crates/guest-core" }
+runtrue-lifecycle = { path = "crates/lifecycle" }
+runtrue-lock = { path = "crates/lock" }
+runtrue-logs = { path = "crates/logs" }
+runtrue-model = { path = "crates/model" }
+runtrue-network = { path = "crates/network" }
+runtrue-oidc = { path = "crates/oidc" }
+runtrue-output-lifecycle = { path = "crates/output-lifecycle" }
+runtrue-policy = { path = "crates/policy" }
+runtrue-protocol = { path = "crates/protocol" }
+runtrue-replay = { path = "crates/replay" }
+runtrue-reports = { path = "crates/reports" }
+runtrue = { path = "crates/runtrue" }
+runtrue-runtime-local = { path = "crates/runtime-local" }
+runtrue-runner-core = { path = "crates/runner-core" }
+runtrue-scheduler = { path = "crates/scheduler" }
+runtrue-scm = { path = "crates/scm" }
+runtrue-secrets = { path = "crates/secrets" }
+runtrue-signing = { path = "crates/signing" }
+runtrue-storage = { path = "crates/storage" }
+runtrue-trusted-planner = { path = "crates/trusted-planner" }
+runtrue-update = { path = "crates/update" }
+runtrue-workflow-ast = { path = "crates/workflow-ast" }
+runtrue-workflow-ir = { path = "crates/workflow-ir" }
+async-trait = "=0.1.89"
+axum = "=0.6.20"
+base64ct = { version = "=1.6.0", features = ["std"] }
+chacha20poly1305 = "=0.10.1"
+cedar-policy = { version = "=4.3.1", default-features = false }
+clap = { version = "=4.5.4", features = ["derive"] }
+ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
+enum-ordinalize = "=4.3.0"
+enum-ordinalize-derive = "=4.3.0"
+hex = "=0.4.3"
+hmac = "=0.12.1"
+hkdf = { version = "=0.12.4", default-features = false }
+indexmap = { version = "=2.14.0", features = ["serde"] }
+# Keep the `cc` build helper's otherwise-open jobserver dependency reproducible.
+jobserver = "=0.1.32"
+libc = "=0.2.186"
+nix = { version = "=0.27.1", features = ["fs", "process", "signal", "socket"] }
+prost = "=0.14.4"
+prost-types = "=0.14.4"
+protoc-bin-vendored = "=3.0.0"
+psm = "=0.1.24"
+rand_core = { version = "=0.6.4", features = ["getrandom"] }
+rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "ring", "pem", "x509-parser", "zeroize"] }
+regex = "=1.10.4"
+rusqlite = { version = "=0.31.0", features = ["bundled"] }
+rustls-pki-types = "=1.15.0"
+rustix = { version = "=0.38.44", features = ["fs"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+serde_yaml = "=0.9.34"
+sha2 = "=0.10.8"
+# Cedar 4.3 permits newer smol_str releases whose MSRV is Rust 1.89.
+smol_str = "=0.3.2"
+stacker = "=0.1.17"
+tempfile = "=3.10.1"
+thiserror = "=1.0.61"
+time = { version = "=0.3.47", features = ["formatting"] }
+toml = "=0.8.23"
+tokio = { version = "=1.52.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = "=0.1.18"
+tonic = { version = "=0.14.6", features = ["transport", "tls-ring"] }
+tonic-prost = "=0.14.6"
+ureq = { version = "=3.3.0", default-features = false, features = ["json", "rustls"] }
+tonic-prost-build = "=0.14.6"
+tower = { version = "=0.4.13", features = ["util"] }
+wasmtime = { version = "=36.0.12", default-features = false, features = ["cache", "component-model", "cranelift", "runtime"] }
+wat = "=1.0.85"
+zeroize = "=1.7.0"
+x509-parser = { version = "=0.18.1", default-features = false, features = ["verify"] }
+x25519-dalek = { version = "=2.0.1", default-features = false, features = ["static_secrets", "zeroize"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

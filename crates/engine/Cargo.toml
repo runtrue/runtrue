@@ -1,0 +1,23 @@
+[package]
+name = "runtrue-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[dependencies]
+runtrue-expression.workspace = true
+runtrue-lifecycle.workspace = true
+runtrue-model.workspace = true
+runtrue-workflow-ir.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

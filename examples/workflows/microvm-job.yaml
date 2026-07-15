@@ -1,0 +1,46 @@
+version: 1
+name: isolated-microvm-smoke
+
+"on":
+  manual: {}
+
+permissions:
+  repository: deny
+  checks: deny
+  artifacts: deny
+  registry: deny
+  network: deny
+  oidc: deny
+  cache:
+    read: deny
+    write: deny
+  secrets: []
+  signing: []
+
+jobs:
+  smoke:
+    trust: trusted-only
+    runner:
+      os: linux
+      arch: amd64
+      isolation: microvm
+      cpu: 2
+      memory: 256MiB
+    permissions:
+      repository: deny
+      checks: deny
+      artifacts: deny
+      registry: deny
+      network: deny
+      oidc: deny
+      cache:
+        read: deny
+        write: deny
+      secrets: []
+      signing: []
+    timeout: 1m
+    retries: 0
+    steps:
+      - id: smoke
+        run:
+          command: ["/bin/echo", "runtrue: authenticated microVM guest"]

@@ -1,0 +1,38 @@
+[package]
+name = "runtrue-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[[bin]]
+name = "runtrue"
+path = "src/main.rs"
+
+[dependencies]
+runtrue-bisim.workspace = true
+runtrue-compiler.workspace = true
+runtrue-engine.workspace = true
+runtrue-expression.workspace = true
+runtrue-gha-import.workspace = true
+runtrue-lock.workspace = true
+runtrue-model.workspace = true
+runtrue-replay.workspace = true
+runtrue-runtime-local.workspace = true
+runtrue-secrets.workspace = true
+runtrue-workflow-ir.workspace = true
+clap.workspace = true
+nix.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

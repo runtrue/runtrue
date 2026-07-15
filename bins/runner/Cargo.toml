@@ -1,0 +1,63 @@
+[package]
+name = "runtrue-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[[bin]]
+name = "runtrue-runner"
+path = "src/main.rs"
+
+[lib]
+name = "runtrue_runner"
+path = "src/lib.rs"
+
+[dependencies]
+runtrue-attest.workspace = true
+runtrue-artifacts.workspace = true
+runtrue-cache.workspace = true
+runtrue-engine.workspace = true
+runtrue-executor-dispatch.workspace = true
+runtrue-executor-firecracker.workspace = true
+runtrue-executor-oci.workspace = true
+runtrue-executor-wasm.workspace = true
+runtrue-guest-core.workspace = true
+runtrue-git.workspace = true
+runtrue-model.workspace = true
+runtrue-protocol.workspace = true
+runtrue-runner-core.workspace = true
+runtrue-storage.workspace = true
+runtrue-workflow-ir.workspace = true
+async-trait.workspace = true
+base64ct.workspace = true
+chacha20poly1305.workspace = true
+clap.workspace = true
+hex.workspace = true
+hkdf.workspace = true
+libc.workspace = true
+nix = { workspace = true, features = ["user"] }
+prost-types.workspace = true
+rand_core.workspace = true
+rcgen.workspace = true
+rustls-pki-types.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+zeroize.workspace = true
+x25519-dalek.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+time.workspace = true
+wat.workspace = true
+
+[lints]
+workspace = true
