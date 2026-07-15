@@ -31,7 +31,11 @@ authority envelope while retaining exact, immutable records of each execution.
 Local, self-hosted, private-cluster, and managed providers must expose the same
 portable semantics. Warm pools, placement, storage backends, and autoscaling
 are necessary execution-plane facilities, but they must not change the meaning
-of a Capsule or the observable result of a program.
+of a Capsule, its authority, or its runtime contract. With deterministic input
+profiles they must preserve the Program result. With an explicitly admitted
+live clock, randomness, or other nondeterminism profile, result differences are
+permitted only through values delivered by that declared input contract; the
+Provider may not introduce any other semantic difference.
 
 This ADR establishes the foundational model. It records target architecture;
 it does not claim that every operation, backend, or evidence grade described
