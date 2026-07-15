@@ -404,14 +404,22 @@ where
             .await
         {
             Ok(fetched) => fetched,
-            Err(_) => {
+            Err(error) => {
+                eprintln!(
+                    "runtrue-runner: capsule fetch failed for lease `{}`: {error}",
+                    offer.lease_id
+                );
                 self.reject_offer(&offer, "capsule_fetch_failed").await?;
                 return Ok(None);
             }
         };
         let admitted = match admission.admit(&offer, &fetched, clock.now()?) {
             Ok(admitted) => admitted,
-            Err(_) => {
+            Err(error) => {
+                eprintln!(
+                    "runtrue-runner: admission rejected lease `{}` for job `{}`: {error}",
+                    offer.lease_id, offer.job_id
+                );
                 self.reject_offer(&offer, "admission_rejected").await?;
                 return Ok(None);
             }
@@ -856,6 +864,10 @@ where
         offer: &v1::LeaseOffer,
         code: &str,
     ) -> Result<(), RunnerError> {
+        eprintln!(
+            "runtrue-runner: rejected lease `{}` for job `{}`: {code}",
+            offer.lease_id, offer.job_id
+        );
         self.send_decision(offer, false, code, "runner rejected the offer")
             .await
     }
