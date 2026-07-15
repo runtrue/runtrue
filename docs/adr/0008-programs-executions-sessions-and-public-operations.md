@@ -80,6 +80,10 @@ proposed -> admitted -> provisioning -> active
 active -> suspending -> suspended
 active|suspended -> destroying -> terminal
 suspended -> restoring -> active
+suspending -> active
+suspending -> destroying -> terminal
+restoring -> suspended
+restoring -> destroying -> terminal
 ```
 
 Suspended means no tenant VM, container, Store, credentials, handles, lease, or
@@ -87,6 +91,20 @@ network connection remains live. The Session references an admitted Checkpoint.
 Restore creates a new incarnation with a new lease, fence, runtime instance,
 resource table, and capability set. Transparent migration of live process or
 connection state is not part of this contract.
+
+`suspending -> active` is allowed only before Checkpoint publication and after
+all running children and external effects are durably resolved. It advances the
+Session fence and issues fresh handles and capabilities; it never revives
+revoked authority. After Checkpoint publication, suspension must either prove
+destruction and become suspended or pass through destroying to a terminal
+integrity result.
+
+`restoring -> suspended` is allowed only when failure occurred before a tenant
+runtime or authority was assigned and the original Checkpoint remains intact.
+Once assignment begins, failed restore destroys the new incarnation and proves
+cleanup before it may return to suspended; otherwise it becomes terminal with
+runner-integrity failure. A capacity failure may leave the Session suspended
+and retryable without mutating it.
 
 Child Executions receive immutable child Capsules. They may run concurrently
 only when their aggregate CPU, memory, storage, task, effect, and concurrency
@@ -118,8 +136,15 @@ The minimum operations are:
 - create, inspect, renew, suspend, restore, and destroy a Session;
 - execute an admitted child Capsule within a Session;
 - create and retrieve a Checkpoint;
-- publish and retrieve authorized Programs, Artifacts, and Evidence; and
-- construct, verify, and request authorization for Capsules and Seals.
+- publish and retrieve authorized Programs and Artifacts;
+- retrieve, stream, verify, and export authorized Evidence;
+- construct and verify Capsules and approval subjects;
+- request and record authorization decisions; and
+- retrieve, verify, and revoke permitted Seals.
+
+Portable Evidence is appended only by authenticated execution-plane producers.
+Client-supplied claims or attachments use a distinct typed namespace and do not
+inherit Provider Evidence semantics.
 
 Every mutating request has a caller-chosen idempotency key scoped to tenant,
 principal, operation, and target. An exact replay returns the original response;
