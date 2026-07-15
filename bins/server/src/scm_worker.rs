@@ -4213,13 +4213,21 @@ mod tests {
             "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n",
         )
         .unwrap();
-        git(&repository_path, &["add", ".github/workflows/ci.yml"]);
+        fs::write(
+            workflow_directory.join("review.runtrue.yaml"),
+            "version: 1\nname: Review\non:\n  pull_request: {}\njobs: {}\n",
+        )
+        .unwrap();
+        git(&repository_path, &["add", ".github/workflows"]);
         git(&repository_path, &["commit", "--quiet", "-m", "workflow"]);
         let commit = git(&repository_path, &["rev-parse", "HEAD"]);
         let repository = GitRepository::open(&repository_path, GitLimits::default()).unwrap();
         assert_eq!(
             discover_workflow_paths(&repository, &commit, ".github/workflows").unwrap(),
-            vec![".github/workflows/ci.yml"]
+            vec![
+                ".github/workflows/ci.yml",
+                ".github/workflows/review.runtrue.yaml",
+            ]
         );
     }
 

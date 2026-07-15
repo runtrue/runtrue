@@ -44,9 +44,12 @@ impl WorkflowSourceFrontend for GithubActionsFrontend {
     }
 
     fn supports(&self, workflow_path: &str) -> bool {
-        workflow_path.starts_with(".github/workflows/")
-            || workflow_path.ends_with(".github.yml")
-            || workflow_path.ends_with(".github.yaml")
+        let explicitly_native =
+            workflow_path.ends_with(".runtrue.yml") || workflow_path.ends_with(".runtrue.yaml");
+        !explicitly_native
+            && (workflow_path.starts_with(".github/workflows/")
+                || workflow_path.ends_with(".github.yml")
+                || workflow_path.ends_with(".github.yaml"))
     }
 
     fn prepare(

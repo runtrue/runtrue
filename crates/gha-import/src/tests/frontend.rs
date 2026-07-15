@@ -40,6 +40,14 @@ fn github_frontend_is_deterministic_and_binds_translation_identity() {
 }
 
 #[test]
+fn explicit_runtrue_files_remain_native_inside_the_github_directory() {
+    assert!(GithubActionsFrontend.supports(".github/workflows/ci.yml"));
+    assert!(GithubActionsFrontend.supports("automation/ci.github.yaml"));
+    assert!(!GithubActionsFrontend.supports(".github/workflows/ai-review.runtrue.yaml"));
+    assert!(!GithubActionsFrontend.supports(".github/workflows/release.runtrue.yml"));
+}
+
+#[test]
 fn github_frontend_fails_closed_on_blocking_semantics() {
     let source = "name: unsafe\non: [push]\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: unknown/remote-action@main\n";
     let error = GithubActionsFrontend
