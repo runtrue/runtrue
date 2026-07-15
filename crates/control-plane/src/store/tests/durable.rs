@@ -40,7 +40,12 @@ fn task_completion_fans_out_atomically_and_accepts_exact_replay() {
             .unwrap();
         assert_eq!(claimed.id, parent);
         control
-            .complete_task_with_followups(&claimed.id, "worker", &[followup.clone()], NOW + 1)
+            .complete_task_with_followups(
+                &claimed.id,
+                "worker",
+                std::slice::from_ref(&followup),
+                NOW + 1,
+            )
             .unwrap();
     }
     assert_eq!(

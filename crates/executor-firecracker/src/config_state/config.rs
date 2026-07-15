@@ -80,7 +80,7 @@ impl FirecrackerVmConfig {
             ));
         }
         const MIB: u64 = 1024 * 1024;
-        if memory_bytes < 128 * MIB || memory_bytes % MIB != 0 {
+        if memory_bytes < 128 * MIB || !memory_bytes.is_multiple_of(MIB) {
             return Err(FirecrackerError::InvalidConfiguration(
                 "VM memory must be MiB-aligned and at least 128 MiB".to_owned(),
             ));

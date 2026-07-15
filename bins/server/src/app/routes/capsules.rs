@@ -108,7 +108,7 @@ fn reusable_workflow_bundle(
         let locked = locked.get(source.reference.as_str()).ok_or(())?;
         if source.commit != locked.commit()
             || source.source_hex.len() > MAX_REUSABLE_SOURCE_BYTES.saturating_mul(2)
-            || source.source_hex.len() % 2 != 0
+            || !source.source_hex.len().is_multiple_of(2)
             || source
                 .source_hex
                 .bytes()

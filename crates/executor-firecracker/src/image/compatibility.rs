@@ -54,7 +54,7 @@ impl SnapshotRuntimeCompatibility {
             || compatibility.vcpu_count == 0
             || compatibility.vcpu_count > 64
             || compatibility.memory_bytes < 128 * 1024 * 1024
-            || compatibility.memory_bytes % (1024 * 1024) != 0
+            || !compatibility.memory_bytes.is_multiple_of(1024 * 1024)
             || compatibility.guest_cid < 3
         {
             return Err(FirecrackerError::InvalidConfiguration(

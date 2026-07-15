@@ -434,7 +434,7 @@ pub(super) fn parse_utc_timestamp(value: &str) -> Result<u64, GitHubError> {
 }
 
 const fn leap_year(year: u32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 const fn days_in_month(year: u32, month: u32) -> u32 {

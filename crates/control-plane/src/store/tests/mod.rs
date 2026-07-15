@@ -766,7 +766,7 @@ fn audit_data(action: &str) -> AuditEventData {
 fn audit_pages_return_at_most_one_hundred_newest_events_first() {
     let control = ControlPlane::open_in_memory("audit-page", NOW).unwrap();
     for index in 1..=105_u64 {
-        let mut event = audit_data(if index % 2 == 0 {
+        let mut event = audit_data(if index.is_multiple_of(2) {
             "run.update"
         } else {
             "run.create"

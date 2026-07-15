@@ -1,3 +1,6 @@
+#![allow(clippy::result_large_err)]
+// Axum handlers deliberately propagate the framework's concrete Response type.
+
 use crate::app::{
     authenticated_browser_session, authorize_browser_resource, authorize_browser_tenant,
     browser_csrf_input, control_plane_problem, form_value, github_credential_cookie,

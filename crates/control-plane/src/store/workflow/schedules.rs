@@ -174,7 +174,7 @@ impl ControlPlane {
         };
         for cursor in cursors {
             validate_utc_cron(&cursor.cron_utc)?;
-            if cursor.next_fire_unix_ms % 60_000 != 0
+            if !cursor.next_fire_unix_ms.is_multiple_of(60_000)
                 || !cron_matches_unix_ms(&cursor.cron_utc, cursor.next_fire_unix_ms)?
             {
                 return Err(ControlPlaneError::CorruptState(
@@ -431,7 +431,7 @@ fn cron_field_matches(field: &str, value: u32, minimum: u32, maximum: u32) -> bo
             let exact = base.parse::<u32>().unwrap_or(maximum.saturating_add(1));
             (exact, exact)
         };
-        value >= start && value <= end && value.saturating_sub(start) % step == 0
+        value >= start && value <= end && value.saturating_sub(start).is_multiple_of(step)
     })
 }
 

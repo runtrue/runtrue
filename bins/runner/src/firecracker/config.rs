@@ -55,7 +55,7 @@ impl RuntimeProfile {
             || self.vcpu_count == 0
             || self.vcpu_count > 64
             || self.memory_bytes < 128 * MIB
-            || self.memory_bytes % MIB != 0
+            || !self.memory_bytes.is_multiple_of(MIB)
             || self.guest_cid < 3
             || self.jailed_uid == 0
             || self.jailed_gid == 0
