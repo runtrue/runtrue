@@ -44,8 +44,9 @@ here is already implemented.
 Runtrue is a portable, policy-controlled execution plane. Its core promise is:
 
 > Run arbitrary code in an isolated environment, grant it only the authority
-> described by an immutable approved plan, and produce verifiable evidence of
-> everything it was allowed to affect.
+> described by an immutable Capsule and authorized by a Seal over its exact
+> approval subject, and produce verifiable Evidence of everything it was
+> allowed to affect.
 
 The execution core contains no GitHub, pull-request, repository-hosting,
 continuous-integration, deployment-product, or AI-agent behavior. Those systems
