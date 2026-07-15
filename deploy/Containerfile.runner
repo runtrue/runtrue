@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1.10@sha256:865e5dd094beca432e8c0a1d5e1c465db5f998dca4e439981029b3b81fb39ed5
-ARG RUST_IMAGE=docker.io/library/rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0
+ARG RUST_IMAGE=docker.io/library/rust:1.94.0-bookworm@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f
 ARG RUNTIME_IMAGE=docker.io/library/debian:bookworm-20250630-slim@sha256:6ac2c08566499cc2415926653cf2ed7c3aedac445675a013cc09469c9e118fdd
 
 FROM ${RUST_IMAGE} AS build
-ENV RUSTUP_TOOLCHAIN=1.88.0
+ENV RUSTUP_TOOLCHAIN=1.94.0
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,id=runtrue-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=runtrue-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=runtrue-rust-1.88-release-target-v1,target=/src/target,sharing=locked \
+    --mount=type=cache,id=runtrue-rust-1.94-release-target-v1,target=/src/target,sharing=locked \
     cargo build --locked --release -p runtrue-runner --bin runtrue-runner && \
     install -D -m 0555 target/release/runtrue-runner /out/runtrue-runner
 

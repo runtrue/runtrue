@@ -12,16 +12,16 @@ is manual unless the release decision explicitly authorizes that process.
 
 ## Source and verification gates
 
-Start from a clean checkout of the exact proposed commit. Use Rust 1.88.0, Go
+Start from a clean checkout of the exact proposed commit. Use Rust 1.94.0, Go
 1.24 or newer, Node.js 22.17.0, the locked dependency graph, and a controlled
 builder with no ambient publication credentials.
 
 ```bash
-cargo +1.88.0 fetch --locked
-cargo +1.88.0 fmt --all -- --check
-cargo +1.88.0 check --workspace --all-targets --locked
-cargo +1.88.0 test --workspace --locked
-cargo +1.88.0 clippy --workspace --all-targets --locked -- -D warnings
+cargo +1.94.0 fetch --locked
+cargo +1.94.0 fmt --all -- --check
+cargo +1.94.0 check --workspace --all-targets --locked
+cargo +1.94.0 test --workspace --locked
+cargo +1.94.0 clippy --workspace --all-targets --locked -- -D warnings
 tests/check_brand.sh
 python3 tests/conformance/check_schema.py
 python3 tests/conformance/check_openapi_routes.py
@@ -29,7 +29,7 @@ python3 tests/conformance/check_migrations.py
 deploy/tests/validate.sh
 npm --prefix web test
 (cd components/github-signer && go test ./...)
-cargo +1.88.0 audit
+cargo +1.94.0 audit
 ```
 
 Also build every shipped container definition from its pinned base and rerun
@@ -38,7 +38,7 @@ the update trust and rollback acceptance suite:
 ```bash
 docker build --file web/Containerfile --tag runtrue/web:verify web
 docker build --tag runtrue/runner-node:verify images/runner-node
-cargo +1.88.0 test --locked -p runtrue-update -p runtrue-update-cli
+cargo +1.94.0 test --locked -p runtrue-update -p runtrue-update-cli
 ```
 
 Any failure stops the release. Record the exact tool versions, source commit,

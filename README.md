@@ -149,14 +149,14 @@ Data, delivery, and operations:
   out-of-band roots, signed metadata, SBOM/provenance evidence, and exact target
   verification. Automated publication remains disabled until it runs on
   Runtrue. See the [release runbook](docs/operations/releases.md).
-- Pinned Rust 1.88, Go 1.24, and Node.js 22.17 verification gates for formatting,
+- Pinned Rust 1.94, Go 1.24, and Node.js 22.17 verification gates for formatting,
   all targets, workspace and component tests, Clippy, schema/API/migration
   conformance, deployment validation, dependency auditing, and every shipped
   image build.
 
 ## Build and verify
 
-The project MSRV is pinned to Rust 1.88.0:
+The project MSRV is pinned to Rust 1.94.0:
 
 ```bash
 cargo fmt --all -- --check

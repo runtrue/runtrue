@@ -7,7 +7,7 @@ production data.
 
 ## Development setup
 
-Use the repository-pinned Rust 1.88 toolchain, Go 1.24 or newer, and Node.js
+Use the repository-pinned Rust 1.94 toolchain, Go 1.24 or newer, and Node.js
 22.17 or newer. The Rust dependency graph is lockfile-bound, and the Go signer
 uses only the standard library. Do not update a lockfile or add a Go module
 dependency unless the change is intentional and described in the pull request.

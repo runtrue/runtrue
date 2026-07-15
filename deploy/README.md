@@ -34,7 +34,7 @@ non-authoritative and may be removed to reclaim disk, but `docker builder
 prune` affects the entire selected builder and should only be run
 intentionally.
 
-The Containerfiles use Rust 1.88.0 and Debian bookworm images pinned by
+The Containerfiles use Rust 1.94.0 and Debian bookworm images pinned by
 multi-platform manifest digest. Cargo is invoked with `--locked`. Runtime
 images install no packages from a moving package repository. To reproduce an
 image bit-for-bit, also fix the build platform, BuildKit version, source-tree
