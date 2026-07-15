@@ -250,6 +250,8 @@ pub struct GitHubRepositoryLinkView {
     pub owner: String,
     /// Public repository name.
     pub name: String,
+    /// Exact configured GitHub web origin for this repository.
+    pub web_origin: String,
     /// GitHub visibility.
     pub visibility: RepositoryVisibility,
     /// Public installation account login.

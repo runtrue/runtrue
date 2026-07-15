@@ -1478,6 +1478,7 @@ pub(in crate::app) async fn github_browser_state(
             control_plane_id: repository.linked_repository_id.clone(),
             owner: repository.owner.clone(),
             name: repository.name.clone(),
+            web_origin: repository.web_origin.clone(),
             visibility: match repository.visibility.as_str() {
                 "public" => RepositoryVisibility::Public,
                 "internal" => RepositoryVisibility::Internal,
@@ -2423,6 +2424,7 @@ mod user_catalog_tests {
                 control_plane_id: Some("repo-3".to_owned()),
                 owner: "octo".to_owned(),
                 name: "linked".to_owned(),
+                web_origin: "https://github.example".to_owned(),
                 visibility: RepositoryVisibility::Private,
                 installation_account: "octo".to_owned(),
                 default_branch: "main".to_owned(),

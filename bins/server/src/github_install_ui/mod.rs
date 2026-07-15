@@ -52,6 +52,7 @@ mod tests {
                 control_plane_id: Some("repo-9".to_owned()),
                 owner: "octo".to_owned(),
                 name: "runtrue".to_owned(),
+                web_origin: "https://github.example".to_owned(),
                 visibility: RepositoryVisibility::Private,
                 installation_account: "octo".to_owned(),
                 default_branch: "main".to_owned(),
@@ -91,6 +92,10 @@ mod tests {
         assert_eq!(payload["repositories"][0]["id"], "repo-9");
         assert_eq!(payload["repositories"][0]["key"], "octo/runtrue");
         assert_eq!(
+            payload["repositories"][0]["repositoryUrl"],
+            "https://github.example/octo/runtrue"
+        );
+        assert_eq!(
             payload["organizations"][0]["repositories"][0]["name"],
             "available"
         );
@@ -108,6 +113,20 @@ mod tests {
     }
 
     #[test]
+    fn repository_url_keeps_owner_and_name_inside_the_configured_origin() {
+        let mut page = populated_page();
+        page.repositories[0].owner = "octo space".to_owned();
+        page.repositories[0].name = "runtrue/preview".to_owned();
+
+        let payload = github_installations_payload(&page);
+
+        assert_eq!(
+            payload["repositories"][0]["repositoryUrl"],
+            "https://github.example/octo%20space/runtrue%2Fpreview"
+        );
+    }
+
+    #[test]
     fn unlinked_catalog_entries_are_import_candidates_not_managed_repositories() {
         let mut page = populated_page();
         page.repositories.push(GitHubRepositoryLinkView {
@@ -115,6 +134,7 @@ mod tests {
             control_plane_id: None,
             owner: "bob-pr".to_owned(),
             name: "candidate-repository".to_owned(),
+            web_origin: "https://github.example".to_owned(),
             visibility: RepositoryVisibility::Private,
             installation_account: "bob-pr".to_owned(),
             default_branch: "main".to_owned(),

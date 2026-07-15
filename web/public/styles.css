@@ -519,6 +519,10 @@ svg { display: block; }
 .metadata-strip > div { min-width: 0; display: grid; align-content: start; gap: 2px; }
 .metadata-strip span { color: var(--muted); font-size: var(--text-xs); }
 .metadata-strip strong { font-size: var(--text-sm); line-height: 1.35; overflow-wrap: anywhere; }
+.metadata-link { width: fit-content; display: inline-flex; align-items: center; gap: var(--space-1); color: var(--accent); text-decoration: none; }
+.metadata-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.metadata-link:focus-visible { border-radius: 2px; outline: none; box-shadow: var(--focus-ring); }
+.metadata-link svg { flex: 0 0 auto; color: var(--muted); }
 .section-actions { margin-top: var(--space-5); display: flex; gap: var(--space-2); }
 .compact-panel .section-actions { margin-top: var(--space-4); }
 .support-copy { margin: var(--space-3) 0 0; color: var(--muted); font-size: var(--text-xs); }
@@ -672,6 +676,11 @@ svg { display: block; }
 .repository-back svg { width: 18px; height: 18px; }
 .repository-page-heading { margin-bottom: var(--space-5); display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-5); }
 .repository-page-heading h1 { margin: 0 0 var(--space-2); font-size: var(--text-2xl); letter-spacing: var(--tracking-display); }
+.repository-heading-actions { display: flex; align-items: center; gap: var(--space-3); }
+.repository-provider-link { min-height: 36px; padding: 0 var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm); display: inline-flex; align-items: center; gap: var(--space-2); background: var(--surface); color: var(--fg); font-size: var(--text-xs); font-weight: 600; text-decoration: none; transition: border-color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard); }
+.repository-provider-link:hover { border-color: color-mix(in oklab, var(--fg), transparent 74%); background: var(--bg); }
+.repository-provider-link:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.repository-provider-link svg { color: var(--muted); }
 .repository-meta { padding: var(--space-3) 0; border-block: 1px solid var(--border); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-4); }
 .repository-meta > div { min-width: 0; display: grid; gap: 2px; }
 .repository-meta span { color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
@@ -906,6 +915,7 @@ svg { display: block; }
   .repository-section-heading,
   .workflow-detail-heading,
   .workflow-plan-bar { align-items: stretch; flex-direction: column; }
+  .repository-heading-actions { justify-content: space-between; }
   .workflow-location-card { grid-template-columns: 1fr; }
   .repository-settings-actions { grid-column: 1; align-items: stretch; flex-direction: column; }
   .repository-settings-actions .btn { width: 100%; }

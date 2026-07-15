@@ -237,12 +237,21 @@
     renderRepositorySettings();
     const runs = (state.data.runs || []).filter((run) => run.repositoryId === repository.id);
     byId("repository-page-title").textContent = repository.key;
+    const providerLink = byId("repository-provider-link");
+    providerLink.hidden = !repository.repositoryUrl;
+    if (repository.repositoryUrl) {
+      providerLink.href = repository.repositoryUrl;
+      providerLink.setAttribute("aria-label", `View ${repository.key} on GitHub`);
+    } else {
+      providerLink.removeAttribute("href");
+      providerLink.removeAttribute("aria-label");
+    }
     byId("repository-state").textContent = repository.state;
     byId("repository-state").className = `state-badge ${tone(repository.state)}`;
     byId("repository-detail-summary").innerHTML = [["Source", repository.source], ["Visibility", repository.visibility], ["Default branch", repository.defaultBranch], ["Installation", repository.installationAccount]].map(([label, value]) => definitionCard(label, value)).join("");
     byId("repository-connection-state").textContent = repository.state;
     byId("repository-connection-state").className = `state-badge ${tone(repository.state)}`;
-    byId("repository-connection-metadata").innerHTML = definitionCard("GitHub repository", repository.key) + definitionCard("External ID", repository.externalId);
+    byId("repository-connection-metadata").innerHTML = definitionLinkCard("GitHub repository", repository.key, repository.repositoryUrl) + definitionCard("External ID", repository.externalId);
     byId("repository-execution-metadata").innerHTML = definitionCard("Runs", runs.length) + definitionCard("Latest activity", runs[0] ? formatDate(runs[0].createdAt) : "No runs yet");
     byId("repository-uninstall-name").textContent = repository.key;
     renderRepositoryRuns(runs);
@@ -597,6 +606,10 @@
   function openNavigation() { byId("workspace").classList.add("nav-open"); byId("mobile-menu").setAttribute("aria-expanded", "true"); }
   function closeNavigation() { byId("workspace").classList.remove("nav-open"); byId("mobile-menu").setAttribute("aria-expanded", "false"); }
   function definitionCard(label, value) { return `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? "Not available")}</strong></div>`; }
+  function definitionLinkCard(label, value, href) {
+    if (!href) return definitionCard(label, value);
+    return `<div><span>${escapeHtml(label)}</span><a class="metadata-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer"><strong>${escapeHtml(value ?? "Not available")}</strong><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg></a></div>`;
+  }
   function emptyInline(title, detail) { return `<div class="inline-empty"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(detail)}</p></div>`; }
 
   function renderOrganizations() {

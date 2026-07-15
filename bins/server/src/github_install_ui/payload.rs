@@ -22,6 +22,7 @@ pub fn github_installations_payload(page: &GitHubInstallationsPage) -> Value {
                         "id": control_plane_id,
                         "externalId": repository.repository_id,
                         "key": format!("{}/{}", repository.owner, repository.name),
+                        "repositoryUrl": repository_url(repository),
                         "organization": repository.owner,
                         "name": repository.name,
                         "source": "GitHub App",
@@ -104,6 +105,28 @@ pub fn github_installations_payload(page: &GitHubInstallationsPage) -> Value {
             "alert": alert,
         },
     })
+}
+
+fn repository_url(repository: &super::model::GitHubRepositoryLinkView) -> String {
+    format!(
+        "{}/{}/{}",
+        repository.web_origin.trim_end_matches('/'),
+        url_path_component(&repository.owner),
+        url_path_component(&repository.name),
+    )
+}
+
+fn url_path_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    encoded
 }
 
 fn organization_catalog(page: &GitHubInstallationsPage) -> Value {

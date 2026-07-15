@@ -50,6 +50,7 @@ test("serves the full backend-supported POC surface with a strict CSP", async (t
   assert.match(html, /id="repository-setting-dialog"/);
   assert.match(html, /id="repository-workflow-directory"/);
   assert.match(html, /id="repository-workflow-directory-form"/);
+  assert.match(html, /id="repository-provider-link"[^>]*target="_blank"[^>]*rel="noopener noreferrer"/);
   assert.match(html, /id="user-initials"/);
   assert.match(html, /id="delete-setting-dialog"/);
   assert.doesNotMatch(html, /id="tenant-name"/);
@@ -123,6 +124,8 @@ test("browser script references existing unique controls", async () => {
   assert.match(script, /function loadOrganizationSettings/);
   assert.match(script, /function saveRepositorySetting/);
   assert.match(script, /function saveRepositoryWorkflowDirectory/);
+  assert.match(script, /repository\.repositoryUrl/);
+  assert.match(script, /function definitionLinkCard/);
   assert.match(script, /\/workflow-directory/);
   assert.doesNotMatch(script, /session\.avatarUrl/);
   assert.match(script, /function deleteRepositorySetting/);
