@@ -63,7 +63,8 @@ pub mod session {
 pub mod capability {
     pub use runtrue_execution::{CapabilityBudget, CapabilityContract, CapabilityGrant};
     pub use runtrue_provider_contract::{
-        CapabilityBudgetLedger, CapabilityBudgetReservation, InvocationBudget, InvocationHandle,
+        CapabilityBudgetCompletion, CapabilityBudgetLedger, CapabilityBudgetReservation,
+        CapabilityCallAuthorization, InvocationBudget, InvocationCapabilityGrant, InvocationHandle,
         InvocationSubject,
     };
 }
@@ -71,8 +72,9 @@ pub mod capability {
 /// Portable Checkpoint and Replay Bundle manifests.
 pub mod replay {
     pub use runtrue_provider_contract::{
-        CheckpointCompatibilityGrade, CheckpointManifest, CheckpointTaint, EffectLedgerFrontier,
-        RemainingExecutionBudget, ReplayBundleManifest,
+        CheckpointCompatibilityGrade, CheckpointManifest, CheckpointStorageEnvelope,
+        EffectLedgerFrontier, RemainingExecutionBudget, ReplayBundleManifest, ReplayGrade,
+        ReplayGradeProof, ReplayGradeProofSignatureVerifier,
     };
 }
 
@@ -110,7 +112,7 @@ pub mod storage {
 pub mod pool {
     pub use runtrue_provider_contract::{
         PoolAssignmentBinding, PoolAssignmentSubjectKind, PoolMemberRecord, PoolMemberState,
-        PoolMemberTransition,
+        PoolMemberTransition, SignedSterileTemplatePublication, SterileTemplatePublication,
     };
 }
 

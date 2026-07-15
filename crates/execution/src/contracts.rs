@@ -153,7 +153,7 @@ pub struct CapabilityGrant {
 }
 
 impl CapabilityGrant {
-    fn validate(&self) -> Result<(), ExecutionModelError> {
+    pub fn validate(&self) -> Result<(), ExecutionModelError> {
         validation::identifier("capability class", &self.class)?;
         validation::text("capability resource", &self.resource)?;
         validation::identifiers("capability operations", &self.operations, true)?;
@@ -162,6 +162,14 @@ impl CapabilityGrant {
             validation::identifier("external-effect class", effect_class)?;
         }
         self.budget.validate()
+    }
+
+    /// Canonical identity of the exact capability authority sealed into a
+    /// Capsule. Provider invocation grants must bind this digest and may only
+    /// narrow its authority.
+    pub fn digest(&self) -> Result<ContentDigest, ExecutionModelError> {
+        self.validate()?;
+        crate::canonical::canonical_digest(self)
     }
 
     #[must_use]

@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 runtrue-engine.workspace = true
 runtrue-model.workspace = true
+runtrue-provider-contract.workspace = true
 runtrue-workflow-ir.workspace = true
 base64ct.workspace = true
 hex.workspace = true

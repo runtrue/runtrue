@@ -5,6 +5,7 @@
 //! or transport dependency. Implementations may call the traits in process or
 //! adapt them to a versioned remote protocol without changing their semantics.
 
+mod attestation;
 mod canonical;
 mod capability;
 mod checkpoint;
@@ -16,8 +17,11 @@ mod evidence;
 mod failure;
 mod pool;
 mod provider;
+mod retention;
+mod retry;
 mod storage;
 
+pub use attestation::*;
 pub use capability::*;
 pub use checkpoint::*;
 pub use conformance::*;
@@ -28,6 +32,8 @@ pub use evidence::*;
 pub use failure::*;
 pub use pool::*;
 pub use provider::*;
+pub use retention::*;
+pub use retry::*;
 pub use storage::*;
 
 #[cfg(test)]

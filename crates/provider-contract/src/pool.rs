@@ -1,11 +1,27 @@
 use crate::{
-    canonical::{canonical_digest, validate_identifier},
-    ProviderContractError, ProviderIdentity,
+    canonical::{canonical_bytes, canonical_digest, validate_identifier, validate_profile_name},
+    InventoryAuthoritySignatureVerifier, ProviderContractError, ProviderContractSignatureVerifier,
+    ProviderIdentity, SignedInventoryAuthoritySnapshot, SignedRuntimeInventoryEntry,
 };
 use runtrue_model::ContentDigest;
 use serde::{Deserialize, Serialize};
 
 const POOL_TRANSITION_DOMAIN: &[u8] = b"runtrue.provider.pool-member-transition.v1\0";
+const STERILE_TEMPLATE_DOMAIN: &[u8] = b"runtrue.provider.sterile-template-publication.v1\0";
+const STERILE_TEMPLATE_SIGNATURE_DOMAIN: &[u8] =
+    b"runtrue.provider.sterile-template-signature.v1\0";
+
+pub trait SterileTemplateSignatureVerifier {
+    fn verify_sterile_template_signature(
+        &self,
+        authority_identity_digest: &ContentDigest,
+        signing_key_id: &ContentDigest,
+        signing_key_generation: u64,
+        algorithm: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> bool;
+}
 
 /// Durable, one-shot lifecycle. A member that may have seen tenant state can
 /// only proceed toward destruction; it can never become sterile again.
@@ -222,4 +238,176 @@ impl PoolMemberTransition {
         self.validate()?;
         canonical_digest(POOL_TRANSITION_DOMAIN, self)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SterileTemplatePublication {
+    pub publication_version: u32,
+    pub template_digest: ContentDigest,
+    pub builder_definition_digest: ContentDigest,
+    pub builder_identity_digest: ContentDigest,
+    pub runtime_inventory_digest: ContentDigest,
+    pub runtime_compatibility_digest: ContentDigest,
+    pub snapshot_compatibility_digest: ContentDigest,
+    pub provenance_digest: ContentDigest,
+    pub sbom_digest: ContentDigest,
+    pub vulnerability_evidence_digest: ContentDigest,
+    pub policy_evidence_digest: ContentDigest,
+    pub sterility_scan_digest: ContentDigest,
+    pub cold_boot_probe_digest: ContentDigest,
+    pub restore_probe_digest: ContentDigest,
+    pub inventory_generation: u64,
+    pub revocation_generation: u64,
+    pub created_unix_ms: u64,
+    pub expires_unix_ms: u64,
+}
+
+impl SterileTemplatePublication {
+    pub fn validate(&self) -> Result<(), ProviderContractError> {
+        if self.publication_version != 1
+            || self.inventory_generation == 0
+            || self.revocation_generation == 0
+            || self.created_unix_ms == 0
+            || self.expires_unix_ms <= self.created_unix_ms
+        {
+            return Err(ProviderContractError::InvalidPoolTransition);
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<ContentDigest, ProviderContractError> {
+        self.validate()?;
+        canonical_digest(STERILE_TEMPLATE_DOMAIN, self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedSterileTemplatePublication {
+    pub publication: SterileTemplatePublication,
+    pub publication_digest: ContentDigest,
+    pub authority_identity_digest: ContentDigest,
+    pub signing_key_id: ContentDigest,
+    pub signing_key_generation: u64,
+    pub signature_algorithm: String,
+    pub signature: Vec<u8>,
+}
+
+impl SignedSterileTemplatePublication {
+    pub fn signature_message(&self) -> Result<Vec<u8>, ProviderContractError> {
+        self.publication.validate()?;
+        validate_profile_name(&self.signature_algorithm)?;
+        if self.publication.digest()? != self.publication_digest
+            || self.signing_key_generation == 0
+            || self.signature.is_empty()
+            || self.signature.len() > 16 * 1024
+        {
+            return Err(ProviderContractError::InvalidPoolTransition);
+        }
+        let canonical = canonical_bytes(&(
+            &self.publication_digest,
+            &self.authority_identity_digest,
+            &self.signing_key_id,
+            self.signing_key_generation,
+            &self.signature_algorithm,
+        ))?;
+        let mut message =
+            Vec::with_capacity(STERILE_TEMPLATE_SIGNATURE_DOMAIN.len() + canonical.len());
+        message.extend_from_slice(STERILE_TEMPLATE_SIGNATURE_DOMAIN);
+        message.extend_from_slice(&canonical);
+        Ok(message)
+    }
+
+    pub fn verify_with(
+        &self,
+        verifier: &impl SterileTemplateSignatureVerifier,
+    ) -> Result<(), ProviderContractError> {
+        let message = self.signature_message()?;
+        if !verifier.verify_sterile_template_signature(
+            &self.authority_identity_digest,
+            &self.signing_key_id,
+            self.signing_key_generation,
+            &self.signature_algorithm,
+            &message,
+            &self.signature,
+        ) {
+            return Err(ProviderContractError::InvalidPoolTransition);
+        }
+        Ok(())
+    }
+
+    pub fn authorize_member(
+        &self,
+        member: &PoolMemberRecord,
+        inventory: &SignedRuntimeInventoryEntry,
+        authority: &SignedInventoryAuthoritySnapshot,
+        now_unix_ms: u64,
+        verifier: &(impl SterileTemplateSignatureVerifier
+              + ProviderContractSignatureVerifier
+              + InventoryAuthoritySignatureVerifier),
+    ) -> Result<(), ProviderContractError> {
+        self.verify_with(verifier)?;
+        inventory.verify_with(authority, now_unix_ms, verifier)?;
+        member.validate()?;
+        if !matches!(
+            member.state,
+            PoolMemberState::Creating | PoolMemberState::Sterile
+        ) || member.sterile_template_digest != self.publication.template_digest
+            || member.runtime_inventory_digest != self.publication.runtime_inventory_digest
+            || inventory.inventory_digest != self.publication.runtime_inventory_digest
+            || inventory.inventory.inventory_generation != self.publication.inventory_generation
+            || inventory.inventory.revocation_generation != self.publication.revocation_generation
+            || now_unix_ms < self.publication.created_unix_ms
+            || now_unix_ms >= self.publication.expires_unix_ms
+        {
+            return Err(ProviderContractError::InvalidPoolTransition);
+        }
+        Ok(())
+    }
+}
+
+pub trait SterileTemplatePublicationStore {
+    type Error;
+
+    /// Create-once or exact replay. A digest collision with different canonical
+    /// publication bytes must fail closed.
+    fn publish(
+        &self,
+        expected_absent: bool,
+        publication: &SignedSterileTemplatePublication,
+    ) -> Result<SignedSterileTemplatePublication, Self::Error>;
+
+    fn current(
+        &self,
+        template_digest: &ContentDigest,
+    ) -> Result<Option<SignedSterileTemplatePublication>, Self::Error>;
+
+    fn revoke(
+        &self,
+        template_digest: &ContentDigest,
+        expected_revocation_generation: u64,
+        next_revocation_generation: u64,
+    ) -> Result<SignedSterileTemplatePublication, Self::Error>;
+}
+
+pub trait DurablePoolManager {
+    type Error;
+
+    fn member(&self, member_id: &str) -> Result<Option<PoolMemberRecord>, Self::Error>;
+
+    /// Atomically compare the complete prior record and apply one transition.
+    fn compare_and_swap(
+        &self,
+        expected: &PoolMemberRecord,
+        transition: &PoolMemberTransition,
+    ) -> Result<PoolMemberRecord, Self::Error>;
+
+    /// Reconciliation may only follow the transition graph; it can never move
+    /// assigning, tenant-used, or quarantined state back to sterile.
+    fn reconcile(
+        &self,
+        expected: &PoolMemberRecord,
+        transition: &PoolMemberTransition,
+    ) -> Result<PoolMemberRecord, Self::Error>;
 }

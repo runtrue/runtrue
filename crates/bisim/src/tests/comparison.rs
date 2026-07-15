@@ -1,5 +1,7 @@
-use super::fixtures::{backend, capsule, output, ScriptedExecutor};
-use crate::{compare_bisim, observe_backend};
+use super::fixtures::{
+    backend, capsule, evidence_factory, output, ScriptedExecutor, TestEvidenceVerifier,
+};
+use crate::{compare_bisim_with, observe_backend};
 use runtrue_workflow_ir::PlannedFinalizer;
 use std::collections::VecDeque;
 
@@ -12,6 +14,8 @@ fn timing_is_normalized_but_results_and_events_remain_exact() {
             outputs: VecDeque::from([output("same", 10)]),
         },
         &[],
+        &TestEvidenceVerifier,
+        evidence_factory(&capsule()),
     )
     .unwrap();
     let right = observe_backend(
@@ -21,9 +25,15 @@ fn timing_is_normalized_but_results_and_events_remain_exact() {
             outputs: VecDeque::from([output("same", 999)]),
         },
         &[],
+        &TestEvidenceVerifier,
+        evidence_factory(&capsule()),
     )
     .unwrap();
-    assert!(compare_bisim(&left, &right).unwrap().matches);
+    assert!(
+        compare_bisim_with(&left, &right, &TestEvidenceVerifier)
+            .unwrap()
+            .matches
+    );
 
     let changed = observe_backend(
         &capsule(),
@@ -32,9 +42,11 @@ fn timing_is_normalized_but_results_and_events_remain_exact() {
             outputs: VecDeque::from([output("different", 10)]),
         },
         &[],
+        &TestEvidenceVerifier,
+        evidence_factory(&capsule()),
     )
     .unwrap();
-    let comparison = compare_bisim(&left, &changed).unwrap();
+    let comparison = compare_bisim_with(&left, &changed, &TestEvidenceVerifier).unwrap();
     assert!(!comparison.matches);
     assert!(comparison.same_capsule);
     assert!(!comparison.same_result);
@@ -50,6 +62,8 @@ fn bisim_requires_both_capsule_identity_and_behavioral_equivalence() {
             outputs: VecDeque::from([output("same", 10)]),
         },
         &[],
+        &TestEvidenceVerifier,
+        evidence_factory(&capsule()),
     )
     .unwrap();
     let mut changed_capsule = capsule();
@@ -61,15 +75,20 @@ fn bisim_requires_both_capsule_identity_and_behavioral_equivalence() {
             outputs: VecDeque::from([output("same", 10)]),
         },
         &[],
+        &TestEvidenceVerifier,
+        evidence_factory(&changed_capsule),
     )
     .unwrap();
 
-    let comparison = compare_bisim(&left, &right).unwrap();
+    let comparison = compare_bisim_with(&left, &right, &TestEvidenceVerifier).unwrap();
     assert!(!comparison.matches);
     assert!(!comparison.same_capsule);
     assert!(comparison.same_result);
     assert!(comparison.same_events);
-    assert_eq!(comparison.differences, ["capsule_digest"]);
+    assert_eq!(
+        comparison.differences,
+        ["capsule_digest", "portable_provider_observation"]
+    );
 }
 
 #[test]
@@ -90,6 +109,8 @@ fn finalizer_timing_uses_the_same_normalized_bisim_contract() {
             outputs: VecDeque::from([output("same", 10), output("cleanup", 20)]),
         },
         &[],
+        &TestEvidenceVerifier,
+        evidence_factory(&execution_capsule),
     )
     .unwrap();
     let right = observe_backend(
@@ -99,10 +120,16 @@ fn finalizer_timing_uses_the_same_normalized_bisim_contract() {
             outputs: VecDeque::from([output("same", 999), output("cleanup", 888)]),
         },
         &[],
+        &TestEvidenceVerifier,
+        evidence_factory(&execution_capsule),
     )
     .unwrap();
 
-    assert!(compare_bisim(&left, &right).unwrap().matches);
+    assert!(
+        compare_bisim_with(&left, &right, &TestEvidenceVerifier)
+            .unwrap()
+            .matches
+    );
     assert_eq!(
         left.normalized_result.jobs["job"].attempts[0].finalizers[0]
             .output

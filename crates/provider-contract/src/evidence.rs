@@ -3,17 +3,18 @@ use crate::{
         canonical_digest, validate_collection_size, validate_identifier, validate_profile_name,
         validate_text, MAX_SHORT_TEXT_BYTES,
     },
-    DeployedProviderGeneration, ProviderContractError, ProviderIdentity,
+    DeployedProviderGeneration, FeatureProfileId, ProviderContractError, ProviderIdentity,
 };
 use runtrue_model::ContentDigest;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const EVIDENCE_EVENT_DOMAIN: &[u8] = b"runtrue.provider.evidence-event.v1\0";
 const EVIDENCE_CHECKPOINT_DOMAIN: &[u8] = b"runtrue.provider.evidence-checkpoint.v1\0";
 const EVIDENCE_EVENT_SIGNATURE_DOMAIN: &[u8] = b"runtrue.provider.evidence-event-signature.v1\0";
 const EVIDENCE_CHECKPOINT_SIGNATURE_DOMAIN: &[u8] =
     b"runtrue.provider.evidence-checkpoint-signature.v1\0";
+pub const MAX_EVIDENCE_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Cryptographic adapter supplied by a trust-boundary implementation. The
 /// contract crate defines the exact signing bytes but does not choose a crypto
@@ -52,6 +53,155 @@ pub enum EvidenceProducerKind {
     ProviderControlPlane,
     ConformanceHarness,
     Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceIdentityField {
+    Provider,
+    DeployedProviderGeneration,
+    Program,
+    Capsule,
+    Seal,
+    Policy,
+    Execution,
+    Session,
+    SterileTemplate,
+    Pool,
+    RuntimeCompatibility,
+    ConformanceProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceEventRequirement {
+    pub event_type: String,
+    pub allowed_producers: BTreeSet<EvidenceProducerKind>,
+    pub required_identities: BTreeSet<EvidenceIdentityField>,
+    pub maximum_payload_bytes: u64,
+}
+
+impl EvidenceEventRequirement {
+    pub fn validate(&self) -> Result<(), ProviderContractError> {
+        validate_profile_name(&self.event_type)?;
+        validate_collection_size(self.allowed_producers.len())?;
+        validate_collection_size(self.required_identities.len())?;
+        if self.allowed_producers.is_empty()
+            || self.maximum_payload_bytes == 0
+            || self.maximum_payload_bytes > MAX_EVIDENCE_PAYLOAD_BYTES
+        {
+            return Err(ProviderContractError::InvalidEvidence(
+                "Evidence requirement has no producer or an invalid payload bound",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceProfile {
+    pub id: FeatureProfileId,
+    pub scope_kind: EvidenceScopeKind,
+    pub requirements: BTreeMap<String, EvidenceEventRequirement>,
+}
+
+impl EvidenceProfile {
+    pub fn validate(&self) -> Result<(), ProviderContractError> {
+        self.id.validate()?;
+        validate_collection_size(self.requirements.len())?;
+        if self.requirements.is_empty() {
+            return Err(ProviderContractError::InvalidEvidence(
+                "Evidence profile has no required events",
+            ));
+        }
+        for (event_type, requirement) in &self.requirements {
+            requirement.validate()?;
+            if event_type != &requirement.event_type {
+                return Err(ProviderContractError::InvalidEvidence(
+                    "Evidence requirement key differs from event type",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_event(&self, event: &EvidenceEvent) -> Result<(), ProviderContractError> {
+        self.validate()?;
+        event.validate()?;
+        if event.scope_kind != self.scope_kind {
+            return Err(ProviderContractError::InvalidEvidence(
+                "Evidence event scope differs from its profile",
+            ));
+        }
+        let requirement = self.requirements.get(&event.event_type).ok_or(
+            ProviderContractError::InvalidEvidence("event type is not admitted by the profile"),
+        )?;
+        if !requirement.allowed_producers.contains(&event.producer.kind)
+            || event.payload_size_bytes > requirement.maximum_payload_bytes
+            || requirement
+                .required_identities
+                .iter()
+                .any(|field| !event.identities.contains(*field))
+        {
+            return Err(ProviderContractError::InvalidEvidence(
+                "Evidence producer, payload, or required identities violate the profile",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_finalized_coverage(
+        &self,
+        events: &[EvidenceEnvelope],
+    ) -> Result<(), ProviderContractError> {
+        verify_evidence_chain_structure(events)?;
+        let observed = events
+            .iter()
+            .map(|event| event.event.event_type.as_str())
+            .collect::<BTreeSet<_>>();
+        if self
+            .requirements
+            .keys()
+            .any(|required| !observed.contains(required.as_str()))
+        {
+            return Err(ProviderContractError::InvalidEvidence(
+                "finalized Evidence prefix omits a profile-required event",
+            ));
+        }
+        for event in events {
+            self.validate_event(&event.event)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedEvidenceAppendContext {
+    pub authenticated_producer: EvidenceProducerIdentity,
+    pub tenant_id: Option<String>,
+    pub administrative_trust_domain: Option<String>,
+    pub authentication_evidence_digest: ContentDigest,
+}
+
+impl AuthenticatedEvidenceAppendContext {
+    pub fn authorize(
+        &self,
+        event: &EvidenceEvent,
+        profile: &EvidenceProfile,
+    ) -> Result<(), ProviderContractError> {
+        self.authenticated_producer.validate()?;
+        profile.validate_event(event)?;
+        if self.authenticated_producer != event.producer
+            || self.tenant_id != event.tenant_id
+            || self.administrative_trust_domain != event.administrative_trust_domain
+        {
+            return Err(ProviderContractError::InvalidEvidence(
+                "append context does not authenticate the event producer or scope",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -150,6 +300,28 @@ impl EvidenceIdentities {
         }
         Ok(())
     }
+
+    #[must_use]
+    pub fn contains(&self, field: EvidenceIdentityField) -> bool {
+        match field {
+            EvidenceIdentityField::Provider => self.provider_identity_digest.is_some(),
+            EvidenceIdentityField::DeployedProviderGeneration => {
+                self.deployed_provider_generation_digest.is_some()
+            }
+            EvidenceIdentityField::Program => self.program_digest.is_some(),
+            EvidenceIdentityField::Capsule => self.capsule_digest.is_some(),
+            EvidenceIdentityField::Seal => self.seal_digest.is_some(),
+            EvidenceIdentityField::Policy => self.policy_digest.is_some(),
+            EvidenceIdentityField::Execution => self.execution_id.is_some(),
+            EvidenceIdentityField::Session => self.session_id.is_some(),
+            EvidenceIdentityField::SterileTemplate => self.sterile_template_digest.is_some(),
+            EvidenceIdentityField::Pool => self.pool_id.is_some(),
+            EvidenceIdentityField::RuntimeCompatibility => {
+                self.runtime_compatibility_digest.is_some()
+            }
+            EvidenceIdentityField::ConformanceProfile => self.conformance_profile_digest.is_some(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -212,7 +384,11 @@ pub struct EvidenceEvent {
 
 impl EvidenceEvent {
     pub fn validate(&self) -> Result<(), ProviderContractError> {
-        if self.envelope_version != 1 || self.schema_generation == 0 || self.subject_sequence == 0 {
+        if self.envelope_version != 1
+            || self.schema_generation == 0
+            || self.subject_sequence == 0
+            || self.payload_size_bytes > MAX_EVIDENCE_PAYLOAD_BYTES
+        {
             return Err(ProviderContractError::InvalidEvidence(
                 "unsupported version or zero sequence/generation",
             ));
@@ -230,6 +406,23 @@ impl EvidenceEvent {
             ));
         }
         self.identities.validate()?;
+        match self.scope_kind {
+            EvidenceScopeKind::Execution
+                if self.identities.execution_id.as_deref() != Some(self.subject_id.as_str()) =>
+            {
+                return Err(ProviderContractError::InvalidEvidence(
+                    "Execution Evidence subject and identity differ",
+                ));
+            }
+            EvidenceScopeKind::Session
+                if self.identities.session_id.as_deref() != Some(self.subject_id.as_str()) =>
+            {
+                return Err(ProviderContractError::InvalidEvidence(
+                    "Session Evidence subject and identity differ",
+                ));
+            }
+            _ => {}
+        }
         self.producer.validate()?;
         self.observed_time.validate()?;
         validate_profile_name(&self.event_type)?;
@@ -551,12 +744,53 @@ pub enum AppendEvidenceOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct EvidenceAccessContext {
+    pub tenant_id: Option<String>,
+    pub administrative_trust_domain: String,
+    pub principal_digest: ContentDigest,
+    pub authorization_decision_digest: ContentDigest,
+    pub purpose: String,
+}
+
+impl EvidenceAccessContext {
+    pub fn validate(&self) -> Result<(), ProviderContractError> {
+        if let Some(tenant) = &self.tenant_id {
+            validate_identifier("Evidence access tenant", tenant)?;
+        }
+        validate_identifier(
+            "Evidence access trust domain",
+            &self.administrative_trust_domain,
+        )?;
+        validate_profile_name(&self.purpose)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvidenceRangeRequest {
     pub scope_kind: EvidenceScopeKind,
     pub subject_id: String,
     pub after_sequence: Option<u64>,
     pub maximum_events: usize,
     pub maximum_bytes: u64,
+    pub access: EvidenceAccessContext,
+}
+
+impl EvidenceRangeRequest {
+    pub fn validate(&self) -> Result<(), ProviderContractError> {
+        validate_identifier("Evidence range subject", &self.subject_id)?;
+        self.access.validate()?;
+        if self.maximum_events == 0
+            || self.maximum_events > crate::canonical::MAX_COLLECTION_ITEMS
+            || self.maximum_bytes == 0
+            || self.maximum_bytes > MAX_EVIDENCE_PAYLOAD_BYTES
+        {
+            return Err(ProviderContractError::InvalidEvidence(
+                "Evidence range bounds are zero or too large",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -574,6 +808,8 @@ pub trait EvidenceStore {
     fn append(
         &self,
         expected_previous: Option<&ContentDigest>,
+        context: &AuthenticatedEvidenceAppendContext,
+        profile: &EvidenceProfile,
         event: EvidenceEvent,
     ) -> Result<AppendEvidenceOutcome, Self::Error>;
 

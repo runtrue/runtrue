@@ -1,4 +1,6 @@
-use super::fixtures::{backend, capsule, output, ScriptedExecutor};
+use super::fixtures::{
+    backend, capsule, evidence_factory, output, ScriptedExecutor, TestEvidenceVerifier,
+};
 use crate::{observe_backend, BisimError, SecretCanary};
 use base64ct::{Base64, Base64UrlUnpadded, Encoding as _};
 use std::collections::VecDeque;
@@ -20,6 +22,8 @@ fn plain_hex_and_base64_secret_canaries_are_detected() {
                     outputs: VecDeque::from([output(&leaked, 0)]),
                 },
                 &[SecretCanary::new(b"high-entropy-secret-canary".to_vec()).unwrap()],
+                &TestEvidenceVerifier,
+                evidence_factory(&capsule()),
             ),
             Err(BisimError::SecretCanaryLeak { .. })
         ));

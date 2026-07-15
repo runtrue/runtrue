@@ -38,10 +38,16 @@ pub enum BisimError {
     ResultDigestMismatch,
     #[error("lifecycle-event digest mismatch")]
     EventDigestMismatch,
+    #[error("invalid Bisim Evidence binding: {0}")]
+    InvalidEvidenceBinding(&'static str),
+    #[error("portable Provider lifecycle or output claim differs from the engine result")]
+    PortableResultMismatch,
     #[error("execution engine failed: {0}")]
     Engine(#[from] EngineError),
     #[error("execution capsule failed: {0}")]
     Capsule(#[from] runtrue_workflow_ir::CapsuleError),
     #[error("Bisim JSON failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("portable Provider observation is invalid: {0}")]
+    ProviderContract(#[from] runtrue_provider_contract::ProviderContractError),
 }

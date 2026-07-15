@@ -5,6 +5,9 @@ use crate::{
 use runtrue_model::ContentDigest;
 use serde::{Deserialize, Serialize};
 
+pub const MAX_LOGICAL_READ_BYTES: u64 = 64 * 1024 * 1024;
+const TOMBSTONE_DOMAIN: &[u8] = b"runtrue.provider.object-tombstone.v1\0";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogicalObjectClass {
@@ -28,15 +31,7 @@ impl LogicalObjectClass {
 
     #[must_use]
     pub const fn forbids_cross_tenant_deduplication(self) -> bool {
-        matches!(
-            self,
-            Self::Program
-                | Self::Source
-                | Self::Checkpoint
-                | Self::ReplayBundle
-                | Self::EvidencePayload
-                | Self::Secret
-        )
+        self.is_protected()
     }
 }
 
@@ -207,9 +202,29 @@ pub struct ObjectReadRequest {
     pub object_class: LogicalObjectClass,
     pub scope: LogicalObjectScope,
     pub digest: ContentDigest,
+    /// Size and verification-record digest obtained from authenticated object
+    /// metadata before requesting any bytes.
+    pub expected_size_bytes: u64,
+    pub expected_object_verification_digest: ContentDigest,
     pub offset: u64,
     pub maximum_bytes: u64,
     pub authority: StorageAuthority,
+}
+
+impl ObjectReadRequest {
+    pub fn validate(&self) -> Result<(), ProviderContractError> {
+        self.scope.validate_for(self.object_class)?;
+        self.authority.authorize_scope(&self.scope)?;
+        if self.offset > self.expected_size_bytes
+            || self.maximum_bytes == 0
+            || self.maximum_bytes > MAX_LOGICAL_READ_BYTES
+        {
+            return Err(ProviderContractError::InvalidObjectContract(
+                "logical object read bound is zero or too large",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,7 +233,43 @@ pub struct ObjectReadChunk {
     pub total_size_bytes: u64,
     pub offset: u64,
     pub bytes: Vec<u8>,
+    pub chunk_digest: ContentDigest,
+    /// Digest of the store's authenticated object-verification record. Range
+    /// bytes alone cannot re-hash the whole object.
+    pub object_verification_digest: ContentDigest,
     pub complete: bool,
+}
+
+impl ObjectReadChunk {
+    pub fn verify_against(&self, request: &ObjectReadRequest) -> Result<(), ProviderContractError> {
+        request.validate()?;
+        let length = u64::try_from(self.bytes.len()).map_err(|_| {
+            ProviderContractError::InvalidObjectContract("logical read length overflow")
+        })?;
+        let end =
+            self.offset
+                .checked_add(length)
+                .ok_or(ProviderContractError::InvalidObjectContract(
+                    "logical read offset overflow",
+                ))?;
+        if self.digest != request.digest
+            || self.total_size_bytes != request.expected_size_bytes
+            || self.object_verification_digest != request.expected_object_verification_digest
+            || self.offset != request.offset
+            || length > request.maximum_bytes
+            || end > self.total_size_bytes
+            || self.chunk_digest != ContentDigest::sha256(&self.bytes)
+            || self.complete != (end == self.total_size_bytes)
+            || (self.offset == 0
+                && self.complete
+                && ContentDigest::sha256(&self.bytes) != self.digest)
+        {
+            return Err(ProviderContractError::InvalidObjectContract(
+                "logical object read failed digest, size, offset, or completion verification",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,6 +296,11 @@ impl ObjectTombstone {
         self.scope.validate_for(self.object_class)?;
         validate_profile_name(&self.deletion_method)
     }
+
+    pub fn digest(&self) -> Result<ContentDigest, ProviderContractError> {
+        self.validate()?;
+        crate::canonical::canonical_digest(TOMBSTONE_DOMAIN, self)
+    }
 }
 
 /// Chunked integrity-preserving object store. A write is invisible until
@@ -269,11 +325,14 @@ pub trait LogicalObjectStore {
 
     fn abort_write(&self, write_id: &str) -> Result<(), Self::Error>;
 
+    /// Implementations must validate authority and return authenticated metadata.
     fn head(
         &self,
         request: &ObjectReadRequest,
     ) -> Result<Option<LogicalObjectMetadata>, Self::Error>;
 
+    /// Implementations must verify the full stored object's digest and size
+    /// before returning a range; callers then verify the returned chunk.
     fn read_range(&self, request: &ObjectReadRequest) -> Result<ObjectReadChunk, Self::Error>;
 
     fn tombstone(

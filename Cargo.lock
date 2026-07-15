@@ -2817,6 +2817,7 @@ dependencies = [
  "hex",
  "runtrue-engine",
  "runtrue-model",
+ "runtrue-provider-contract",
  "runtrue-workflow-ir",
  "serde",
  "serde_json",
@@ -3249,6 +3250,7 @@ dependencies = [
 name = "runtrue-provider-contract"
 version = "0.1.0"
 dependencies = [
+ "runtrue-execution",
  "runtrue-model",
  "serde",
  "serde_json",

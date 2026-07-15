@@ -3,6 +3,7 @@ use crate::{
     BISIM_OBSERVATION_VERSION, MAX_BISIM_RESULT_BYTES,
 };
 use runtrue_model::ContentDigest;
+use runtrue_provider_contract::{ExecutionState, TerminalCause};
 use runtrue_workflow_ir::{canonicalize_value, ParityGrade};
 use serde::Serialize;
 
@@ -18,6 +19,10 @@ pub(crate) fn verify_observation(observation: &BisimObservation) -> Result<(), B
         ));
     }
     observation.backend.validate()?;
+    observation.portable.validate()?;
+    if observation.portable.capsule_digest != observation.capsule_digest {
+        return Err(BisimError::CapsuleDigestChanged);
+    }
     let normalized = normalize_result(observation.normalized_result.clone());
     if normalized != observation.normalized_result {
         return Err(BisimError::ObservationContainsTiming);
@@ -32,6 +37,30 @@ pub(crate) fn verify_observation(observation: &BisimObservation) -> Result<(), B
     let event_bytes = canonical_bytes(&normalized.events)?;
     if ContentDigest::sha256(event_bytes) != observation.event_digest {
         return Err(BisimError::EventDigestMismatch);
+    }
+    verify_portable_result(&observation.portable, &normalized)?;
+    observation
+        .portable_evidence
+        .verify_structure(&observation.portable, &observation.result_binding())?;
+    Ok(())
+}
+
+fn verify_portable_result(
+    portable: &runtrue_provider_contract::BisimPortableObservation,
+    result: &runtrue_engine::ExecutionResult,
+) -> Result<(), BisimError> {
+    let lifecycle = &portable.lifecycle;
+    let expected_cause_matches = if result.succeeded() {
+        lifecycle.terminal_cause == Some(TerminalCause::Succeeded)
+    } else {
+        matches!(lifecycle.terminal_cause, Some(TerminalCause::Failed(_)))
+    };
+    if !result.state.is_terminal()
+        || lifecycle.execution_state != Some(ExecutionState::Terminal)
+        || lifecycle.session_state.is_some()
+        || !expected_cause_matches
+    {
+        return Err(BisimError::PortableResultMismatch);
     }
     Ok(())
 }

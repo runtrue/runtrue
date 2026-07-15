@@ -1,12 +1,16 @@
 use crate::{
     canonical::{validate_collection_size, validate_identifier},
-    ContractGenerationRange, DeployedProviderGeneration, EvidencePage, EvidenceRangeRequest,
+    ContractGenerationRange, DeployedProviderGeneration, EvidenceExportManifest, EvidencePage,
+    EvidenceRangeRequest, ExternalEffectReconciliation, ExternalEffectTransition,
     FailureResolution, FeatureRequirement, ProviderContractError, ProviderDescriptor,
-    RuntimeInventoryEntry,
+    RetryDecision, RetryLineage, RetryProofSignatureVerifier, RuntimeSelectionRequirement,
+    SignedCapacityObservation, SignedInventoryAuthoritySnapshot, SignedRuntimeInventoryEntry,
 };
 use runtrue_model::ContentDigest;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+
+pub use runtrue_execution::{ExecutionState, SessionState, TerminalCause};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +73,42 @@ pub struct AdmissionReceipt {
     pub expires_unix_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityLeaseRequest {
+    pub mutation: IdempotentMutation,
+    pub inventory_digest: ContentDigest,
+    pub inventory_authority_evidence_digest: ContentDigest,
+    pub capsule_digest: ContentDigest,
+    pub subject_id: String,
+    pub requested_slots: u32,
+    pub deadline_unix_ms: u64,
+}
+
+impl CapacityLeaseRequest {
+    pub fn validate(&self) -> Result<(), ProviderContractError> {
+        self.mutation.validate()?;
+        validate_identifier("capacity lease subject", &self.subject_id)?;
+        if self.requested_slots == 0 || self.deadline_unix_ms == 0 {
+            return Err(ProviderContractError::InvalidOperation(
+                "capacity lease slots and deadline must be positive",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityLeaseReceipt {
+    pub lease_id: String,
+    pub inventory_digest: ContentDigest,
+    pub subject_id: String,
+    pub fence_generation: u64,
+    pub expires_unix_ms: u64,
+    pub evidence_event_digest: ContentDigest,
+}
+
 impl AdmissionReceipt {
     pub fn validate(&self) -> Result<(), ProviderContractError> {
         validate_identifier("admission id", &self.admission_id)?;
@@ -93,40 +133,64 @@ pub struct CreateExecutionRequest {
     pub admission_id: String,
     pub capsule_digest: ContentDigest,
     pub seal_digest: ContentDigest,
+    pub retry: Option<RetryExecutionAuthorization>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryExecutionAuthorization {
+    pub lineage: RetryLineage,
+    pub decision: RetryDecision,
+}
+
+impl RetryExecutionAuthorization {
+    pub fn validate_structure(&self) -> Result<(), ProviderContractError> {
+        self.decision.validate()?;
+        self.lineage.validate_against(&self.decision)
+    }
+
+    pub fn validate_with(
+        &self,
+        now_unix_ms: u64,
+        verifier: &impl RetryProofSignatureVerifier,
+    ) -> Result<(), ProviderContractError> {
+        self.decision.validate_with(now_unix_ms, verifier)?;
+        self.lineage.validate_against(&self.decision)
+    }
 }
 
 impl CreateExecutionRequest {
-    pub fn validate(&self) -> Result<(), ProviderContractError> {
+    pub fn validate_structure(&self) -> Result<(), ProviderContractError> {
         self.mutation.validate()?;
-        validate_identifier("admission id", &self.admission_id)
+        validate_identifier("admission id", &self.admission_id)?;
+        if let Some(retry) = &self.retry {
+            retry.validate_structure()?;
+        }
+        Ok(())
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionState {
-    Proposed,
-    Admitted,
-    Queued,
-    Leased,
-    Running,
-    Finalizing,
-    Terminal,
-}
-
-impl ExecutionState {
-    #[must_use]
-    pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Terminal)
+    /// Ordinary validation is sufficient only for a first attempt. Retry
+    /// requests require `validate_with` so forged but structurally plausible
+    /// proof bytes can never be accepted by the default path.
+    pub fn validate(&self) -> Result<(), ProviderContractError> {
+        self.validate_structure()?;
+        if self.retry.is_some() {
+            return Err(ProviderContractError::InvalidRetryDecision);
+        }
+        Ok(())
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminalOutcome {
-    Succeeded,
-    Failed,
-    Canceled,
+    pub fn validate_with(
+        &self,
+        now_unix_ms: u64,
+        verifier: &impl RetryProofSignatureVerifier,
+    ) -> Result<(), ProviderContractError> {
+        self.validate_structure()?;
+        if let Some(retry) = &self.retry {
+            retry.validate_with(now_unix_ms, verifier)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,7 +205,7 @@ pub struct ExecutionSnapshot {
     pub deployed_provider: DeployedProviderGeneration,
     pub lease_id: Option<String>,
     pub fence_generation: Option<u64>,
-    pub terminal_outcome: Option<TerminalOutcome>,
+    pub terminal_cause: Option<TerminalCause>,
     pub failure: Option<FailureResolution>,
     pub evidence_sequence: u64,
     pub evidence_event_digest: ContentDigest,
@@ -158,8 +222,9 @@ impl ExecutionSnapshot {
         if self.lease_id.is_some() != self.fence_generation.is_some()
             || self.fence_generation == Some(0)
             || self.evidence_sequence == 0
-            || self.state.is_terminal() != self.terminal_outcome.is_some()
-            || (self.terminal_outcome == Some(TerminalOutcome::Failed)) != self.failure.is_some()
+            || self.state.is_terminal() != self.terminal_cause.is_some()
+            || matches!(self.terminal_cause, Some(TerminalCause::Failed(_)))
+                != self.failure.is_some()
         {
             return Err(ProviderContractError::InvalidOperation(
                 "Execution state, lease, failure, or Evidence fields disagree",
@@ -188,34 +253,13 @@ impl CancelExecutionRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionState {
-    Proposed,
-    Admitted,
-    Provisioning,
-    Active,
-    Suspending,
-    Suspended,
-    Restoring,
-    Destroying,
-    Terminal,
-}
-
-impl SessionState {
-    #[must_use]
-    pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Terminal)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateSessionRequest {
     pub mutation: IdempotentMutation,
     pub capsule_digest: ContentDigest,
     pub seal_digest: ContentDigest,
-    pub sterile_template_digest: ContentDigest,
+    pub runtime_requirement: RuntimeSelectionRequirement,
     pub required_profiles: Vec<FeatureRequirement>,
 }
 
@@ -225,6 +269,7 @@ impl CreateSessionRequest {
         descriptor: &ProviderDescriptor,
     ) -> Result<(), ProviderContractError> {
         self.mutation.validate()?;
+        self.runtime_requirement.validate()?;
         descriptor.require_profiles(&self.required_profiles)
     }
 }
@@ -327,6 +372,25 @@ pub struct EvidenceExportReceipt {
     pub export_digest: ContentDigest,
     pub evidence_checkpoint_digest: ContentDigest,
     pub event_count: u64,
+    pub manifest: EvidenceExportManifest,
+}
+
+impl EvidenceExportReceipt {
+    pub fn validate(&self) -> Result<(), ProviderContractError> {
+        self.manifest.validate_structure()?;
+        let event_count = u64::try_from(self.manifest.events.len()).map_err(|_| {
+            ProviderContractError::InvalidRetention("Evidence export event count overflow")
+        })?;
+        if self.export_digest != self.manifest.digest()?
+            || self.evidence_checkpoint_digest != self.manifest.checkpoint.chain_root_digest
+            || self.event_count != event_count
+        {
+            return Err(ProviderContractError::InvalidRetention(
+                "Evidence export receipt does not match its typed manifest",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,7 +476,7 @@ pub struct SessionSnapshot {
     pub seal_digest: ContentDigest,
     pub deployed_provider: DeployedProviderGeneration,
     pub checkpoint_digest: Option<ContentDigest>,
-    pub terminal_outcome: Option<TerminalOutcome>,
+    pub terminal_cause: Option<TerminalCause>,
     pub failure: Option<FailureResolution>,
     pub evidence_sequence: u64,
     pub evidence_event_digest: ContentDigest,
@@ -424,8 +488,9 @@ impl SessionSnapshot {
         validate_identifier("Session tenant id", &self.tenant_id)?;
         self.deployed_provider.validate()?;
         if self.evidence_sequence == 0
-            || self.state.is_terminal() != self.terminal_outcome.is_some()
-            || (self.terminal_outcome == Some(TerminalOutcome::Failed)) != self.failure.is_some()
+            || self.state.is_terminal() != self.terminal_cause.is_some()
+            || matches!(self.terminal_cause, Some(TerminalCause::Failed(_)))
+                != self.failure.is_some()
         {
             return Err(ProviderContractError::InvalidOperation(
                 "Session state, failure, or Evidence fields disagree",
@@ -443,7 +508,14 @@ pub trait ProviderMetadataOperations {
 
     fn supported_contract_generations(&self) -> Result<ContractGenerationRange, Self::Error>;
     fn descriptor(&self) -> Result<ProviderDescriptor, Self::Error>;
-    fn runtime_inventory(&self) -> Result<Vec<RuntimeInventoryEntry>, Self::Error>;
+    fn inventory_authority_snapshot(&self)
+        -> Result<SignedInventoryAuthoritySnapshot, Self::Error>;
+    fn runtime_inventory(&self) -> Result<Vec<SignedRuntimeInventoryEntry>, Self::Error>;
+    fn capacity_observations(&self) -> Result<Vec<SignedCapacityObservation>, Self::Error>;
+    fn lease_capacity(
+        &self,
+        request: &CapacityLeaseRequest,
+    ) -> Result<CapacityLeaseReceipt, Self::Error>;
 }
 
 pub trait ExecutionOperations {
@@ -501,6 +573,24 @@ pub trait ProviderEvidenceOperations {
         &self,
         request: &EvidenceExportRequest,
     ) -> Result<EvidenceExportReceipt, Self::Error>;
+}
+
+pub trait ProviderExternalEffectOperations {
+    type Error;
+
+    fn append_effect_requested(
+        &self,
+        transition: &ExternalEffectTransition,
+    ) -> Result<ExternalEffectTransition, Self::Error>;
+    fn append_effect_terminal(
+        &self,
+        expected_requested_digest: &ContentDigest,
+        transition: &ExternalEffectTransition,
+    ) -> Result<ExternalEffectTransition, Self::Error>;
+    fn append_effect_reconciliation(
+        &self,
+        reconciliation: &ExternalEffectReconciliation,
+    ) -> Result<ExternalEffectReconciliation, Self::Error>;
 }
 
 pub trait CheckpointOperations {
@@ -570,9 +660,12 @@ pub trait Provider:
     + ExecutionOperations
     + SessionOperations
     + ProviderEvidenceOperations
+    + ProviderExternalEffectOperations
     + CheckpointOperations
     + PortableObjectOperations
     + TrustBoundaryOperations
+    + crate::SterileTemplatePublicationStore
+    + crate::DurablePoolManager
 {
 }
 
@@ -581,8 +674,11 @@ impl<T> Provider for T where
         + ExecutionOperations
         + SessionOperations
         + ProviderEvidenceOperations
+        + ProviderExternalEffectOperations
         + CheckpointOperations
         + PortableObjectOperations
         + TrustBoundaryOperations
+        + crate::SterileTemplatePublicationStore
+        + crate::DurablePoolManager
 {
 }

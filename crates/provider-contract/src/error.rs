@@ -56,6 +56,10 @@ pub enum ProviderContractError {
     InvalidInvocation(&'static str),
     #[error("conformance metadata is invalid: {0}")]
     InvalidConformance(&'static str),
+    #[error("attestation is invalid: {0}")]
+    InvalidAttestation(&'static str),
+    #[error("retention or Evidence export is invalid: {0}")]
+    InvalidRetention(&'static str),
     #[error("canonical Provider contract JSON failed: {0}")]
     Json(String),
 }

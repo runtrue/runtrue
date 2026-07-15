@@ -1,7 +1,7 @@
 use crate::{
     canonical::{
-        canonical_digest, validate_collection_size, validate_identifier, validate_profile_name,
-        validate_text, MAX_SHORT_TEXT_BYTES,
+        canonical_bytes, canonical_digest, validate_collection_size, validate_identifier,
+        validate_profile_name, validate_text, MAX_SHORT_TEXT_BYTES,
     },
     ProviderContractError,
 };
@@ -12,6 +12,60 @@ use std::collections::{BTreeMap, BTreeSet};
 const PROVIDER_IDENTITY_DOMAIN: &[u8] = b"runtrue.provider.identity.v1\0";
 const DEPLOYED_GENERATION_DOMAIN: &[u8] = b"runtrue.provider.deployed-generation.v1\0";
 const INVENTORY_DOMAIN: &[u8] = b"runtrue.provider.runtime-inventory.v1\0";
+const CAPACITY_DOMAIN: &[u8] = b"runtrue.provider.capacity-observation.v1\0";
+const INVENTORY_SIGNATURE_DOMAIN: &[u8] = b"runtrue.provider.runtime-inventory-signature.v1\0";
+const CAPACITY_SIGNATURE_DOMAIN: &[u8] = b"runtrue.provider.capacity-signature.v1\0";
+const INVENTORY_AUTHORITY_SIGNATURE_DOMAIN: &[u8] =
+    b"runtrue.provider.inventory-authority-signature.v1\0";
+
+pub trait ProviderContractSignatureVerifier {
+    fn verify_provider_signature(
+        &self,
+        provider: &ProviderIdentity,
+        signing_key_generation: u64,
+        algorithm: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> bool;
+}
+
+pub trait InventoryAuthoritySignatureVerifier {
+    fn verify_inventory_authority_signature(
+        &self,
+        authority_identity_digest: &ContentDigest,
+        signing_key_id: &ContentDigest,
+        signing_key_generation: u64,
+        algorithm: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> bool;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderContractSignature {
+    pub algorithm: String,
+    pub signing_key_generation: u64,
+    pub signature: Vec<u8>,
+}
+
+impl ProviderContractSignature {
+    fn validate_for(
+        &self,
+        deployed: &DeployedProviderGeneration,
+    ) -> Result<(), ProviderContractError> {
+        validate_profile_name(&self.algorithm)?;
+        if self.signing_key_generation != deployed.signing_key_generation
+            || self.signature.is_empty()
+            || self.signature.len() > 16 * 1024
+        {
+            return Err(ProviderContractError::InvalidInventory(
+                "Provider signature is malformed or uses another key generation",
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -311,6 +365,136 @@ pub struct RuntimeInventoryEntry {
     pub feature_profiles: BTreeSet<FeatureProfileId>,
 }
 
+/// Caller-pinned view of the Provider posture that is current for admission.
+/// Signed inventory remains immutable, but it is usable only while this
+/// independently authenticated authority snapshot admits its generations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InventoryAuthoritySnapshot {
+    pub snapshot_version: u32,
+    pub expected_deployed_provider: DeployedProviderGeneration,
+    pub minimum_inventory_generation: u64,
+    pub minimum_security_generation: u64,
+    pub current_revocation_generation: u64,
+    pub valid_from_unix_ms: u64,
+    pub expires_unix_ms: u64,
+    pub authority_evidence_digest: ContentDigest,
+}
+
+impl InventoryAuthoritySnapshot {
+    pub fn validate(&self, now_unix_ms: u64) -> Result<(), ProviderContractError> {
+        self.expected_deployed_provider.validate()?;
+        if self.snapshot_version != 1
+            || self.minimum_inventory_generation == 0
+            || self.minimum_security_generation == 0
+            || self.current_revocation_generation == 0
+            || self.valid_from_unix_ms == 0
+            || self.expires_unix_ms <= self.valid_from_unix_ms
+            || now_unix_ms < self.valid_from_unix_ms
+            || now_unix_ms >= self.expires_unix_ms
+        {
+            return Err(ProviderContractError::InvalidInventory(
+                "inventory authority snapshot is malformed, stale, or not yet valid",
+            ));
+        }
+        Ok(())
+    }
+
+    fn authorize(
+        &self,
+        inventory: &RuntimeInventoryEntry,
+        now_unix_ms: u64,
+    ) -> Result<(), ProviderContractError> {
+        self.validate(now_unix_ms)?;
+        inventory.validate()?;
+        if inventory.deployed_provider.digest()? != self.expected_deployed_provider.digest()?
+            || inventory.inventory_generation < self.minimum_inventory_generation
+            || inventory.security_generation < self.minimum_security_generation
+            || inventory.revocation_generation != self.current_revocation_generation
+        {
+            return Err(ProviderContractError::InvalidInventory(
+                "inventory is outside the current Provider security or revocation posture",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedInventoryAuthoritySnapshot {
+    pub snapshot: InventoryAuthoritySnapshot,
+    pub snapshot_digest: ContentDigest,
+    pub authority_identity_digest: ContentDigest,
+    pub signing_key_id: ContentDigest,
+    pub signing_key_generation: u64,
+    pub signature_algorithm: String,
+    pub signature: Vec<u8>,
+}
+
+impl SignedInventoryAuthoritySnapshot {
+    pub fn signature_message(&self, now_unix_ms: u64) -> Result<Vec<u8>, ProviderContractError> {
+        self.snapshot.validate(now_unix_ms)?;
+        validate_profile_name(&self.signature_algorithm)?;
+        let actual = canonical_digest(
+            b"runtrue.provider.inventory-authority-snapshot.v1\0",
+            &self.snapshot,
+        )?;
+        if actual != self.snapshot_digest
+            || self.signing_key_generation == 0
+            || self.signature.is_empty()
+            || self.signature.len() > 16 * 1024
+        {
+            return Err(ProviderContractError::InvalidInventory(
+                "inventory authority signature metadata or digest is invalid",
+            ));
+        }
+        let canonical = canonical_bytes(&(
+            &self.snapshot_digest,
+            &self.authority_identity_digest,
+            &self.signing_key_id,
+            self.signing_key_generation,
+            &self.signature_algorithm,
+        ))?;
+        let mut message =
+            Vec::with_capacity(INVENTORY_AUTHORITY_SIGNATURE_DOMAIN.len() + canonical.len());
+        message.extend_from_slice(INVENTORY_AUTHORITY_SIGNATURE_DOMAIN);
+        message.extend_from_slice(&canonical);
+        Ok(message)
+    }
+
+    pub fn verify_with(
+        &self,
+        now_unix_ms: u64,
+        verifier: &impl InventoryAuthoritySignatureVerifier,
+    ) -> Result<(), ProviderContractError> {
+        let message = self.signature_message(now_unix_ms)?;
+        if !verifier.verify_inventory_authority_signature(
+            &self.authority_identity_digest,
+            &self.signing_key_id,
+            self.signing_key_generation,
+            &self.signature_algorithm,
+            &message,
+            &self.signature,
+        ) {
+            return Err(ProviderContractError::InvalidInventory(
+                "inventory authority signature verification failed",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn authorize(
+        &self,
+        inventory: &RuntimeInventoryEntry,
+        now_unix_ms: u64,
+        verifier: &impl InventoryAuthoritySignatureVerifier,
+    ) -> Result<(), ProviderContractError> {
+        self.verify_with(now_unix_ms, verifier)?;
+        self.snapshot.authorize(inventory, now_unix_ms)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSelectionRequirement {
@@ -374,9 +558,12 @@ impl RuntimeSelectionRequirement {
     pub fn require_exact_match(
         &self,
         inventory: &RuntimeInventoryEntry,
+        authority: &SignedInventoryAuthoritySnapshot,
+        now_unix_ms: u64,
+        verifier: &impl InventoryAuthoritySignatureVerifier,
     ) -> Result<(), ProviderContractError> {
         self.validate()?;
-        inventory.validate()?;
+        authority.authorize(inventory, now_unix_ms, verifier)?;
         let provider_identity = inventory.deployed_provider.provider.digest()?;
         let matches = inventory.runtime_compatibility_digest == self.runtime_compatibility_digest
             && self
@@ -484,6 +671,63 @@ impl RuntimeInventoryEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedRuntimeInventoryEntry {
+    pub inventory: RuntimeInventoryEntry,
+    pub inventory_digest: ContentDigest,
+    pub signature: ProviderContractSignature,
+}
+
+impl SignedRuntimeInventoryEntry {
+    pub fn validate_structure(&self) -> Result<(), ProviderContractError> {
+        self.inventory.validate()?;
+        self.signature
+            .validate_for(&self.inventory.deployed_provider)?;
+        if self.inventory.digest()? != self.inventory_digest {
+            return Err(ProviderContractError::InvalidInventory(
+                "signed inventory digest mismatch",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn signature_message(&self) -> Result<Vec<u8>, ProviderContractError> {
+        self.validate_structure()?;
+        let canonical = canonical_bytes(&(
+            &self.inventory_digest,
+            &self.signature.algorithm,
+            self.signature.signing_key_generation,
+        ))?;
+        let mut message = Vec::with_capacity(INVENTORY_SIGNATURE_DOMAIN.len() + canonical.len());
+        message.extend_from_slice(INVENTORY_SIGNATURE_DOMAIN);
+        message.extend_from_slice(&canonical);
+        Ok(message)
+    }
+
+    pub fn verify_with(
+        &self,
+        authority: &SignedInventoryAuthoritySnapshot,
+        now_unix_ms: u64,
+        verifier: &(impl ProviderContractSignatureVerifier + InventoryAuthoritySignatureVerifier),
+    ) -> Result<(), ProviderContractError> {
+        authority.authorize(&self.inventory, now_unix_ms, verifier)?;
+        let message = self.signature_message()?;
+        if !verifier.verify_provider_signature(
+            &self.inventory.deployed_provider.provider,
+            self.signature.signing_key_generation,
+            &self.signature.algorithm,
+            &message,
+            &self.signature.signature,
+        ) {
+            return Err(ProviderContractError::InvalidInventory(
+                "inventory signature verification failed",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Mutable, expiring scheduling hint bound to one exact immutable inventory
 /// entry. It is never proof of runtime identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -515,6 +759,81 @@ impl CapacityObservation {
             && self.inventory_digest == inventory.digest()?
             && provider_matches;
         if !valid {
+            return Err(ProviderContractError::InvalidCapacityObservation);
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<ContentDigest, ProviderContractError> {
+        self.producer.validate()?;
+        if self.observation_sequence == 0 || self.expires_unix_ms <= self.observed_unix_ms {
+            return Err(ProviderContractError::InvalidCapacityObservation);
+        }
+        canonical_digest(CAPACITY_DOMAIN, self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedCapacityObservation {
+    pub observation: CapacityObservation,
+    pub observation_digest: ContentDigest,
+    pub deployed_provider: DeployedProviderGeneration,
+    pub signature: ProviderContractSignature,
+}
+
+impl SignedCapacityObservation {
+    pub fn validate_against(
+        &self,
+        inventory: &SignedRuntimeInventoryEntry,
+        now_unix_ms: u64,
+    ) -> Result<(), ProviderContractError> {
+        inventory.validate_structure()?;
+        self.deployed_provider.validate()?;
+        self.signature.validate_for(&self.deployed_provider)?;
+        self.observation
+            .validate_against(&inventory.inventory, now_unix_ms)?;
+        if self.observation.digest()? != self.observation_digest
+            || self.deployed_provider.digest()? != inventory.inventory.deployed_provider.digest()?
+        {
+            return Err(ProviderContractError::InvalidCapacityObservation);
+        }
+        Ok(())
+    }
+
+    pub fn signature_message(
+        &self,
+        inventory: &SignedRuntimeInventoryEntry,
+        now_unix_ms: u64,
+    ) -> Result<Vec<u8>, ProviderContractError> {
+        self.validate_against(inventory, now_unix_ms)?;
+        let canonical = canonical_bytes(&(
+            &self.observation_digest,
+            &self.signature.algorithm,
+            self.signature.signing_key_generation,
+        ))?;
+        let mut message = Vec::with_capacity(CAPACITY_SIGNATURE_DOMAIN.len() + canonical.len());
+        message.extend_from_slice(CAPACITY_SIGNATURE_DOMAIN);
+        message.extend_from_slice(&canonical);
+        Ok(message)
+    }
+
+    pub fn verify_with(
+        &self,
+        inventory: &SignedRuntimeInventoryEntry,
+        authority: &SignedInventoryAuthoritySnapshot,
+        now_unix_ms: u64,
+        verifier: &(impl ProviderContractSignatureVerifier + InventoryAuthoritySignatureVerifier),
+    ) -> Result<(), ProviderContractError> {
+        inventory.verify_with(authority, now_unix_ms, verifier)?;
+        let message = self.signature_message(inventory, now_unix_ms)?;
+        if !verifier.verify_provider_signature(
+            &self.deployed_provider.provider,
+            self.signature.signing_key_generation,
+            &self.signature.algorithm,
+            &message,
+            &self.signature.signature,
+        ) {
             return Err(ProviderContractError::InvalidCapacityObservation);
         }
         Ok(())
