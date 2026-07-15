@@ -1,7 +1,8 @@
 # ADR 0002: Policy-selected execution isolation
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR 0010
 - **Date:** 2026-07-15
+- **Superseded:** 2026-07-15
 
 ## Context
 
