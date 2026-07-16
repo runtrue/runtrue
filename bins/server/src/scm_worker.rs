@@ -408,12 +408,11 @@ where
         }
         let installation_id = parse_github_external_id(&installation.external_id)?;
         let repository_id = parse_github_external_id(&repository.external_repository_id)?;
-        let now_unix_seconds =
-            unix_ms().map_err(|_| ScmSourceFetchError::CredentialUnavailable)? / 1_000;
+        let now_unix_seconds = unix_ms().map_err(|_| ScmSourceFetchError::Unavailable)? / 1_000;
         let token = self
             .broker
             .lock()
-            .map_err(|_| ScmSourceFetchError::CredentialUnavailable)?
+            .map_err(|_| ScmSourceFetchError::Unavailable)?
             .mint_installation_token(
                 InstallationTokenRequest {
                     installation_id,
@@ -426,7 +425,7 @@ where
                 now_unix_seconds,
             )
             .and_then(|token| token.into_repository_read_credential(repository_id))
-            .map_err(|_| ScmSourceFetchError::CredentialUnavailable)?;
+            .map_err(classify_repository_credential_error)?;
         GitHubRepositoryAccessToken::from_scoped_credential(
             &installation.external_id,
             &repository.external_repository_id,
@@ -596,6 +595,29 @@ where
                 _ => ScmSourceFetchError::Rejected,
             })?;
         Ok(permission.can_approve_workflow() && head.eq_ignore_ascii_case(expected_head_commit))
+    }
+}
+
+fn classify_repository_credential_error(error: GitHubError) -> ScmSourceFetchError {
+    match error {
+        GitHubError::RateLimited { .. }
+        | GitHubError::ResponseTooLarge
+        | GitHubError::MalformedResponse
+        | GitHubError::UnexpectedStatus(408 | 425 | 500..=599)
+        | GitHubError::Transport
+        | GitHubError::JwtProvider => ScmSourceFetchError::Unavailable,
+        GitHubError::InvalidConfiguration
+        | GitHubError::InvalidInstallState
+        | GitHubError::InvalidInstallation
+        | GitHubError::InstallationSubstitution
+        | GitHubError::InsufficientInstallationPermissions
+        | GitHubError::RepositoryCatalogTooLarge
+        | GitHubError::InvalidTokenScope
+        | GitHubError::InvalidCheckRequest
+        | GitHubError::RequestTooLarge
+        | GitHubError::UnexpectedStatus(_)
+        | GitHubError::AmbiguousCheckReconciliation
+        | GitHubError::PartialPublish { .. } => ScmSourceFetchError::CredentialUnavailable,
     }
 }
 
@@ -912,12 +934,19 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
         let installation = self
             .control_plane
             .scm_installation_for_tenant(tenant_id, installation_id)
-            .map_err(|_| RepositoryActionResolveError::Unauthorized)?;
+            .map_err(|_| {
+                eprintln!("repository action authorization failed: installation lookup");
+                RepositoryActionResolveError::Unauthorized
+            })?;
         if installation.status != "active" || installation.provider != "github" {
+            eprintln!("repository action authorization failed: installation state");
             return Err(RepositoryActionResolveError::Unauthorized);
         }
         let external_installation_id = parse_github_external_id(&installation.external_id)
-            .map_err(|_| RepositoryActionResolveError::Unauthorized)?;
+            .map_err(|_| {
+                eprintln!("repository action authorization failed: installation binding");
+                RepositoryActionResolveError::Unauthorized
+            })?;
         let now_unix_seconds =
             unix_ms().map_err(|_| RepositoryActionResolveError::Unavailable)? / 1_000;
         let snapshot = self
@@ -927,12 +956,18 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
                 GitHubError::Transport | GitHubError::RateLimited { .. } => {
                     RepositoryActionResolveError::Unavailable
                 }
-                _ => RepositoryActionResolveError::Unauthorized,
+                _ => {
+                    eprintln!(
+                        "repository action authorization failed: installation inspection ({error})"
+                    );
+                    RepositoryActionResolveError::Unauthorized
+                }
             })?;
         if snapshot.installation_id != external_installation_id
             || snapshot.suspended_at.is_some()
             || !snapshot.repository_catalog_complete
         {
+            eprintln!("repository action authorization failed: installation snapshot");
             return Err(RepositoryActionResolveError::Unauthorized);
         }
         let source = snapshot
@@ -945,7 +980,10 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
                     && !repository.archived
                     && !repository.disabled
             })
-            .ok_or(RepositoryActionResolveError::Unauthorized)?;
+            .ok_or_else(|| {
+                eprintln!("repository action authorization failed: source repository access");
+                RepositoryActionResolveError::Unauthorized
+            })?;
         let repository_id = format!("github-action-source-{}", source.id);
         let link = ScmRepositoryLinkRecord {
             repository_id: repository_id.clone(),
@@ -976,6 +1014,9 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
                 ScmSourceFetchError::Unavailable => RepositoryActionResolveError::Unavailable,
                 ScmSourceFetchError::CredentialUnavailable
                 | ScmSourceFetchError::BindingMismatch => {
+                    eprintln!(
+                        "repository action authorization failed: source credential ({error})"
+                    );
                     RepositoryActionResolveError::Unauthorized
                 }
                 ScmSourceFetchError::Rejected => RepositoryActionResolveError::Rejected,
@@ -5064,6 +5105,35 @@ fn github_provider_ids_and_permissions_fail_closed() {
         "metadata": "read",
         "checks": "read"
     })));
+}
+
+#[test]
+fn repository_credential_failures_distinguish_outages_from_denials() {
+    for error in [
+        GitHubError::Transport,
+        GitHubError::JwtProvider,
+        GitHubError::RateLimited {
+            retry_after_seconds: 30,
+        },
+        GitHubError::UnexpectedStatus(503),
+        GitHubError::MalformedResponse,
+    ] {
+        assert!(matches!(
+            classify_repository_credential_error(error),
+            ScmSourceFetchError::Unavailable
+        ));
+    }
+    for error in [
+        GitHubError::InvalidInstallation,
+        GitHubError::InsufficientInstallationPermissions,
+        GitHubError::InvalidTokenScope,
+        GitHubError::UnexpectedStatus(403),
+    ] {
+        assert!(matches!(
+            classify_repository_credential_error(error),
+            ScmSourceFetchError::CredentialUnavailable
+        ));
+    }
 }
 
 #[test]
