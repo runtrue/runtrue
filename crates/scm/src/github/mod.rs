@@ -8,7 +8,9 @@
 
 use thiserror::Error;
 
-pub const GITHUB_API_VERSION: &str = "2026-03-10";
+// GHES 3.19 rejects the newer 2026-03-10 contract with HTTP 400. Keep the
+// provider on the API version shared by GitHub.com and supported GHES releases.
+pub const GITHUB_API_VERSION: &str = "2022-11-28";
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TOKEN_BYTES: usize = 8192;
