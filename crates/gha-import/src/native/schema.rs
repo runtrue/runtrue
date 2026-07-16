@@ -278,6 +278,10 @@ pub(crate) struct NativeRunner {
     pub(crate) arch: &'static str,
     pub(crate) isolation: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cpu: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) memory: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) image: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) capabilities: Vec<String>,

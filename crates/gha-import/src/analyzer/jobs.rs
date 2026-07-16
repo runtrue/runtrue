@@ -539,6 +539,13 @@ impl Analyzer {
             } else {
                 "microvm"
             },
+            // A repository component is bounded by the WASM executor rather
+            // than by the GitHub-hosted VM profile named in `runs-on`.
+            // Declare that smaller profile explicitly so the native workflow
+            // does not inherit the AST's 4 GiB microVM default and get
+            // rejected by the executor's 256 MiB ceiling.
+            cpu: wasm_component.then_some(1),
+            memory: wasm_component.then_some("256MiB"),
             image,
             capabilities,
         }

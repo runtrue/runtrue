@@ -409,6 +409,8 @@ jobs:
     let workflow = ast::parse_yaml(yaml).unwrap();
     let job = &workflow.jobs["backport"];
     assert_eq!(job.runner.isolation, ast::Isolation::Wasm);
+    assert_eq!(job.runner.cpu, 1);
+    assert_eq!(job.runner.memory, "256MiB");
     assert_eq!(job.steps[0].uses.as_deref(), Some(component.as_str()));
     assert!(job.steps[0].run.is_none());
     let lock = LockFile::parse(result.lockfile_toml.as_deref().unwrap().as_bytes()).unwrap();
