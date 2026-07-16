@@ -6,7 +6,9 @@ use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
+    sync::Arc,
 };
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub(super) struct LeaseAdmissionGate {
@@ -23,6 +25,26 @@ pub(super) struct LeaseAdmissionPermit {
     // The shared lock is intentionally held until the active execution is
     // completely reported and dropped.
     _lease: File,
+}
+
+/// Run connection-bound blocking work while retaining its active-lease permit.
+///
+/// A `spawn_blocking` task is detached when its `JoinHandle` is dropped. Moving
+/// the permit into the task prevents a failed control stream (or cancellation
+/// of the async caller) from making image admission look safe while source
+/// hydration or an execution backend is still using the old runner session.
+pub(super) fn spawn_admission_bound_blocking<F, R>(
+    permit: Option<Arc<LeaseAdmissionPermit>>,
+    operation: F,
+) -> JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation()
+    })
 }
 
 impl LeaseAdmissionGate {
@@ -117,6 +139,7 @@ fn try_flock(file: &File, operation: FlockOperation, path: &Path) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     #[test]
     fn admission_excludes_new_leases_and_waits_for_existing_permits() {
@@ -175,5 +198,52 @@ mod tests {
             LeaseAdmissionGate::new(PathBuf::from("admission.lock")).try_acquire(),
             Err(StateError::UnsafePath(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn detached_blocking_work_retains_the_lease_permit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("admission.lock");
+        let gate = LeaseAdmissionGate::new(path.clone());
+        let permit = match gate.try_acquire().unwrap() {
+            PermitAttempt::Acquired(permit) => Arc::new(permit),
+            PermitAttempt::AdmissionPending => panic!("permit was unexpectedly blocked"),
+        };
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let task = spawn_admission_bound_blocking(Some(Arc::clone(&permit)), move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        // Model the async caller being dropped by a failed runner connection.
+        // Its background source/backend work must continue to exclude image
+        // admission until that work has actually stopped.
+        drop(permit);
+        let admission_gate = open_lock(&path).unwrap();
+        assert!(try_flock(
+            &admission_gate,
+            FlockOperation::NonBlockingLockExclusive,
+            &path
+        )
+        .unwrap());
+        let lease_path = lease_path(&path);
+        let admission_leases = open_lock(&lease_path).unwrap();
+        assert!(!try_flock(
+            &admission_leases,
+            FlockOperation::NonBlockingLockExclusive,
+            &lease_path
+        )
+        .unwrap());
+
+        release_tx.send(()).unwrap();
+        task.await.unwrap();
+        assert!(try_flock(
+            &admission_leases,
+            FlockOperation::NonBlockingLockExclusive,
+            &lease_path
+        )
+        .unwrap());
     }
 }

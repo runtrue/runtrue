@@ -47,7 +47,7 @@ pub struct RunnerDaemonConfig {
 }
 
 use super::{
-    admission_gate::{LeaseAdmissionGate, PermitAttempt},
+    admission_gate::{spawn_admission_bound_blocking, LeaseAdmissionGate, PermitAttempt},
     clock::failed_execution_outcome,
     clock::{
         deadline_instant, duration, now_unix_ms, random_connection_id, timestamp, timestamp_millis,
@@ -541,20 +541,30 @@ where
             let hydration_broker = broker.clone().ok_or(RunnerError::BrokerUnavailable)?;
             let hydration_cancelled = Arc::new(AtomicBool::new(false));
             let task_cancelled = hydration_cancelled.clone();
-            let mut hydration = tokio::task::spawn_blocking(move || {
-                hydrate_source(
-                    &hydration_lease,
-                    &hydration_workspace,
-                    &hydration_manager,
-                    hydration_broker,
-                    task_cancelled,
-                )
-            });
+            let hydration_admission_permit = admission_permit.clone();
+            let mut hydration =
+                spawn_admission_bound_blocking(hydration_admission_permit, move || {
+                    hydrate_source(
+                        &hydration_lease,
+                        &hydration_workspace,
+                        &hydration_manager,
+                        hydration_broker,
+                        task_cancelled,
+                    )
+                });
             let mut cancelled = false;
             let hydration = tokio::select! {
                     result = &mut hydration => result,
                     control = self.transport.next_control() => {
-                        let Some(control) = control? else {
+                        let control = match control {
+                            Ok(control) => control,
+                            Err(error) => {
+                                hydration_cancelled.store(true, Ordering::Release);
+                                let _ = hydration.await;
+                                return Err(error.into());
+                            }
+                        };
+                        let Some(control) = control else {
                             hydration_cancelled.store(true, Ordering::Release);
                             let _ = hydration.await;
                             return Err(RunnerError::ControlStreamClosed);
@@ -682,11 +692,7 @@ where
             broker,
             step_state_observer: Some(observer),
         };
-        let task = tokio::task::spawn_blocking(move || {
-            // Keep the permit in the blocking task as well as ActiveExecution.
-            // If the daemon/session is torn down, admission cannot mutate the
-            // image store until cancellation has actually stopped the backend.
-            let _admission_permit = task_admission_permit;
+        let task = spawn_admission_bound_blocking(task_admission_permit, move || {
             let mut outcome = executor.execute_with_services(
                 &task_lease,
                 &task_workspace,
