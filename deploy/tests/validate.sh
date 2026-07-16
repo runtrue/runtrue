@@ -217,7 +217,7 @@ fi
 if command -v systemd-analyze >/dev/null 2>&1; then
   systemd_output=$(systemd-analyze verify "${DEPLOY_DIR}"/systemd/*.service 2>&1 || true)
   unexpected=$(printf '%s\n' "$systemd_output" |
-    grep -vE '(^$|Command /usr/libexec/runtrue/runtrue-(server|runner|backup) is not executable: No such file or directory)' || true)
+    grep -vE '(^$|Command /usr/libexec/runtrue/runtrue-(server|runner|backup|action-builder) is not executable: No such file or directory)' || true)
   [[ -z "$unexpected" ]] || fail "systemd unit verification failed: ${unexpected}"
 fi
 

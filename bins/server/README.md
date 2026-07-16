@@ -37,6 +37,22 @@ and other planner inputs through bounded Git object reads at the full commit IDs
 already present in the authenticated event. Mirror refresh is an independent
 operator responsibility.
 
+With the `github-actions` feature, workflows may reference a root action as
+`owner/repository@<40-character lowercase commit>`. The worker accepts only a
+Docker action whose exact commit contains one strict `action.yml` or
+`action.yaml`; tags, branches, subdirectory actions, JavaScript actions, and
+composite actions remain rejected. Authorization comes from the tenant's live
+GitHub App installation catalog, so the action repository does not need to be
+enabled as a Runtrue execution repository.
+
+Repository-action builds are disabled unless both
+`RUNTRUE_REPOSITORY_ACTION_BUILDER_SOCKET` and
+`RUNTRUE_REPOSITORY_ACTION_CONTEXT_ROOT` are configured. The server stages the
+exact Git tree into a private content-addressed context and sends only a bounded
+build request over the Unix socket. The separate trusted builder emits an OCI
+archive, returns its exact manifest digest, and admits the signed, preloaded
+image to the worker; the server never receives Docker or Podman access.
+
 Each claimed `scm.event` is re-verified before planning. Pushes and merge-group
 events use their exact source commit. Pull requests test the head commit with
 the exact target/base workflow and lockfile. A changed proposed definition is

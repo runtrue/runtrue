@@ -356,6 +356,9 @@ Install into a staging host and review the paths before enabling anything:
 sudo install -D -m 0755 target/release/runtrue-server /usr/libexec/runtrue/runtrue-server
 sudo install -D -m 0755 target/release/runtrue-runner /usr/libexec/runtrue/runtrue-runner
 sudo install -D -m 0755 target/release/runtrue-backup /usr/libexec/runtrue/runtrue-backup
+sudo install -D -m 0755 target/release/runtrue-action-builder /usr/libexec/runtrue/runtrue-action-builder
+sudo install -D -m 0755 target/release/runtrue-image /usr/libexec/runtrue/runtrue-image
+sudo install -D -m 0755 deploy/runtrue-admit-action-image /usr/local/libexec/runtrue-admit-action-image
 sudo install -D -m 0644 deploy/systemd/runtrue.sysusers /usr/lib/sysusers.d/runtrue.conf
 sudo install -D -m 0644 deploy/systemd/runtrue.tmpfiles /usr/lib/tmpfiles.d/runtrue.conf
 sudo systemd-sysusers /usr/lib/sysusers.d/runtrue.conf
@@ -363,6 +366,18 @@ sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/runtrue.conf
 sudo install -m 0644 deploy/systemd/server.env.example /etc/runtrue/server.env
 sudo install -m 0644 deploy/systemd/runtrue-server.service /etc/systemd/system/runtrue-server.service
 ```
+
+Exact-commit repository Docker actions are an optional same-host extension for
+a configured OCI runner. Create the `runtrue-actions-builder` Buildx instance
+under the same `DOCKER_CONFIG` used by the service, generate a dedicated image
+signing key with `runtrue-image keygen`, and install the public key where the
+runner can verify it. Then review and install
+`action-builder.env.example` and `runtrue-action-builder.service`, and enable
+the two repository-action paths in `server.env`. The builder exports a local
+OCI archive and admits its exact digest into the worker's private Podman store;
+it does not give the control-plane server a container-engine socket. Existing
+verified assignments are reused without restarting the runner, and new images
+wait for the runner to become idle before changing the shared store.
 
 Create the bootstrap credential once without shell tracing or overwrite:
 
