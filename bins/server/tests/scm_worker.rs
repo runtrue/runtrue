@@ -9,9 +9,22 @@ use runtrue_scm::{
     ActorIdentity, CheckRunRequest, EventEnvelope, EventType, GitRevision, IssueCommentAction,
     IssueCommentEvent, ProviderKind, PullRequestAction, PullRequestEvent, RepositoryIdentity,
 };
+#[cfg(feature = "github-actions")]
+use runtrue_scm::{
+    GitHubAccount, GitHubAccountKind, GitHubError, GitHubInstallationProvider,
+    GitHubInstallationRepository, GitHubInstallationSnapshot, GitHubPermission,
+    GitHubPermissionLevel, GitHubProviderEndpoints, GitHubRepositorySelection,
+    GitHubRepositoryVisibility,
+};
 use runtrue_server::{
-    AppState, FetchedScmRepository, GitHubCheckPublisher, PublishedScmCheck, ScmCheckPublishError,
-    ScmSourceFetchError, ScmSourceFetchRequest, ScmSourceFetcher, ScmWorkerConfig, ScmWorkerTick,
+    AppState, FetchedScmRepository, GitHubCheckPublisher, PreparedRepositoryAction,
+    PublishedScmCheck, RepositoryActionResolveError, RepositoryActionResolver,
+    ScmCheckPublishError, ScmSourceFetchError, ScmSourceFetchRequest, ScmSourceFetcher,
+    ScmWorkerConfig, ScmWorkerTick,
+};
+#[cfg(feature = "github-actions")]
+use runtrue_server::{
+    GitHubRepositoryActionResolver, RepositoryActionBuildRequest, RepositoryActionBuilder,
 };
 use runtrue_workflow_ir::{ExecutionCapsule, Isolation};
 use std::{
@@ -45,6 +58,97 @@ struct FixtureSourceFetcher {
 
 #[derive(Debug)]
 struct UnavailableSourceFetcher;
+
+#[derive(Debug)]
+struct FixtureRepositoryActionResolver {
+    requests: Mutex<Vec<(String, String, String)>>,
+    image: String,
+}
+
+#[cfg(feature = "github-actions")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedRepositoryActionBuild {
+    tenant_id: String,
+    repository_id: String,
+    reference: String,
+    commit: String,
+    metadata_digest: ContentDigest,
+    dockerfile: String,
+    dockerfile_bytes: Vec<u8>,
+}
+
+#[cfg(feature = "github-actions")]
+#[derive(Debug)]
+struct FixtureRepositoryActionBuilder {
+    requests: Mutex<Vec<RecordedRepositoryActionBuild>>,
+    image: String,
+}
+
+#[cfg(feature = "github-actions")]
+#[derive(Debug)]
+struct FixtureGitHubInstallationProvider {
+    snapshot: GitHubInstallationSnapshot,
+}
+
+#[cfg(feature = "github-actions")]
+impl GitHubInstallationProvider for FixtureGitHubInstallationProvider {
+    fn inspect_installation(
+        &self,
+        installation_id: u64,
+        _now_unix_seconds: u64,
+    ) -> Result<GitHubInstallationSnapshot, GitHubError> {
+        if installation_id != self.snapshot.installation_id {
+            return Err(GitHubError::InvalidInstallation);
+        }
+        Ok(self.snapshot.clone())
+    }
+}
+
+#[cfg(feature = "github-actions")]
+impl RepositoryActionBuilder for FixtureRepositoryActionBuilder {
+    fn build(
+        &self,
+        request: RepositoryActionBuildRequest<'_>,
+    ) -> Result<String, RepositoryActionResolveError> {
+        let dockerfile = request
+            .repository
+            .read_blob(request.commit, request.dockerfile)
+            .map_err(|_| RepositoryActionResolveError::Rejected)?;
+        self.requests
+            .lock()
+            .unwrap()
+            .push(RecordedRepositoryActionBuild {
+                tenant_id: request.tenant_id.to_owned(),
+                repository_id: request.repository_id.to_owned(),
+                reference: request.reference.to_owned(),
+                commit: request.commit.to_owned(),
+                metadata_digest: request.metadata_digest.clone(),
+                dockerfile: request.dockerfile.to_owned(),
+                dockerfile_bytes: dockerfile.bytes,
+            });
+        Ok(self.image.clone())
+    }
+}
+
+impl RepositoryActionResolver for FixtureRepositoryActionResolver {
+    fn resolve(
+        &self,
+        tenant_id: &str,
+        installation_id: &str,
+        reference: &str,
+    ) -> Result<PreparedRepositoryAction, RepositoryActionResolveError> {
+        self.requests.lock().unwrap().push((
+            tenant_id.to_owned(),
+            installation_id.to_owned(),
+            reference.to_owned(),
+        ));
+        Ok(PreparedRepositoryAction {
+            reference: reference.to_owned(),
+            image: self.image.clone(),
+            metadata_digest: ContentDigest::sha256(b"exact action.yml"),
+        })
+    }
+}
 
 #[derive(Debug)]
 struct FixtureCheckPublisher {
@@ -221,6 +325,42 @@ impl MirrorFixture {
         .expect("proposed workflow");
         git(&repository, &["add", "."]);
         git(&repository, &["commit", "--quiet", "-m", "proposed"]);
+        let source = output(&repository, &["rev-parse", "HEAD"]);
+        Self {
+            root: root.path().to_owned(),
+            _root: root,
+            base,
+            source,
+        }
+    }
+
+    fn repository_action_pull_request(reference: &str) -> Self {
+        let root = tempfile::tempdir().expect("mirror root");
+        secure_mode(root.path());
+        let repository = root.path().join("octo").join("runtrue");
+        fs::create_dir_all(repository.join(".github/workflows")).expect("workflow directory");
+        secure_mode(&root.path().join("octo"));
+        secure_mode(&repository);
+        git(&repository, &["init", "--quiet"]);
+        git(
+            &repository,
+            &["config", "user.email", "worker@runtrue.invalid"],
+        );
+        git(&repository, &["config", "user.name", "SCM Worker Test"]);
+        let workflow_path = ".github/workflows/backport.yml";
+        fs::write(
+            repository.join(workflow_path),
+            format!(
+                "name: Backport\non: [pull_request]\npermissions:\n  contents: read\njobs:\n  reconcile:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: {reference}\n        with:\n          config-path: .github/backport.yml\n"
+            ),
+        )
+        .expect("workflow");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "--quiet", "-m", "base"]);
+        let base = output(&repository, &["rev-parse", "HEAD"]);
+        fs::write(repository.join("change.txt"), b"change\n").expect("source change");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "--quiet", "-m", "source"]);
         let source = output(&repository, &["rev-parse", "HEAD"]);
         Self {
             root: root.path().to_owned(),
@@ -1135,6 +1275,199 @@ fn standard_github_actions_workflow_is_discovered_planned_and_replanned_after_ap
         capsule.jobs[0].runner.image.as_deref(),
         Some(default_image.as_str())
     );
+}
+
+#[cfg(feature = "github-actions")]
+#[test]
+fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic() {
+    let root = tempfile::tempdir().expect("repository action root");
+    secure_mode(root.path());
+    git(root.path(), &["init", "--quiet"]);
+    git(
+        root.path(),
+        &["config", "user.email", "worker@runtrue.invalid"],
+    );
+    git(
+        root.path(),
+        &["config", "user.name", "Repository Action Test"],
+    );
+    let metadata = b"name: Backport\ndescription: Backport merged changes\nruns:\n  using: docker\n  image: Dockerfile\n";
+    let dockerfile = b"FROM scratch\nCOPY runtrue-action /usr/local/bin/runtrue-action\n";
+    fs::write(root.path().join("action.yml"), metadata).expect("action metadata");
+    fs::write(root.path().join("Dockerfile"), dockerfile).expect("Dockerfile");
+    fs::write(root.path().join("runtrue-action"), b"fixture").expect("entrypoint");
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "--quiet", "-m", "action"]);
+    let commit = output(root.path(), &["rev-parse", "HEAD"]);
+    let reference = format!("ci/backport@{commit}");
+    let image = format!(
+        "containers.example.test/ci/runtrue-action-cache@sha256:{}",
+        "c".repeat(64)
+    );
+
+    let control = Arc::new(ControlPlane::open_in_memory("action-test", NOW).unwrap());
+    let repository = RepositoryRecord {
+        id: "repository-action-backport".to_owned(),
+        tenant_id: "tenant-1".to_owned(),
+        owner: "ci".to_owned(),
+        name: "backport".to_owned(),
+        default_branch: "main".to_owned(),
+        visibility: "private".to_owned(),
+        created_unix_ms: NOW,
+    };
+    control.create_repository(&repository).unwrap();
+    let installation = ScmInstallationRecord {
+        id: "github-installation-1".to_owned(),
+        tenant_id: "tenant-1".to_owned(),
+        provider: "github".to_owned(),
+        external_id: "9001".to_owned(),
+        credential_reference: "provider://github-app/9001".to_owned(),
+        permissions: serde_json::json!({
+            "checks": "write",
+            "contents": "read",
+            "metadata": "read",
+            "pull_requests": "read"
+        }),
+        status: "active".to_owned(),
+        created_unix_ms: NOW,
+        updated_unix_ms: NOW,
+    };
+    control.create_scm_installation(&installation).unwrap();
+    let fetch_requests = Arc::new(Mutex::new(Vec::new()));
+    let fetcher: Arc<dyn ScmSourceFetcher> = Arc::new(FixtureSourceFetcher {
+        repository: root.path().to_owned(),
+        requests: Arc::clone(&fetch_requests),
+    });
+    let builder = Arc::new(FixtureRepositoryActionBuilder {
+        requests: Mutex::new(Vec::new()),
+        image: image.clone(),
+    });
+    let installation_provider = Arc::new(FixtureGitHubInstallationProvider {
+        snapshot: GitHubInstallationSnapshot {
+            installation_id: 9001,
+            app_id: 7,
+            account: GitHubAccount {
+                id: 99,
+                login: "ci".to_owned(),
+                kind: GitHubAccountKind::Organization,
+            },
+            target_id: 99,
+            target_kind: GitHubAccountKind::Organization,
+            repository_selection: GitHubRepositorySelection::All,
+            permissions: std::collections::BTreeMap::from([
+                (GitHubPermission::Metadata, GitHubPermissionLevel::Read),
+                (GitHubPermission::Contents, GitHubPermissionLevel::Read),
+            ]),
+            suspended_at: None,
+            repository_catalog_complete: true,
+            repositories: vec![GitHubInstallationRepository {
+                id: 4242,
+                owner: GitHubAccount {
+                    id: 99,
+                    login: "ci".to_owned(),
+                    kind: GitHubAccountKind::Organization,
+                },
+                name: "backport".to_owned(),
+                full_name: "ci/backport".to_owned(),
+                visibility: GitHubRepositoryVisibility::Private,
+                default_branch: Some("main".to_owned()),
+                archived: false,
+                disabled: false,
+            }],
+        },
+    });
+    let resolver = GitHubRepositoryActionResolver::new(
+        Arc::clone(&control),
+        fetcher,
+        installation_provider,
+        GitHubProviderEndpoints::new("https://github.example.test", "https://github.example.test/api/v3")
+            .unwrap(),
+        builder.clone(),
+    );
+
+    let prepared = resolver
+        .resolve("tenant-1", "github-installation-1", &reference)
+        .unwrap();
+    assert_eq!(prepared.reference, reference);
+    assert_eq!(prepared.image, image);
+    assert_eq!(prepared.metadata_digest, ContentDigest::sha256(metadata));
+    let fetched = fetch_requests.lock().unwrap();
+    assert_eq!(fetched.len(), 1);
+    assert_eq!(fetched[0].tenant_id, "tenant-1");
+    assert_eq!(fetched[0].repository_id, "github-action-source-4242");
+    assert_eq!(fetched[0].source_commit, commit);
+    assert_eq!(fetched[0].base_commit, None);
+    drop(fetched);
+    assert_eq!(
+        builder.requests.lock().unwrap().as_slice(),
+        &[RecordedRepositoryActionBuild {
+            tenant_id: "tenant-1".to_owned(),
+            repository_id: "github-action-source-4242".to_owned(),
+            reference: reference.clone(),
+            commit: commit.clone(),
+            metadata_digest: ContentDigest::sha256(metadata),
+            dockerfile: "Dockerfile".to_owned(),
+            dockerfile_bytes: dockerfile.to_vec(),
+        }]
+    );
+    assert!(matches!(
+        resolver.resolve("tenant-other", "github-installation-1", &reference),
+        Err(RepositoryActionResolveError::Unauthorized)
+    ));
+    assert!(matches!(
+        resolver.resolve("tenant-1", "github-installation-1", "ci/backport@main"),
+        Err(RepositoryActionResolveError::Rejected)
+    ));
+    assert_eq!(fetch_requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn trusted_full_commit_repository_action_is_prepared_and_locked_generically() {
+    let reference = format!("ci/backport@{}", "a".repeat(40));
+    let image = format!(
+        "containers.example/runtrue/action-cache@sha256:{}",
+        "b".repeat(64)
+    );
+    let fixture = MirrorFixture::repository_action_pull_request(&reference);
+    let (control, state, mut config) = setup(&fixture.root, "repository-action-worker");
+    config.workflow_directory = ".github/workflows".to_owned();
+    enqueue(
+        &control,
+        "event-repository-action",
+        &fixture.pull_event(),
+        NOW,
+    );
+    let resolver = Arc::new(FixtureRepositoryActionResolver {
+        requests: Mutex::new(Vec::new()),
+        image: image.clone(),
+    });
+    let worker = state
+        .scm_task_worker(config)
+        .unwrap()
+        .with_repository_action_resolver(resolver.clone());
+    let run_id = completed_run(worker.process_once_at(NOW).unwrap(), false);
+    assert_eq!(
+        resolver.requests.lock().unwrap().as_slice(),
+        &[(
+            "tenant-1".to_owned(),
+            "installation-1".to_owned(),
+            reference,
+        )]
+    );
+    let run = control.run(&run_id).unwrap();
+    let signed = control.signed_capsule(&run.capsule_id).unwrap();
+    let capsule: ExecutionCapsule = serde_json::from_slice(&signed.canonical_capsule).unwrap();
+    assert_eq!(
+        capsule.jobs[0].runner.image.as_deref(),
+        Some(image.as_str())
+    );
+    assert!(capsule.jobs[0].steps.iter().any(|step| {
+        matches!(
+            &step.action,
+            runtrue_workflow_ir::StepAction::Command { program, args }
+                if program == "/usr/local/bin/runtrue-action" && args.is_empty()
+        )
+    }));
 }
 
 #[test]

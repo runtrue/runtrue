@@ -9,6 +9,7 @@ mod error;
 mod github;
 mod native;
 mod report;
+mod repository_action;
 mod strict_yaml;
 mod validation;
 
@@ -19,18 +20,23 @@ use runtrue_workflow_ast as ast;
 use runtrue_workflow_frontend::{
     PreparedWorkflowSource, WorkflowFrontendOptions, WorkflowFrontendReport, WorkflowSourceFrontend,
 };
+use std::collections::BTreeMap;
 use strict_yaml::{validate_expanded_yaml_budget, StrictYamlValue};
 
 pub use error::ImportError;
 pub use report::{
     CompatibilityFinding, CompatibilityReport, CompatibilityStatus, ImportResult, StatusCounts,
 };
+pub use repository_action::{parse_repository_action_metadata, RepositoryActionMetadata};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImportOptions {
     /// Operator-approved, immutable OCI image used for hosted Linux jobs when
     /// this installation has no microVM runner configured.
     pub default_job_container_image: Option<String>,
+    /// Trusted, exact repository-action resolutions produced outside this
+    /// pure frontend. A missing entry remains a blocking incompatibility.
+    pub resolved_repository_actions: BTreeMap<String, String>,
 }
 
 /// GitHub Actions source adapter. The server registers this as Runtrue's first
@@ -63,6 +69,7 @@ impl WorkflowSourceFrontend for GithubActionsFrontend {
             workflow_path,
             ImportOptions {
                 default_job_container_image: options.default_job_container_image.clone(),
+                resolved_repository_actions: options.resolved_repository_actions.clone(),
             },
         )
         .map_err(|error| error.to_string())?;
@@ -126,6 +133,48 @@ pub fn import_github_actions_with_options(
     let _: StrictYamlValue = serde_yaml::from_str(source)?;
     let workflow: GithubWorkflow = serde_yaml::from_str(source)?;
     Analyzer::new(source_name.into(), options).analyze(workflow)
+}
+
+/// Return immutable root repository-action references that require trusted
+/// preparation. This performs the same bounded, strict YAML decoding as the
+/// importer and deliberately ignores mutable, local, Docker, and built-in
+/// action references; the normal analyzer reports those independently.
+pub fn pinned_repository_action_references(source: &str) -> Result<Vec<String>, ImportError> {
+    if source.len() > MAX_GITHUB_WORKFLOW_BYTES {
+        return Err(ImportError::TooLarge);
+    }
+    validate_expanded_yaml_budget(source)?;
+    let _: StrictYamlValue = serde_yaml::from_str(source)?;
+    let workflow: GithubWorkflow = serde_yaml::from_str(source)?;
+    let mut references = std::collections::BTreeSet::new();
+    for job in workflow.jobs.values() {
+        for step in &job.steps {
+            let Some(reference) = step.uses.as_ref().and_then(serde_yaml::Value::as_str) else {
+                continue;
+            };
+            let Some((action, selector)) = reference.rsplit_once('@') else {
+                continue;
+            };
+            let normalized = action.to_ascii_lowercase();
+            if matches!(
+                normalized.as_str(),
+                "actions/checkout"
+                    | "actions/cache"
+                    | "actions/cache/restore"
+                    | "actions/cache/save"
+                    | "actions/upload-artifact"
+                    | "actions/download-artifact"
+                    | "docker/build-push-action"
+                    | "docker/setup-buildx-action"
+            ) || !validation::is_full_git_commit(selector)
+                || !analyzer::is_canonical_repository_action(action)
+            {
+                continue;
+            }
+            references.insert(reference.to_owned());
+        }
+    }
+    Ok(references.into_iter().collect())
 }
 
 #[cfg(test)]

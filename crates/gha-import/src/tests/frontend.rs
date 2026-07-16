@@ -9,6 +9,7 @@ fn github_frontend_is_deterministic_and_binds_translation_identity() {
             "registry.example/runtrue-ci@sha256:{}",
             "a".repeat(64)
         )),
+        ..WorkflowFrontendOptions::default()
     };
     assert_eq!(
         GithubActionsFrontend.discovery_roots(),

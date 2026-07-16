@@ -26,6 +26,7 @@ use runtrue_scm::{
 };
 use runtrue_workflow_frontend::{WorkflowFrontendOptions, WorkflowFrontendRegistry};
 use runtrue_workflow_ir::SourceTrust;
+use std::collections::BTreeMap;
 
 pub struct TrustedPlanner<'a> {
     repository: &'a GitRepository,
@@ -35,6 +36,7 @@ pub struct TrustedPlanner<'a> {
     source_tree_digest: Option<ContentDigest>,
     scm_api_url: Option<String>,
     default_job_container_image: Option<String>,
+    resolved_repository_actions: BTreeMap<String, String>,
     source_frontends: Option<&'a WorkflowFrontendRegistry<'a>>,
 }
 
@@ -49,6 +51,7 @@ impl<'a> TrustedPlanner<'a> {
             source_tree_digest: None,
             scm_api_url: None,
             default_job_container_image: None,
+            resolved_repository_actions: BTreeMap::new(),
             source_frontends: None,
         }
     }
@@ -67,6 +70,7 @@ impl<'a> TrustedPlanner<'a> {
             source_tree_digest: None,
             scm_api_url: None,
             default_job_container_image: None,
+            resolved_repository_actions: BTreeMap::new(),
             source_frontends: None,
         }
     }
@@ -102,6 +106,15 @@ impl<'a> TrustedPlanner<'a> {
     #[must_use]
     pub fn with_default_job_container_image(mut self, image: impl Into<String>) -> Self {
         self.default_job_container_image = Some(image.into());
+        self
+    }
+
+    /// Supply exact repository-action Programs prepared by a trusted external
+    /// resolver. Source-language frontends can consume only exact reference
+    /// matches and the generated lock binds each mapping.
+    #[must_use]
+    pub fn with_resolved_repository_actions(mut self, actions: BTreeMap<String, String>) -> Self {
+        self.resolved_repository_actions = actions;
         self
     }
 
@@ -499,6 +512,7 @@ impl<'a> TrustedPlanner<'a> {
                     workflow_path,
                     &WorkflowFrontendOptions {
                         default_job_container_image: self.default_job_container_image.clone(),
+                        resolved_repository_actions: self.resolved_repository_actions.clone(),
                     },
                 )
             })

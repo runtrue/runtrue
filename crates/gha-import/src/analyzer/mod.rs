@@ -5,6 +5,8 @@ mod security;
 mod steps;
 mod workflow;
 
+pub(crate) use actions::is_canonical_repository_action;
+
 use crate::{
     error::ImportError,
     github::GithubWorkflow,
@@ -55,6 +57,7 @@ pub(crate) struct Analyzer {
     pub(crate) pull_request_target_requested: bool,
     pub(crate) workflow_concurrency: Option<String>,
     pub(crate) default_job_container_image: Option<String>,
+    pub(crate) resolved_repository_actions: BTreeMap<String, String>,
 }
 
 impl Analyzer {
@@ -69,6 +72,7 @@ impl Analyzer {
             pull_request_target_requested: false,
             workflow_concurrency: None,
             default_job_container_image: options.default_job_container_image,
+            resolved_repository_actions: options.resolved_repository_actions,
         }
     }
 
@@ -122,9 +126,16 @@ impl Analyzer {
                             step.run.is_none()
                                 && step.uses.as_ref().and_then(static_string).is_some_and(
                                     |reference| {
-                                        reference
+                                        let direct = reference
                                             .strip_prefix("docker://")
-                                            .is_some_and(crate::validation::is_full_sha256_image)
+                                            .is_some_and(crate::validation::is_full_sha256_image);
+                                        direct
+                                            || self
+                                                .resolved_repository_actions
+                                                .get(&reference)
+                                                .is_some_and(|image| {
+                                                    crate::validation::is_full_sha256_image(image)
+                                                })
                                     },
                                 )
                         })

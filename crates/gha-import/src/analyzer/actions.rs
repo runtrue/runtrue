@@ -99,15 +99,35 @@ impl Analyzer {
                 self.map_container_action(&reference, inputs, path, effects)
             }
             _ if is_full_git_commit(selector) => {
-                self.unresolved_action_inputs(inputs, path, CompatibilityStatus::RequiresGithub);
-                self.finding(
-                    CompatibilityStatus::RequiresGithub,
-                    "unresolved-pinned-action",
-                    format!("{path}.uses"),
-                    format!("pinned action `{reference}` has no approved native component digest, signature identity, or runtime adapter"),
-                    Some(format!("Resolve `{reference}` to an approved native component/adapter lock entry; do not invent a digest.")),
-                );
-                ActionMapping::placeholder()
+                if !is_canonical_repository_action(action) {
+                    self.unresolved_action_inputs(inputs, path, CompatibilityStatus::Unsupported);
+                    self.finding(
+                        CompatibilityStatus::Unsupported,
+                        "unsupported-repository-action-reference",
+                        format!("{path}.uses"),
+                        "repository Docker actions currently require an exact owner/repository@commit reference",
+                        Some("Use owner/repository@<full-40-character-commit> without a subpath.".to_owned()),
+                    );
+                    ActionMapping::placeholder()
+                } else if let Some(image) =
+                    self.resolved_repository_actions.get(&reference).cloned()
+                {
+                    self.map_resolved_repository_action(&reference, &image, inputs, path, effects)
+                } else {
+                    self.unresolved_action_inputs(
+                        inputs,
+                        path,
+                        CompatibilityStatus::RequiresGithub,
+                    );
+                    self.finding(
+                        CompatibilityStatus::RequiresGithub,
+                        "unresolved-pinned-action",
+                        format!("{path}.uses"),
+                        format!("pinned action `{reference}` has not been prepared by the trusted repository-action resolver"),
+                        Some(format!("Resolve and build `{reference}` through the trusted repository-action preparation provider.")),
+                    );
+                    ActionMapping::placeholder()
+                }
             }
             _ => {
                 self.unresolved_action_inputs(inputs, path, CompatibilityStatus::Unsafe);
@@ -172,10 +192,61 @@ impl Analyzer {
             );
             return ActionMapping::placeholder();
         }
+        self.map_prepared_container_action(
+            image,
+            image,
+            inputs,
+            path,
+            effects,
+            "pinned-container-action",
+        )
+    }
+
+    fn map_resolved_repository_action(
+        &mut self,
+        reference: &str,
+        image: &str,
+        inputs: &BTreeMap<String, YamlValue>,
+        path: &str,
+        effects: &mut JobEffects,
+    ) -> ActionMapping {
+        if !is_full_sha256_image(image) {
+            self.unresolved_action_inputs(inputs, path, CompatibilityStatus::Unsafe);
+            self.finding(
+                CompatibilityStatus::Unsafe,
+                "mutable-repository-action-resolution",
+                format!("{path}.uses"),
+                "trusted repository-action resolution is not a complete lowercase OCI digest pin",
+                Some(
+                    "Rebuild the exact action commit and record its immutable OCI manifest digest."
+                        .to_owned(),
+                ),
+            );
+            return ActionMapping::placeholder();
+        }
+        self.map_prepared_container_action(
+            reference,
+            image,
+            inputs,
+            path,
+            effects,
+            "pinned-repository-docker-action",
+        )
+    }
+
+    fn map_prepared_container_action(
+        &mut self,
+        source: &str,
+        image: &str,
+        inputs: &BTreeMap<String, YamlValue>,
+        path: &str,
+        effects: &mut JobEffects,
+        finding_code: &str,
+    ) -> ActionMapping {
         if effects
             .container_action_image
             .as_ref()
-            .is_some_and(|current| current != image)
+            .is_some_and(|current| current != source)
         {
             self.finding(
                 CompatibilityStatus::Unsupported,
@@ -236,7 +307,7 @@ impl Analyzer {
                 }
             }
         }
-        effects.container_action_image = Some(image.to_owned());
+        effects.container_action_image = Some(source.to_owned());
         if needs_scm_credential {
             effects.permissions.secrets.insert(
                 "runtrue-scm-provider-token".to_owned(),
@@ -244,15 +315,19 @@ impl Analyzer {
             );
         }
         self.lock_images.insert(crate::native::GeneratedImageLock {
-            source: image.to_owned(),
+            source: source.to_owned(),
             resolved: image.to_owned(),
             platform: "linux/amd64".to_owned(),
         });
         self.finding(
             CompatibilityStatus::Emulated,
-            "pinned-container-action",
+            finding_code,
             format!("{path}.uses"),
-            "pinned Docker action maps to its exact OCI image and the Runtrue container-action entrypoint contract",
+            if finding_code == "pinned-repository-docker-action" {
+                "full-commit repository Docker action maps to its prepared immutable OCI image and the Runtrue container-action entrypoint contract"
+            } else {
+                "pinned Docker action maps to its exact OCI image and the Runtrue container-action entrypoint contract"
+            },
             None,
         );
         ActionMapping {
@@ -273,6 +348,24 @@ impl Analyzer {
             mapped: true,
         }
     }
+}
+
+pub(crate) fn is_canonical_repository_action(action: &str) -> bool {
+    let mut components = action.split('/');
+    let owner = components.next().unwrap_or_default();
+    let repository = components.next().unwrap_or_default();
+    components.next().is_none()
+        && valid_repository_component(owner)
+        && valid_repository_component(repository)
+}
+
+fn valid_repository_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && !matches!(value, "." | "..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 impl ActionMapping {

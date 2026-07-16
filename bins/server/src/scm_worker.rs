@@ -12,7 +12,9 @@ use runtrue_control_plane::{
     ScmSourceIdentity, SignedCapsuleRecord, SourceSnapshotRecord, SourceSnapshotState,
 };
 #[cfg(feature = "github-actions")]
-use runtrue_gha_import::GithubActionsFrontend;
+use runtrue_gha_import::{
+    parse_repository_action_metadata, pinned_repository_action_references, GithubActionsFrontend,
+};
 use runtrue_git::{
     CredentialRequest, GitCredential, GitCredentialProvider, GitError, GitLimits, GitRepository,
     MirrorLimits, MirrorManager, MirrorMiss, MirrorSyncOutcome, OriginPolicy,
@@ -24,6 +26,8 @@ use runtrue_policy::{
     Decision as ApprovalDecisionKind,
 };
 use runtrue_scheduler::SchedulingRequirements;
+#[cfg(feature = "github-actions")]
+use runtrue_scm::SharedGitHubInstallationProvider;
 use runtrue_scm::{
     CheckConclusion, CheckRunRequest, CheckRunRequestedAction, CheckStatus, EventEnvelope,
     EventType, GitHubAppBroker, GitHubAppJwtProvider, GitHubError, GitHubPermission,
@@ -74,6 +78,16 @@ static REGISTERED_WORKFLOW_FRONTENDS: [&'static dyn WorkflowSourceFrontend; 1] =
     [&GITHUB_ACTIONS_FRONTEND];
 #[cfg(not(feature = "github-actions"))]
 static REGISTERED_WORKFLOW_FRONTENDS: [&'static dyn WorkflowSourceFrontend; 0] = [];
+
+#[cfg(feature = "github-actions")]
+fn discover_pinned_repository_actions(source: &str) -> Result<Vec<String>, ()> {
+    pinned_repository_action_references(source).map_err(|_| ())
+}
+
+#[cfg(not(feature = "github-actions"))]
+fn discover_pinned_repository_actions(_source: &str) -> Result<Vec<String>, ()> {
+    Ok(Vec::new())
+}
 
 fn workflow_frontends() -> &'static WorkflowFrontendRegistry<'static> {
     static REGISTRY: OnceLock<WorkflowFrontendRegistry<'static>> = OnceLock::new();
@@ -780,6 +794,218 @@ pub trait ScmSourceFetcher: Send + Sync {
     ) -> Result<FetchedScmRepository, ScmSourceFetchError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedRepositoryAction {
+    pub reference: String,
+    pub image: String,
+    pub metadata_digest: ContentDigest,
+}
+
+#[derive(Debug, Error)]
+pub enum RepositoryActionResolveError {
+    #[error("repository action is not authorized for this tenant and installation")]
+    Unauthorized,
+    #[error("repository action metadata or source was rejected")]
+    Rejected,
+    #[error("repository action preparation is temporarily unavailable")]
+    Unavailable,
+}
+
+/// Trusted preparation boundary for immutable repository-backed Programs.
+/// Implementations fetch and build outside the control-plane process and
+/// return only an exact OCI manifest digest plus audit identity.
+pub trait RepositoryActionResolver: Send + Sync {
+    fn resolve(
+        &self,
+        tenant_id: &str,
+        installation_id: &str,
+        reference: &str,
+    ) -> Result<PreparedRepositoryAction, RepositoryActionResolveError>;
+}
+
+pub struct RepositoryActionBuildRequest<'a> {
+    pub tenant_id: &'a str,
+    pub repository_id: &'a str,
+    pub reference: &'a str,
+    pub commit: &'a str,
+    pub repository: &'a GitRepository,
+    pub metadata_digest: &'a ContentDigest,
+    pub dockerfile: &'a str,
+}
+
+pub trait RepositoryActionBuilder: Send + Sync {
+    fn build(
+        &self,
+        request: RepositoryActionBuildRequest<'_>,
+    ) -> Result<String, RepositoryActionResolveError>;
+}
+
+#[cfg(feature = "github-actions")]
+pub struct GitHubRepositoryActionResolver {
+    control_plane: Arc<ControlPlane>,
+    fetcher: Arc<dyn ScmSourceFetcher>,
+    installation_provider: SharedGitHubInstallationProvider,
+    endpoints: GitHubProviderEndpoints,
+    builder: Arc<dyn RepositoryActionBuilder>,
+}
+
+#[cfg(feature = "github-actions")]
+impl std::fmt::Debug for GitHubRepositoryActionResolver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GitHubRepositoryActionResolver")
+            .field("fetcher", &"[AUTHENTICATED SCM FETCHER]")
+            .field("installation_provider", &"[GITHUB INSTALLATION CATALOG]")
+            .field("endpoints", &self.endpoints)
+            .field("builder", &"[ISOLATED ACTION BUILDER]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "github-actions")]
+impl GitHubRepositoryActionResolver {
+    #[must_use]
+    pub fn new(
+        control_plane: Arc<ControlPlane>,
+        fetcher: Arc<dyn ScmSourceFetcher>,
+        installation_provider: SharedGitHubInstallationProvider,
+        endpoints: GitHubProviderEndpoints,
+        builder: Arc<dyn RepositoryActionBuilder>,
+    ) -> Self {
+        Self {
+            control_plane,
+            fetcher,
+            installation_provider,
+            endpoints,
+            builder,
+        }
+    }
+}
+
+#[cfg(feature = "github-actions")]
+impl RepositoryActionResolver for GitHubRepositoryActionResolver {
+    fn resolve(
+        &self,
+        tenant_id: &str,
+        installation_id: &str,
+        reference: &str,
+    ) -> Result<PreparedRepositoryAction, RepositoryActionResolveError> {
+        let (locator, commit) = reference
+            .rsplit_once('@')
+            .ok_or(RepositoryActionResolveError::Rejected)?;
+        let (owner, name) = locator
+            .split_once('/')
+            .filter(|(_, name)| !name.contains('/'))
+            .ok_or(RepositoryActionResolveError::Rejected)?;
+        if commit.len() != 40
+            || !commit
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(RepositoryActionResolveError::Rejected);
+        }
+        let installation = self
+            .control_plane
+            .scm_installation_for_tenant(tenant_id, installation_id)
+            .map_err(|_| RepositoryActionResolveError::Unauthorized)?;
+        if installation.status != "active" || installation.provider != "github" {
+            return Err(RepositoryActionResolveError::Unauthorized);
+        }
+        let external_installation_id = parse_github_external_id(&installation.external_id)
+            .map_err(|_| RepositoryActionResolveError::Unauthorized)?;
+        let now_unix_seconds =
+            unix_ms().map_err(|_| RepositoryActionResolveError::Unavailable)? / 1_000;
+        let snapshot = self
+            .installation_provider
+            .inspect_installation(external_installation_id, now_unix_seconds)
+            .map_err(|error| match error {
+                GitHubError::Transport | GitHubError::RateLimited { .. } => {
+                    RepositoryActionResolveError::Unavailable
+                }
+                _ => RepositoryActionResolveError::Unauthorized,
+            })?;
+        if snapshot.installation_id != external_installation_id
+            || snapshot.suspended_at.is_some()
+            || !snapshot.repository_catalog_complete
+        {
+            return Err(RepositoryActionResolveError::Unauthorized);
+        }
+        let source = snapshot
+            .repositories
+            .into_iter()
+            .find(|repository| {
+                repository.owner.login == owner
+                    && repository.name == name
+                    && repository.full_name == format!("{owner}/{name}")
+                    && !repository.archived
+                    && !repository.disabled
+            })
+            .ok_or(RepositoryActionResolveError::Unauthorized)?;
+        let repository_id = format!("github-action-source-{}", source.id);
+        let link = ScmRepositoryLinkRecord {
+            repository_id: repository_id.clone(),
+            tenant_id: tenant_id.to_owned(),
+            installation_id: installation.id.clone(),
+            external_repository_id: source.id.to_string(),
+            clone_url: self
+                .endpoints
+                .repository_clone_url(owner, name)
+                .map_err(|_| RepositoryActionResolveError::Rejected)?,
+            status: "active".to_owned(),
+            created_unix_ms: installation.created_unix_ms,
+            updated_unix_ms: installation.updated_unix_ms,
+        };
+        let fetched = self
+            .fetcher
+            .fetch(&ScmSourceFetchRequest {
+                installation,
+                repository: link,
+                tenant_id: tenant_id.to_owned(),
+                repository_id: repository_id.clone(),
+                owner: owner.to_owned(),
+                name: name.to_owned(),
+                source_commit: commit.to_owned(),
+                base_commit: None,
+            })
+            .map_err(|error| match error {
+                ScmSourceFetchError::Unavailable => RepositoryActionResolveError::Unavailable,
+                ScmSourceFetchError::CredentialUnavailable
+                | ScmSourceFetchError::BindingMismatch => {
+                    RepositoryActionResolveError::Unauthorized
+                }
+                ScmSourceFetchError::Rejected => RepositoryActionResolveError::Rejected,
+            })?;
+        let yml = fetched.repository.read_blob(commit, "action.yml");
+        let yaml = fetched.repository.read_blob(commit, "action.yaml");
+        let metadata_blob = match (yml, yaml) {
+            (Ok(blob), Err(GitError::PathNotFound)) | (Err(GitError::PathNotFound), Ok(blob)) => {
+                blob
+            }
+            _ => return Err(RepositoryActionResolveError::Rejected),
+        };
+        let metadata = parse_repository_action_metadata(&metadata_blob.bytes)
+            .map_err(|_| RepositoryActionResolveError::Rejected)?;
+        fetched
+            .repository
+            .read_blob(commit, &metadata.dockerfile)
+            .map_err(|_| RepositoryActionResolveError::Rejected)?;
+        let image = self.builder.build(RepositoryActionBuildRequest {
+            tenant_id,
+            repository_id: &repository_id,
+            reference,
+            commit,
+            repository: &fetched.repository,
+            metadata_digest: &metadata.digest,
+            dockerfile: &metadata.dockerfile,
+        })?;
+        Ok(PreparedRepositoryAction {
+            reference: reference.to_owned(),
+            image,
+            metadata_digest: metadata.digest,
+        })
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ScmSourceFetchError {
     #[error("SCM installation credential is unavailable or invalid")]
@@ -1075,6 +1301,7 @@ pub struct ScmTaskWorker {
     signing_key: Arc<CapsuleSigningKey>,
     mirror_root: Option<SecureMirrorRoot>,
     source_fetcher: Option<Arc<dyn ScmSourceFetcher>>,
+    repository_action_resolver: Option<Arc<dyn RepositoryActionResolver>>,
     check_publisher: Option<Arc<dyn GitHubCheckPublisher>>,
     approval_authorizer: Option<Arc<dyn GitHubInstallationTokenProvider>>,
     source_cas: Option<FsCas>,
@@ -1090,6 +1317,13 @@ impl std::fmt::Debug for ScmTaskWorker {
             .field(
                 "source_fetcher",
                 &self.source_fetcher.as_ref().map(|_| "configured"),
+            )
+            .field(
+                "repository_action_resolver",
+                &self
+                    .repository_action_resolver
+                    .as_ref()
+                    .map(|_| "configured"),
             )
             .field(
                 "source_cas",
@@ -1164,6 +1398,41 @@ impl AppState {
         Ok(worker)
     }
 
+    #[cfg(feature = "github-actions")]
+    pub fn scm_task_worker_with_github_app_and_action_builder<P>(
+        &self,
+        config: ScmWorkerConfig,
+        provider: Arc<P>,
+        installation_provider: SharedGitHubInstallationProvider,
+        builder: Arc<dyn RepositoryActionBuilder>,
+    ) -> Result<ScmTaskWorker, ScmWorkerBuildError>
+    where
+        P: GitHubInstallationTokenProvider + GitHubCheckPublisher + 'static,
+    {
+        let tokens: Arc<dyn GitHubInstallationTokenProvider> = provider.clone();
+        let approval_authorizer = Arc::clone(&tokens);
+        let publisher: Arc<dyn GitHubCheckPublisher> = provider;
+        let fetcher: Arc<dyn ScmSourceFetcher> = Arc::new(GitHubMirrorSourceFetcher::open(
+            &config.mirror_root,
+            tokens,
+            config.mirror_limits,
+            config.github_provider_endpoints.clone(),
+        )?);
+        let resolver: Arc<dyn RepositoryActionResolver> =
+            Arc::new(GitHubRepositoryActionResolver::new(
+                Arc::clone(&self.control_plane),
+                Arc::clone(&fetcher),
+                installation_provider,
+                config.github_provider_endpoints.clone(),
+                builder,
+            ));
+        let mut worker = self.scm_task_worker_with_source_fetcher(config, fetcher)?;
+        worker.check_publisher = Some(publisher);
+        worker.approval_authorizer = Some(approval_authorizer);
+        worker.repository_action_resolver = Some(resolver);
+        Ok(worker)
+    }
+
     #[doc(hidden)]
     pub fn scm_task_worker_with_source_fetcher(
         &self,
@@ -1213,12 +1482,23 @@ impl ScmTaskWorker {
             signing_key,
             mirror_root,
             source_fetcher,
+            repository_action_resolver: None,
             check_publisher: None,
             approval_authorizer: None,
             source_cas,
             config,
             metrics: Arc::new(ScmWorkerMetrics::default()),
         })
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_repository_action_resolver(
+        mut self,
+        resolver: Arc<dyn RepositoryActionResolver>,
+    ) -> Self {
+        self.repository_action_resolver = Some(resolver);
+        self
     }
 
     #[must_use]
@@ -1565,6 +1845,59 @@ impl ScmTaskWorker {
             ref_name: Some(format!("refs/heads/{}", repository.default_branch)),
             repository_full_name: Some(event.repository.full_name.clone()),
         })
+    }
+
+    fn resolve_repository_actions(
+        &self,
+        repository: &GitRepository,
+        commit: &str,
+        workflow_path: &str,
+        tenant_id: &str,
+        installation_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, ProcessError> {
+        let workflow = repository.read_blob(commit, workflow_path).map_err(|_| {
+            TaskFailure::terminal(
+                "trusted workflow source is unavailable for repository-action discovery",
+            )
+        })?;
+        let source = std::str::from_utf8(&workflow.bytes).map_err(|_| {
+            TaskFailure::terminal("trusted workflow is not UTF-8 for repository-action discovery")
+        })?;
+        let references = discover_pinned_repository_actions(source).map_err(|()| {
+            TaskFailure::terminal("trusted workflow is invalid for repository-action discovery")
+        })?;
+        if references.is_empty() {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        let resolver = self.repository_action_resolver.as_ref().ok_or_else(|| {
+            TaskFailure::terminal(
+                "workflow requires immutable repository actions but no trusted preparation provider is configured",
+            )
+        })?;
+        let mut resolved = std::collections::BTreeMap::new();
+        for reference in references {
+            let prepared = resolver
+                .resolve(tenant_id, installation_id, &reference)
+                .map_err(|error| match error {
+                    RepositoryActionResolveError::Unavailable => TaskFailure::retryable(
+                        "repository-action preparation is temporarily unavailable",
+                    ),
+                    RepositoryActionResolveError::Unauthorized => TaskFailure::terminal(
+                        "repository action is not authorized for this tenant and installation",
+                    ),
+                    RepositoryActionResolveError::Rejected => TaskFailure::terminal(
+                        "repository action source, metadata, or build was rejected",
+                    ),
+                })?;
+            if prepared.reference != reference {
+                return Err(TaskFailure::terminal(
+                    "repository-action resolver substituted the requested source identity",
+                )
+                .into());
+            }
+            resolved.insert(reference, prepared.image);
+        }
+        Ok(resolved)
     }
 
     fn handle_proposed_workflow_action<F>(
@@ -2072,6 +2405,10 @@ impl ScmTaskWorker {
             installation.as_ref(),
             repository_link.as_ref(),
         )?;
+        let action_installation_id = installation.as_ref().map_or_else(
+            || self.control_plane.installation_id().to_owned(),
+            |value| value.id.clone(),
+        );
         let prepared_source = self.prepare_event_source(
             task,
             &event,
@@ -2154,6 +2491,23 @@ impl ScmTaskWorker {
                 .next()
                 .ok_or_else(|| TaskFailure::terminal("repository has no SCM workflows"))?
         };
+        let action_revision = if matches!(event.event_type, EventType::PullRequest { .. }) {
+            event
+                .base
+                .as_ref()
+                .ok_or_else(|| TaskFailure::terminal("pull request has no trusted base revision"))?
+                .commit
+                .as_str()
+        } else {
+            execution_revision.commit.as_str()
+        };
+        let resolved_repository_actions = self.resolve_repository_actions(
+            prepared_source.repository.repository(),
+            action_revision,
+            &workflow_path,
+            &repository.tenant_id,
+            &action_installation_id,
+        )?;
         let reusable_source_provider = MirrorReusableSourceProvider {
             mirror_root: self.mirror_root.as_ref(),
             current_repository: prepared_source.repository.repository(),
@@ -2164,6 +2518,7 @@ impl ScmTaskWorker {
         let mut planner = TrustedPlanner::new(prepared_source.repository.repository())
             .with_source_frontends(workflow_frontends())
             .with_reusable_source_provider(&reusable_source_provider)
+            .with_resolved_repository_actions(resolved_repository_actions)
             .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
         if let Some(image) = &self.config.default_job_container_image {
             planner = planner.with_default_job_container_image(image.clone());
@@ -2618,7 +2973,7 @@ impl ScmTaskWorker {
                 finish_clock()?,
             );
         }
-        let (repository, continuation_repository, source_snapshot) =
+        let (repository, continuation_repository, source_snapshot, action_installation_id) =
             if let Some(fetcher) = &self.source_fetcher {
                 let (repository, installation, link) = self
                     .control_plane
@@ -2629,6 +2984,7 @@ impl ScmTaskWorker {
                         &event.repository.name,
                     )
                     .map_err(TaskFailure::from_repository_lookup)?;
+                let action_installation_id = installation.id.clone();
                 let fetched = fetcher
                     .fetch(&ScmSourceFetchRequest {
                         installation,
@@ -2670,6 +3026,7 @@ impl ScmTaskWorker {
                         requested_commits: commits,
                     },
                     Some(snapshot),
+                    action_installation_id,
                 )
             } else {
                 if event.installation_id != self.control_plane.installation_id() {
@@ -2692,7 +3049,12 @@ impl ScmTaskWorker {
                     .map_err(|_| {
                         TaskFailure::retryable("Git mirror repository is unavailable or unsafe")
                     })?;
-                (repository, EventGitRepository::Legacy(git), None)
+                (
+                    repository,
+                    EventGitRepository::Legacy(git),
+                    None,
+                    self.control_plane.installation_id().to_owned(),
+                )
             };
         if repository.id != pending.repository_id
             || event.repository.full_name != format!("{}/{}", repository.owner, repository.name)
@@ -2711,9 +3073,29 @@ impl ScmTaskWorker {
             current_name: &repository.name,
             endpoints: &self.config.github_provider_endpoints,
         };
+        let action_revision = if matches!(event.event_type, EventType::PullRequest { .. }) {
+            pending
+                .context
+                .source_identity
+                .base_commit
+                .as_deref()
+                .ok_or_else(|| {
+                    TaskFailure::terminal("pull request continuation has no trusted base revision")
+                })?
+        } else {
+            pending.context.source_identity.source_commit.as_str()
+        };
+        let resolved_repository_actions = self.resolve_repository_actions(
+            continuation_repository.repository(),
+            action_revision,
+            &pending.context.source_identity.workflow_path,
+            &repository.tenant_id,
+            &action_installation_id,
+        )?;
         let mut planner = TrustedPlanner::new(continuation_repository.repository())
             .with_source_frontends(workflow_frontends())
             .with_reusable_source_provider(&reusable_source_provider)
+            .with_resolved_repository_actions(resolved_repository_actions.clone())
             .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
         if let Some(image) = &self.config.default_job_container_image {
             planner = planner.with_default_job_container_image(image.clone());
@@ -2775,6 +3157,7 @@ impl ScmTaskWorker {
             let mut planner = TrustedPlanner::new(continuation_repository.repository())
                 .with_source_frontends(workflow_frontends())
                 .with_reusable_source_provider(&reusable_source_provider)
+                .with_resolved_repository_actions(resolved_repository_actions)
                 .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
             if let Some(image) = &self.config.default_job_container_image {
                 planner = planner.with_default_job_container_image(image.clone());

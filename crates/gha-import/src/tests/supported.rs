@@ -25,6 +25,7 @@ fn operator_default_container_maps_hosted_linux_job_to_oci() {
         "fallback.github.yml",
         ImportOptions {
             default_job_container_image: Some(image.clone()),
+            ..ImportOptions::default()
         },
     )
     .expect("import");

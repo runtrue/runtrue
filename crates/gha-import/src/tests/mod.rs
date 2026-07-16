@@ -8,6 +8,7 @@ const GITHUB_ONLY: &str = include_str!("../../tests/fixtures/github_only.yml");
 
 mod frontend;
 mod lockfile;
+mod repository_action;
 mod security;
 mod supported;
 mod unsupported;

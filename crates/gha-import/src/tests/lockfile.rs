@@ -190,3 +190,55 @@ jobs:
         finding.code == "static-run-step" && finding.status == CompatibilityStatus::Supported
     }));
 }
+
+#[test]
+fn full_commit_repository_docker_action_uses_trusted_prepared_image() {
+    let commit = "a".repeat(40);
+    let reference = format!("ci/backport@{commit}");
+    let image = format!(
+        "containers.example/runtrue/action-cache@sha256:{}",
+        "b".repeat(64)
+    );
+    let source = format!(
+        r#"
+on: pull_request_target
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: {reference}
+        with:
+          config-path: .github/backport.yml
+"#
+    );
+    let result = import_github_actions_with_options(
+        &source,
+        "backport.yml",
+        ImportOptions {
+            resolved_repository_actions: std::collections::BTreeMap::from([(
+                reference.clone(),
+                image.clone(),
+            )]),
+            ..ImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(result.report.compatible, "{}", result.report.render_human());
+    assert!(result.report.compiler_validated);
+    let yaml = result.native_yaml.as_deref().unwrap();
+    let workflow = ast::parse_yaml(yaml).unwrap();
+    assert_eq!(
+        workflow.jobs["reconcile"].runner.image.as_deref(),
+        Some(reference.as_str())
+    );
+    let lock = LockFile::parse(result.lockfile_toml.as_deref().unwrap().as_bytes()).unwrap();
+    assert_eq!(lock.images()[0].source(), reference);
+    assert_eq!(lock.images()[0].resolved(), image);
+    assert!(result.report.findings.iter().any(|finding| {
+        finding.code == "pinned-repository-docker-action"
+            && finding.status == CompatibilityStatus::Emulated
+    }));
+}

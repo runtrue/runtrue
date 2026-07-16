@@ -2675,6 +2675,16 @@ fn github_installation_links_and_fetch_replay_are_exact_and_tenant_scoped() {
             .unwrap()
             .replayed
     );
+    assert_eq!(
+        control
+            .scm_installation_for_tenant("tenant-1", "github-installation-1")
+            .unwrap(),
+        installation
+    );
+    assert!(matches!(
+        control.scm_installation_for_tenant("tenant-other", "github-installation-1"),
+        Err(ControlPlaneError::NotFound { .. })
+    ));
     let link = ScmRepositoryLinkRecord {
         repository_id: "repo-1".to_owned(),
         tenant_id: "tenant-1".to_owned(),
@@ -2699,7 +2709,6 @@ fn github_installation_links_and_fetch_replay_are_exact_and_tenant_scoped() {
         control.github_repository_for_event("9001", "attacker", "octo", "runtrue"),
         Err(ControlPlaneError::NotFound { .. })
     ));
-
     let mut other = repository();
     other.id = "repo-other-tenant".to_owned();
     other.tenant_id = "tenant-other".to_owned();

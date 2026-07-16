@@ -101,3 +101,53 @@ fn multiple_yaml_documents_are_rejected() {
         .to_string();
     assert!(error.contains("exactly one YAML document"), "{error}");
 }
+
+#[test]
+fn repository_action_discovery_returns_only_canonical_full_commit_references() {
+    let commit = "a".repeat(40);
+    let source = format!(
+        r#"
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ci/backport@{commit}
+      - uses: ci/backport@main
+      - uses: ci/backport/subpath@{commit}
+      - uses: actions/checkout@{commit}
+      - uses: docker://registry.example/action@sha256:{digest}
+"#,
+        digest = "b".repeat(64),
+    );
+    assert_eq!(
+        pinned_repository_action_references(&source).unwrap(),
+        vec![format!("ci/backport@{commit}")]
+    );
+}
+
+#[test]
+fn prepared_repository_action_resolution_must_be_an_immutable_image() {
+    let commit = "a".repeat(40);
+    let reference = format!("ci/backport@{commit}");
+    let source = format!(
+        "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: {reference}\n"
+    );
+    let result = import_github_actions_with_options(
+        &source,
+        "unsafe-resolution.yml",
+        ImportOptions {
+            resolved_repository_actions: std::collections::BTreeMap::from([(
+                reference,
+                "containers.example/action:latest".to_owned(),
+            )]),
+            ..ImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(!result.report.compatible);
+    assert!(result.report.findings.iter().any(|finding| {
+        finding.code == "mutable-repository-action-resolution"
+            && finding.status == CompatibilityStatus::Unsafe
+    }));
+}

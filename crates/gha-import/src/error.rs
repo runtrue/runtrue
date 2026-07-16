@@ -13,4 +13,6 @@ pub enum ImportError {
     GeneratedLockfile(String),
     #[error("cannot serialize generated output: {0}")]
     Serialize(String),
+    #[error("repository action metadata is unsupported: {0}")]
+    RepositoryActionMetadata(String),
 }

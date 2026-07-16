@@ -7,7 +7,11 @@
 #![forbid(unsafe_code)]
 
 use runtrue_model::ContentDigest;
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 const MAX_FRONTEND_ID_BYTES: usize = 128;
 const MAX_FRONTENDS: usize = 16;
@@ -20,6 +24,10 @@ const MAX_REPORT_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkflowFrontendOptions {
     pub default_job_container_image: Option<String>,
+    /// Exact external Programs prepared by a trusted resolver before source
+    /// translation. Keys are source-language references; values are immutable
+    /// OCI image references. Frontends may consume only exact key matches.
+    pub resolved_repository_actions: BTreeMap<String, String>,
 }
 
 /// Adapter-specific diagnostic bytes with a generic, integrity-bound envelope.

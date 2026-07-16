@@ -326,6 +326,26 @@ impl ControlPlane {
         })
     }
 
+    pub fn scm_installation_for_tenant(
+        &self,
+        tenant_id: &str,
+        installation_id: &str,
+    ) -> Result<ScmInstallationRecord, ControlPlaneError> {
+        validate_text("SCM installation tenant", tenant_id)?;
+        validate_text("SCM installation id", installation_id)?;
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT id, tenant_id, provider, external_id, credential_reference,
+                        permissions_json, status, created_unix_ms, updated_unix_ms
+                 FROM scm_installations WHERE tenant_id = ?1 AND id = ?2",
+                params![tenant_id, installation_id],
+                |row| scm_installation_row_at(row, 0),
+            )
+            .optional()?
+            .ok_or_else(|| not_found("SCM installation", installation_id))
+    }
+
     pub fn link_scm_repository(
         &self,
         record: &ScmRepositoryLinkRecord,

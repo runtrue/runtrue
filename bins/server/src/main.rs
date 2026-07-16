@@ -13,6 +13,8 @@ use runtrue_server::{
     RunnerEnrollmentService, ScmTaskWorker, ScmWorkerConfig, DEFAULT_RUNNER_CERTIFICATE_LIFETIME,
     DEFAULT_SCM_WORKFLOW_DIRECTORY,
 };
+#[cfg(feature = "github-actions")]
+use runtrue_server::{RepositoryActionBuilder, UnixRepositoryActionBuilder};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -606,6 +608,8 @@ enum StartupError {
     InvalidGitHubAppConfiguration,
     #[error("configured GitHub App source fetching requires RUNTRUE_GIT_MIRROR_ROOT")]
     GitHubAppRequiresMirrorRoot,
+    #[error("repository-action building requires both RUNTRUE_REPOSITORY_ACTION_BUILDER_SOCKET and RUNTRUE_REPOSITORY_ACTION_CONTEXT_ROOT, plus a live secure builder socket")]
+    InvalidRepositoryActionBuilder,
     #[error("GitHub App JWT provider socket `{0}` is not a secure local Unix socket")]
     InvalidGitHubSignerSocket(PathBuf),
     #[error("RUNTRUE_RUNNER_GRPC_LISTEN is not a valid socket address")]
@@ -974,7 +978,44 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                     github.credential_reference.clone(),
                     github.endpoints.clone(),
                 )?);
-                Some(state.scm_task_worker_with_github_app(worker_config, tokens)?)
+                #[cfg(feature = "github-actions")]
+                {
+                    let action_builder = match (
+                        env::var_os("RUNTRUE_REPOSITORY_ACTION_BUILDER_SOCKET"),
+                        env::var_os("RUNTRUE_REPOSITORY_ACTION_CONTEXT_ROOT"),
+                    ) {
+                        (None, None) => None,
+                        (Some(socket), Some(context_root)) => {
+                            let builder = UnixRepositoryActionBuilder::open(
+                                PathBuf::from(socket),
+                                PathBuf::from(context_root),
+                                Duration::from_secs(30 * 60),
+                            )
+                            .map_err(|_| StartupError::InvalidRepositoryActionBuilder)?;
+                            Some(Arc::new(builder) as Arc<dyn RepositoryActionBuilder>)
+                        }
+                        _ => return Err(StartupError::InvalidRepositoryActionBuilder.into()),
+                    };
+                    Some(if let Some(builder) = action_builder {
+                        state.scm_task_worker_with_github_app_and_action_builder(
+                            worker_config,
+                            tokens,
+                            load_github_installation_provider(github)?,
+                            builder,
+                        )?
+                    } else {
+                        state.scm_task_worker_with_github_app(worker_config, tokens)?
+                    })
+                }
+                #[cfg(not(feature = "github-actions"))]
+                {
+                    if env::var_os("RUNTRUE_REPOSITORY_ACTION_BUILDER_SOCKET").is_some()
+                        || env::var_os("RUNTRUE_REPOSITORY_ACTION_CONTEXT_ROOT").is_some()
+                    {
+                        return Err(StartupError::InvalidRepositoryActionBuilder.into());
+                    }
+                    Some(state.scm_task_worker_with_github_app(worker_config, tokens)?)
+                }
             } else {
                 Some(state.scm_task_worker(worker_config)?)
             }
