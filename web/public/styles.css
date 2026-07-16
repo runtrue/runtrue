@@ -435,10 +435,13 @@ svg { display: block; }
 .repo-option > span:last-child { padding: var(--space-1) var(--space-2); border-radius: var(--radius-pill); background: var(--bg); color: var(--muted); font-size: var(--text-xs); }
 .repo-empty { min-height: 220px; display: grid; place-items: center; text-align: center; color: var(--muted); font-size: var(--text-sm); }
 
-.dialog-footer { padding: var(--space-4) var(--space-6); border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+.dialog-footer { padding: var(--space-4) var(--space-6); border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); background: var(--surface); }
 .dialog-footer p { margin-bottom: 0; color: var(--muted); font-size: var(--text-sm); }
 .dialog-footer p strong { color: var(--fg); font-family: var(--font-mono); }
-.dialog-footer > div { display: flex; gap: var(--space-2); }
+.dialog-footer-meta,
+.dialog-footer-support,
+.dialog-footer-primary { display: flex; align-items: center; gap: var(--space-2); }
+.dialog-footer-meta { justify-content: space-between; }
 
 .toast {
   position: fixed;
@@ -961,16 +964,23 @@ svg { display: block; }
   .repo-table td:nth-child(3) { display: none; }
 
   .repo-dialog { width: 100vw; height: 100dvh; border: 0; border-radius: 0; }
-  .dialog-header { padding: var(--space-5); }
+  .dialog-shell { grid-template-rows: auto minmax(0, 1fr) auto; }
+  .dialog-header { padding: var(--space-4); gap: var(--space-4); }
   .dialog-header h2 { font-size: var(--text-xl); }
-  .dialog-browser { grid-template-columns: 1fr; grid-template-rows: minmax(220px, 42%) minmax(0, 1fr); }
+  .dialog-browser { display: block; overflow-y: auto; overscroll-behavior: contain; }
   .org-browser { padding: var(--space-4); border-right: 0; border-bottom: 1px solid var(--border); }
+  .org-list { min-height: auto; grid-auto-flow: column; grid-auto-columns: minmax(220px, 78vw); overflow-x: auto; overflow-y: hidden; overscroll-behavior-inline: contain; scroll-snap-type: inline proximity; }
+  .org-option { scroll-snap-align: start; }
   .repo-browser { padding: var(--space-4); }
   .repo-tools { grid-template-columns: 1fr; gap: var(--space-2); }
-  .dialog-footer { padding: var(--space-3) var(--space-4); align-items: stretch; flex-direction: column; }
-  .dialog-footer > div { display: grid; grid-template-columns: 1fr 1fr; }
-  .dialog-footer #dialog-manage-github { grid-column: 1 / -1; }
-  .dialog-footer .btn-inline { width: 100%; }
+  .repo-list { overflow: visible; }
+  .repo-empty { min-height: 180px; }
+  .dialog-footer { padding: var(--space-3) var(--space-4) max(var(--space-3), env(safe-area-inset-bottom)); align-items: stretch; flex-direction: column; gap: var(--space-2); }
+  .dialog-footer-meta { min-width: 0; }
+  .dialog-footer-support { min-width: 0; justify-content: flex-end; }
+  .dialog-footer-support .btn { min-height: 36px; padding: var(--space-1) var(--space-2); border-color: transparent; color: var(--muted); font-size: var(--text-xs); }
+  .dialog-footer-primary { display: grid; grid-template-columns: 1fr 1fr; }
+  .dialog-footer-primary .btn-inline { width: 100%; }
   .toast { right: var(--container-gutter-phone); bottom: var(--container-gutter-phone); }
 }
 

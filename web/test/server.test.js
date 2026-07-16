@@ -197,6 +197,21 @@ test("repository picker uses signed-in GitHub visibility and exposes app install
   assert.match(script, /function loadOrganizationRepositories\(organizationId\)/);
 });
 
+test("repository picker uses a single scroll region on phones", async () => {
+  const [html, styles] = await Promise.all([
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(html, /class="dialog-footer-meta"/);
+  assert.match(html, /class="dialog-footer-support"/);
+  assert.match(html, /class="dialog-footer-primary"/);
+  assert.match(styles, /@media \(max-width: 639px\)[\s\S]*?\.dialog-browser\s*\{[^}]*display:\s*block;[^}]*overflow-y:\s*auto;/);
+  assert.match(styles, /@media \(max-width: 639px\)[\s\S]*?\.org-list\s*\{[^}]*grid-auto-flow:\s*column;[^}]*overflow-x:\s*auto;/);
+  assert.match(styles, /@media \(max-width: 639px\)[\s\S]*?\.repo-list\s*\{[^}]*overflow:\s*visible;/);
+  assert.match(styles, /env\(safe-area-inset-bottom\)/);
+});
+
 test("audit events expose search and structured filters", async () => {
   const [html, script] = await Promise.all([
     readFile(new URL("../public/index.html", import.meta.url), "utf8"),
