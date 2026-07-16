@@ -2,6 +2,12 @@ use runtrue_control_plane::{
     ControlPlane, DurableTask, DurableTaskStatus, RepositoryRecord, ScmCheckPublicationState,
     ScmCheckPublishTask, ScmInstallationRecord, ScmRepositoryLinkRecord, ScmSourceFetchState,
 };
+#[cfg(feature = "github-actions")]
+use runtrue_control_plane::{
+    GitHubAccountKind as ControlPlaneGitHubAccountKind, GitHubInstallationRecord,
+    GitHubRepositorySelection as ControlPlaneGitHubRepositorySelection,
+    ReconcileGitHubInstallation, TenantIdentityRecord,
+};
 use runtrue_git::{GitLimits, GitRepository};
 use runtrue_model::ContentDigest;
 use runtrue_policy::{ApprovalDecision, ApprovalKind, Decision};
@@ -87,7 +93,7 @@ struct FixtureRepositoryActionBuilder {
 #[cfg(feature = "github-actions")]
 #[derive(Debug)]
 struct FixtureGitHubInstallationProvider {
-    snapshot: GitHubInstallationSnapshot,
+    snapshots: Vec<GitHubInstallationSnapshot>,
 }
 
 #[cfg(feature = "github-actions")]
@@ -97,10 +103,11 @@ impl GitHubInstallationProvider for FixtureGitHubInstallationProvider {
         installation_id: u64,
         _now_unix_seconds: u64,
     ) -> Result<GitHubInstallationSnapshot, GitHubError> {
-        if installation_id != self.snapshot.installation_id {
-            return Err(GitHubError::InvalidInstallation);
-        }
-        Ok(self.snapshot.clone())
+        self.snapshots
+            .iter()
+            .find(|snapshot| snapshot.installation_id == installation_id)
+            .cloned()
+            .ok_or(GitHubError::InvalidInstallation)
     }
 }
 
@@ -1311,6 +1318,21 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
     );
 
     let control = Arc::new(ControlPlane::open_in_memory("action-test", NOW).unwrap());
+    control
+        .put_tenant_identity(
+            &TenantIdentityRecord {
+                id: "tenant-1".to_owned(),
+                slug: "tenant-1".to_owned(),
+                name: "Tenant 1".to_owned(),
+                status: "active".to_owned(),
+                settings: serde_json::json!({}),
+                created_unix_ms: NOW,
+                updated_unix_ms: NOW,
+                version: 1,
+            },
+            None,
+        )
+        .unwrap();
     let repository = RepositoryRecord {
         id: "repository-action-backport".to_owned(),
         tenant_id: "tenant-1".to_owned(),
@@ -1321,8 +1343,8 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
         created_unix_ms: NOW,
     };
     control.create_repository(&repository).unwrap();
-    let installation = ScmInstallationRecord {
-        id: "github-installation-1".to_owned(),
+    let consumer_installation = ScmInstallationRecord {
+        id: "github-installation-agentops".to_owned(),
         tenant_id: "tenant-1".to_owned(),
         provider: "github".to_owned(),
         external_id: "9001".to_owned(),
@@ -1337,7 +1359,51 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
         created_unix_ms: NOW,
         updated_unix_ms: NOW,
     };
-    control.create_scm_installation(&installation).unwrap();
+    let source_installation = ScmInstallationRecord {
+        id: "github-installation-ci".to_owned(),
+        tenant_id: "tenant-1".to_owned(),
+        provider: "github".to_owned(),
+        external_id: "9002".to_owned(),
+        credential_reference: "provider://github-app/9002".to_owned(),
+        permissions: consumer_installation.permissions.clone(),
+        status: "active".to_owned(),
+        created_unix_ms: NOW,
+        updated_unix_ms: NOW,
+    };
+    for (installation, account_login) in [
+        (consumer_installation.clone(), "AgentOps"),
+        (source_installation.clone(), "ci"),
+    ] {
+        control.create_scm_installation(&installation).unwrap();
+        control
+            .reconcile_github_installation(&ReconcileGitHubInstallation {
+                installation: GitHubInstallationRecord {
+                    account_external_id: installation.external_id.clone(),
+                    account_login: account_login.to_owned(),
+                    account_kind: ControlPlaneGitHubAccountKind::Organization,
+                    repository_selection: ControlPlaneGitHubRepositorySelection::All,
+                    web_origin: "https://github.example.test".to_owned(),
+                    api_origin: "https://github.example.test/api/v3".to_owned(),
+                    lifecycle_generation: 1,
+                    synchronized_unix_ms: NOW,
+                    suspended_unix_ms: None,
+                    revoked_unix_ms: None,
+                    version: 1,
+                    installation,
+                },
+                selected_repositories: Vec::new(),
+                expected_version: None,
+                now_unix_ms: NOW,
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        control
+            .github_installation_for_tenant("tenant-1", &consumer_installation.id)
+            .unwrap()
+            .installation,
+        consumer_installation
+    );
     let fetch_requests = Arc::new(Mutex::new(Vec::new()));
     let fetcher: Arc<dyn ScmSourceFetcher> = Arc::new(FixtureSourceFetcher {
         repository: root.path().to_owned(),
@@ -1348,38 +1414,59 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
         image: image.clone(),
     });
     let installation_provider = Arc::new(FixtureGitHubInstallationProvider {
-        snapshot: GitHubInstallationSnapshot {
-            installation_id: 9001,
-            app_id: 7,
-            account: GitHubAccount {
-                id: 99,
-                login: "ci".to_owned(),
-                kind: GitHubAccountKind::Organization,
+        snapshots: vec![
+            GitHubInstallationSnapshot {
+                installation_id: 9001,
+                app_id: 7,
+                account: GitHubAccount {
+                    id: 98,
+                    login: "AgentOps".to_owned(),
+                    kind: GitHubAccountKind::Organization,
+                },
+                target_id: 98,
+                target_kind: GitHubAccountKind::Organization,
+                repository_selection: GitHubRepositorySelection::All,
+                permissions: std::collections::BTreeMap::from([
+                    (GitHubPermission::Metadata, GitHubPermissionLevel::Read),
+                    (GitHubPermission::Contents, GitHubPermissionLevel::Read),
+                ]),
+                suspended_at: None,
+                repository_catalog_complete: true,
+                repositories: Vec::new(),
             },
-            target_id: 99,
-            target_kind: GitHubAccountKind::Organization,
-            repository_selection: GitHubRepositorySelection::All,
-            permissions: std::collections::BTreeMap::from([
-                (GitHubPermission::Metadata, GitHubPermissionLevel::Read),
-                (GitHubPermission::Contents, GitHubPermissionLevel::Read),
-            ]),
-            suspended_at: None,
-            repository_catalog_complete: true,
-            repositories: vec![GitHubInstallationRepository {
-                id: 4242,
-                owner: GitHubAccount {
+            GitHubInstallationSnapshot {
+                installation_id: 9002,
+                app_id: 7,
+                account: GitHubAccount {
                     id: 99,
                     login: "ci".to_owned(),
                     kind: GitHubAccountKind::Organization,
                 },
-                name: "backport".to_owned(),
-                full_name: "ci/backport".to_owned(),
-                visibility: GitHubRepositoryVisibility::Private,
-                default_branch: Some("main".to_owned()),
-                archived: false,
-                disabled: false,
-            }],
-        },
+                target_id: 99,
+                target_kind: GitHubAccountKind::Organization,
+                repository_selection: GitHubRepositorySelection::All,
+                permissions: std::collections::BTreeMap::from([
+                    (GitHubPermission::Metadata, GitHubPermissionLevel::Read),
+                    (GitHubPermission::Contents, GitHubPermissionLevel::Read),
+                ]),
+                suspended_at: None,
+                repository_catalog_complete: true,
+                repositories: vec![GitHubInstallationRepository {
+                    id: 4242,
+                    owner: GitHubAccount {
+                        id: 99,
+                        login: "ci".to_owned(),
+                        kind: GitHubAccountKind::Organization,
+                    },
+                    name: "backport".to_owned(),
+                    full_name: "ci/backport".to_owned(),
+                    visibility: GitHubRepositoryVisibility::Private,
+                    default_branch: Some("main".to_owned()),
+                    archived: false,
+                    disabled: false,
+                }],
+            },
+        ],
     });
     let resolver = GitHubRepositoryActionResolver::new(
         Arc::clone(&control),
@@ -1391,7 +1478,7 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
     );
 
     let prepared = resolver
-        .resolve("tenant-1", "github-installation-1", &reference)
+        .resolve("tenant-1", &consumer_installation.id, &reference)
         .unwrap();
     assert_eq!(prepared.reference, reference);
     let runtrue_workflow_frontend::ResolvedRepositoryProgram::Container {
@@ -1422,6 +1509,11 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
     let fetched = fetch_requests.lock().unwrap();
     assert_eq!(fetched.len(), 1);
     assert_eq!(fetched[0].tenant_id, "tenant-1");
+    assert_eq!(fetched[0].installation.id, source_installation.id);
+    assert_eq!(
+        fetched[0].repository.installation_id,
+        source_installation.id
+    );
     assert_eq!(fetched[0].repository_id, "github-action-source-4242");
     assert_eq!(fetched[0].source_commit, commit);
     assert_eq!(fetched[0].base_commit, None);
@@ -1453,7 +1545,7 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
     let component_commit = output(root.path(), &["rev-parse", "HEAD"]);
     let component_reference = format!("ci/backport@{component_commit}");
     let prepared_component = resolver
-        .resolve("tenant-1", "github-installation-1", &component_reference)
+        .resolve("tenant-1", &consumer_installation.id, &component_reference)
         .unwrap();
     let runtrue_workflow_frontend::ResolvedRepositoryProgram::Component {
         reference: resolved_component,
@@ -1478,11 +1570,11 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
     assert_eq!(builder.requests.lock().unwrap().len(), 1);
 
     assert!(matches!(
-        resolver.resolve("tenant-other", "github-installation-1", &reference),
+        resolver.resolve("tenant-other", &consumer_installation.id, &reference),
         Err(RepositoryActionResolveError::Unauthorized)
     ));
     assert!(matches!(
-        resolver.resolve("tenant-1", "github-installation-1", "ci/backport@main"),
+        resolver.resolve("tenant-1", &consumer_installation.id, "ci/backport@main"),
         Err(RepositoryActionResolveError::Rejected)
     ));
     assert_eq!(fetch_requests.lock().unwrap().len(), 2);

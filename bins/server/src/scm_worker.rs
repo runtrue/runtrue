@@ -4,12 +4,13 @@ use runtrue_attest::CapsuleSigningKey;
 use runtrue_compiler::Compilation;
 use runtrue_control_plane::{
     CapsuleApiMetadata, ControlPlane, ControlPlaneError, CreateRunRequest, DurableTask,
-    DurableTaskStatus, NewJob, PreparedScmExecution, RecordScmCheckFailure, RecordScmCheckProgress,
-    RecordScmFetchSnapshotReady, RepositoryRecord, ReserveScmCheckPublication,
-    ReserveScmSourceFetch, ScmCheckPublicationState, ScmCheckPublishTask, ScmContinuationCommit,
-    ScmContinuationContext, ScmContinuationResolution, ScmExecutionRole, ScmInstallationRecord,
-    ScmProposedAnalysisRecord, ScmProposedAnalysisStatus, ScmRepositoryLinkRecord,
-    ScmSourceIdentity, SignedCapsuleRecord, SourceSnapshotRecord, SourceSnapshotState,
+    DurableTaskStatus, GitHubInstallationRecord, NewJob, PreparedScmExecution,
+    RecordScmCheckFailure, RecordScmCheckProgress, RecordScmFetchSnapshotReady, RepositoryRecord,
+    ReserveScmCheckPublication, ReserveScmSourceFetch, ScmCheckPublicationState,
+    ScmCheckPublishTask, ScmContinuationCommit, ScmContinuationContext, ScmContinuationResolution,
+    ScmExecutionRole, ScmInstallationRecord, ScmProposedAnalysisRecord, ScmProposedAnalysisStatus,
+    ScmRepositoryLinkRecord, ScmSourceIdentity, SignedCapsuleRecord, SourceSnapshotRecord,
+    SourceSnapshotState,
 };
 #[cfg(feature = "github-actions")]
 use runtrue_gha_import::{
@@ -27,14 +28,16 @@ use runtrue_policy::{
     Decision as ApprovalDecisionKind,
 };
 use runtrue_scheduler::SchedulingRequirements;
-#[cfg(feature = "github-actions")]
-use runtrue_scm::SharedGitHubInstallationProvider;
 use runtrue_scm::{
     CheckConclusion, CheckRunRequest, CheckRunRequestedAction, CheckStatus, EventEnvelope,
     EventType, GitHubAppBroker, GitHubAppJwtProvider, GitHubError, GitHubPermission,
     GitHubPermissionLevel, GitHubProviderEndpoints, GitHubRepositoryCredential, GitHubTransport,
     GitRevision, InstallationTokenRequest, ProviderKind, WorkflowDefinitionApprovalEvidence,
     WorkflowDefinitionApprovalVerifier, WorkflowSourceError, WorkflowSourceInputs,
+};
+#[cfg(feature = "github-actions")]
+use runtrue_scm::{
+    GitHubInstallationRepository, GitHubInstallationSnapshot, SharedGitHubInstallationProvider,
 };
 use runtrue_storage::FsCas;
 use runtrue_trusted_planner::{
@@ -75,6 +78,8 @@ const MAX_TASK_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_DEFINITION_DIFF_LINES_PER_SIDE: usize = 80;
 const MAX_DEFINITION_DIFF_BYTES: usize = 16 * 1024;
 const APPROVAL_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+#[cfg(feature = "github-actions")]
+const GITHUB_INSTALLATION_PAGE_SIZE: usize = 100;
 #[cfg(feature = "github-actions")]
 static GITHUB_ACTIONS_FRONTEND: GithubActionsFrontend = GithubActionsFrontend;
 #[cfg(feature = "github-actions")]
@@ -838,6 +843,74 @@ pub enum RepositoryActionResolveError {
     Unavailable,
 }
 
+#[cfg(feature = "github-actions")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepositoryActionSourceSelectionError {
+    Missing,
+    Ambiguous,
+}
+
+#[cfg(feature = "github-actions")]
+fn eligible_repository_action_installation(
+    installation: &GitHubInstallationRecord,
+    tenant_id: &str,
+    endpoints: &GitHubProviderEndpoints,
+) -> bool {
+    installation.installation.tenant_id == tenant_id
+        && installation.installation.provider == "github"
+        && installation.installation.status == "active"
+        && installation.web_origin == endpoints.web_origin()
+        && installation.api_origin == endpoints.api_origin()
+        && installation.suspended_unix_ms.is_none()
+        && installation.revoked_unix_ms.is_none()
+}
+
+#[cfg(feature = "github-actions")]
+fn select_repository_action_source(
+    tenant_id: &str,
+    endpoints: &GitHubProviderEndpoints,
+    owner: &str,
+    name: &str,
+    inspected: Vec<(GitHubInstallationRecord, GitHubInstallationSnapshot)>,
+) -> Result<
+    (ScmInstallationRecord, GitHubInstallationRepository),
+    RepositoryActionSourceSelectionError,
+> {
+    let full_name = format!("{owner}/{name}");
+    let mut candidates = inspected
+        .into_iter()
+        .filter(|(installation, snapshot)| {
+            eligible_repository_action_installation(installation, tenant_id, endpoints)
+                && installation
+                    .installation
+                    .external_id
+                    .parse::<u64>()
+                    .ok()
+                    .is_some_and(|external_id| external_id == snapshot.installation_id)
+                && snapshot.suspended_at.is_none()
+                && snapshot.repository_catalog_complete
+        })
+        .filter_map(|(installation, snapshot)| {
+            snapshot
+                .repositories
+                .into_iter()
+                .find(|repository| {
+                    repository.owner.login == owner
+                        && repository.name == name
+                        && repository.full_name == full_name
+                        && !repository.archived
+                        && !repository.disabled
+                })
+                .map(|repository| (installation.installation, repository))
+        })
+        .collect::<Vec<_>>();
+    match candidates.len() {
+        0 => Err(RepositoryActionSourceSelectionError::Missing),
+        1 => Ok(candidates.pop().expect("one candidate must be present")),
+        _ => Err(RepositoryActionSourceSelectionError::Ambiguous),
+    }
+}
+
 /// Trusted preparation boundary for immutable repository-backed Programs.
 /// Implementations fetch and build outside the control-plane process and
 /// return only an exact OCI manifest digest plus audit identity.
@@ -931,57 +1004,91 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
         {
             return Err(RepositoryActionResolveError::Rejected);
         }
-        let installation = self
+        let consumer_installation = self
             .control_plane
-            .scm_installation_for_tenant(tenant_id, installation_id)
+            .github_installation_for_tenant(tenant_id, installation_id)
             .map_err(|_| {
-                eprintln!("repository action authorization failed: installation lookup");
+                eprintln!("repository action authorization failed: consumer installation lookup");
                 RepositoryActionResolveError::Unauthorized
             })?;
-        if installation.status != "active" || installation.provider != "github" {
-            eprintln!("repository action authorization failed: installation state");
+        if !eligible_repository_action_installation(
+            &consumer_installation,
+            tenant_id,
+            &self.endpoints,
+        ) {
+            eprintln!("repository action authorization failed: consumer installation state");
             return Err(RepositoryActionResolveError::Unauthorized);
         }
-        let external_installation_id = parse_github_external_id(&installation.external_id)
-            .map_err(|_| {
-                eprintln!("repository action authorization failed: installation binding");
-                RepositoryActionResolveError::Unauthorized
-            })?;
         let now_unix_seconds =
             unix_ms().map_err(|_| RepositoryActionResolveError::Unavailable)? / 1_000;
-        let snapshot = self
-            .installation_provider
-            .inspect_installation(external_installation_id, now_unix_seconds)
-            .map_err(|error| {
-                let classified = classify_repository_action_inspection_error(&error);
-                if matches!(classified, RepositoryActionResolveError::Unauthorized) {
-                    eprintln!(
-                        "repository action authorization failed: installation inspection ({error})"
-                    );
+        let mut after_id = None;
+        let mut inspected = Vec::new();
+        loop {
+            let page = self
+                .control_plane
+                .list_github_installations_for_tenant(
+                    tenant_id,
+                    after_id.as_deref(),
+                    GITHUB_INSTALLATION_PAGE_SIZE,
+                )
+                .map_err(|_| RepositoryActionResolveError::Unavailable)?;
+            let page_len = page.len();
+            for installation in page {
+                after_id = Some(installation.installation.id.clone());
+                if !eligible_repository_action_installation(
+                    &installation,
+                    tenant_id,
+                    &self.endpoints,
+                ) {
+                    continue;
                 }
-                classified
-            })?;
-        if snapshot.installation_id != external_installation_id
-            || snapshot.suspended_at.is_some()
-            || !snapshot.repository_catalog_complete
-        {
-            eprintln!("repository action authorization failed: installation snapshot");
-            return Err(RepositoryActionResolveError::Unauthorized);
+                let external_installation_id = parse_github_external_id(
+                    &installation.installation.external_id,
+                )
+                .map_err(|_| {
+                    eprintln!(
+                        "repository action authorization failed: source installation binding"
+                    );
+                    RepositoryActionResolveError::Unauthorized
+                })?;
+                match self
+                    .installation_provider
+                    .inspect_installation(external_installation_id, now_unix_seconds)
+                {
+                    Ok(snapshot) => inspected.push((installation, snapshot)),
+                    Err(error) => {
+                        let classified = classify_repository_action_inspection_error(&error);
+                        if matches!(classified, RepositoryActionResolveError::Unavailable) {
+                            return Err(classified);
+                        }
+                        eprintln!(
+                            "repository action authorization skipped inaccessible tenant installation"
+                        );
+                    }
+                }
+            }
+            if page_len < GITHUB_INSTALLATION_PAGE_SIZE {
+                break;
+            }
         }
-        let source = snapshot
-            .repositories
-            .into_iter()
-            .find(|repository| {
-                repository.owner.login == owner
-                    && repository.name == name
-                    && repository.full_name == format!("{owner}/{name}")
-                    && !repository.archived
-                    && !repository.disabled
-            })
-            .ok_or_else(|| {
-                eprintln!("repository action authorization failed: source repository access");
-                RepositoryActionResolveError::Unauthorized
-            })?;
+        let (installation, source) = select_repository_action_source(
+            tenant_id,
+            &self.endpoints,
+            owner,
+            name,
+            inspected,
+        )
+        .map_err(|error| {
+            match error {
+                RepositoryActionSourceSelectionError::Missing => eprintln!(
+                    "repository action authorization failed: source repository is absent from active tenant installations"
+                ),
+                RepositoryActionSourceSelectionError::Ambiguous => eprintln!(
+                    "repository action authorization failed: source repository installation is ambiguous"
+                ),
+            }
+            RepositoryActionResolveError::Unauthorized
+        })?;
         let repository_id = format!("github-action-source-{}", source.id);
         let link = ScmRepositoryLinkRecord {
             repository_id: repository_id.clone(),
@@ -4644,6 +4751,227 @@ mod tests {
                 "runtrue"
             ));
         }
+    }
+
+    #[cfg(feature = "github-actions")]
+    fn action_installation(
+        id: &str,
+        external_id: u64,
+        tenant_id: &str,
+        web_origin: &str,
+        status: &str,
+    ) -> GitHubInstallationRecord {
+        GitHubInstallationRecord {
+            installation: ScmInstallationRecord {
+                id: id.to_owned(),
+                tenant_id: tenant_id.to_owned(),
+                provider: "github".to_owned(),
+                external_id: external_id.to_string(),
+                credential_reference: format!("credential-{external_id}"),
+                permissions: serde_json::json!({
+                    "metadata": "read",
+                    "contents": "read"
+                }),
+                status: status.to_owned(),
+                created_unix_ms: 1,
+                updated_unix_ms: 1,
+            },
+            web_origin: web_origin.to_owned(),
+            api_origin: if web_origin == "https://github.com" {
+                "https://api.github.com".to_owned()
+            } else {
+                format!("{web_origin}/api/v3")
+            },
+            account_external_id: external_id.to_string(),
+            account_login: format!("account-{external_id}"),
+            account_kind: runtrue_control_plane::GitHubAccountKind::Organization,
+            repository_selection: runtrue_control_plane::GitHubRepositorySelection::All,
+            lifecycle_generation: 1,
+            synchronized_unix_ms: 1,
+            suspended_unix_ms: None,
+            revoked_unix_ms: None,
+            version: 1,
+        }
+    }
+
+    #[cfg(feature = "github-actions")]
+    fn action_repository(id: u64, owner: &str, name: &str) -> GitHubInstallationRepository {
+        GitHubInstallationRepository {
+            id,
+            owner: runtrue_scm::GitHubAccount {
+                id: id + 1_000,
+                login: owner.to_owned(),
+                kind: runtrue_scm::GitHubAccountKind::Organization,
+            },
+            name: name.to_owned(),
+            full_name: format!("{owner}/{name}"),
+            visibility: runtrue_scm::GitHubRepositoryVisibility::Private,
+            default_branch: Some("main".to_owned()),
+            archived: false,
+            disabled: false,
+        }
+    }
+
+    #[cfg(feature = "github-actions")]
+    fn action_snapshot(
+        installation_id: u64,
+        repositories: Vec<GitHubInstallationRepository>,
+    ) -> GitHubInstallationSnapshot {
+        GitHubInstallationSnapshot {
+            installation_id,
+            app_id: 7,
+            account: runtrue_scm::GitHubAccount {
+                id: installation_id,
+                login: format!("account-{installation_id}"),
+                kind: runtrue_scm::GitHubAccountKind::Organization,
+            },
+            target_id: installation_id,
+            target_kind: runtrue_scm::GitHubAccountKind::Organization,
+            repository_selection: runtrue_scm::GitHubRepositorySelection::All,
+            permissions: std::collections::BTreeMap::from([
+                (GitHubPermission::Metadata, GitHubPermissionLevel::Read),
+                (GitHubPermission::Contents, GitHubPermissionLevel::Read),
+            ]),
+            suspended_at: None,
+            repository_catalog_complete: true,
+            repositories,
+        }
+    }
+
+    #[cfg(feature = "github-actions")]
+    #[test]
+    fn repository_action_source_can_use_another_installation_in_the_tenant() {
+        let endpoints = GitHubProviderEndpoints::new(
+            "https://github.example.com",
+            "https://github.example.com/api/v3",
+        )
+        .unwrap();
+        let consumer = action_installation(
+            "installation-agentops",
+            42_417,
+            "quickstart",
+            endpoints.web_origin(),
+            "active",
+        );
+        let source = action_installation(
+            "installation-ci",
+            42_342,
+            "quickstart",
+            endpoints.web_origin(),
+            "active",
+        );
+        let (installation, repository) = select_repository_action_source(
+            "quickstart",
+            &endpoints,
+            "ci",
+            "backport",
+            vec![
+                (consumer, action_snapshot(42_417, Vec::new())),
+                (
+                    source,
+                    action_snapshot(42_342, vec![action_repository(2_100_001, "ci", "backport")]),
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(installation.id, "installation-ci");
+        assert_eq!(repository.full_name, "ci/backport");
+    }
+
+    #[cfg(feature = "github-actions")]
+    #[test]
+    fn repository_action_source_is_tenant_and_origin_scoped() {
+        let endpoints = GitHubProviderEndpoints::new(
+            "https://github.example.com",
+            "https://github.example.com/api/v3",
+        )
+        .unwrap();
+        let foreign_tenant = action_installation(
+            "installation-foreign-tenant",
+            2,
+            "other-tenant",
+            endpoints.web_origin(),
+            "active",
+        );
+        let foreign_origin = action_installation(
+            "installation-foreign-origin",
+            3,
+            "quickstart",
+            "https://other.example.com",
+            "active",
+        );
+        let inactive = action_installation(
+            "installation-inactive",
+            4,
+            "quickstart",
+            endpoints.web_origin(),
+            "revoked",
+        );
+
+        assert_eq!(
+            select_repository_action_source(
+                "quickstart",
+                &endpoints,
+                "ci",
+                "backport",
+                vec![
+                    (
+                        foreign_tenant,
+                        action_snapshot(2, vec![action_repository(20, "ci", "backport")]),
+                    ),
+                    (
+                        foreign_origin,
+                        action_snapshot(3, vec![action_repository(30, "ci", "backport")]),
+                    ),
+                    (
+                        inactive,
+                        action_snapshot(4, vec![action_repository(40, "ci", "backport")]),
+                    ),
+                ],
+            ),
+            Err(RepositoryActionSourceSelectionError::Missing)
+        );
+    }
+
+    #[cfg(feature = "github-actions")]
+    #[test]
+    fn repository_action_source_rejects_ambiguous_installations() {
+        let endpoints = GitHubProviderEndpoints::github_dot_com();
+        let first = action_installation(
+            "installation-first",
+            10,
+            "quickstart",
+            endpoints.web_origin(),
+            "active",
+        );
+        let second = action_installation(
+            "installation-second",
+            11,
+            "quickstart",
+            endpoints.web_origin(),
+            "active",
+        );
+
+        assert_eq!(
+            select_repository_action_source(
+                "quickstart",
+                &endpoints,
+                "ci",
+                "backport",
+                vec![
+                    (
+                        first,
+                        action_snapshot(10, vec![action_repository(100, "ci", "backport")]),
+                    ),
+                    (
+                        second,
+                        action_snapshot(11, vec![action_repository(100, "ci", "backport")]),
+                    ),
+                ],
+            ),
+            Err(RepositoryActionSourceSelectionError::Ambiguous)
+        );
     }
 
     fn repository(root: &Path, owner: &str, name: &str, source: Option<&[u8]>) -> String {
