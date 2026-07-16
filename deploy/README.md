@@ -368,24 +368,35 @@ sudo install -m 0644 deploy/systemd/runtrue-server.service /etc/systemd/system/r
 ```
 
 Exact-commit repository Docker actions are an optional same-host extension for
-a configured OCI runner. Provision a dedicated `docker-container` Buildx
-instance under the same `DOCKER_CONFIG` used by the service. Its container must
-use an ordinary bridge network; `network=host` is forbidden. Pin and record the
-reviewed BuildKit image/config as part of the versioned build policy before
-creating it. For example, after replacing `BUILDKIT_IMAGE_BY_DIGEST` with a
-reviewed immutable reference:
+a configured OCI runner. Provision a dedicated, pinned BuildKit daemon on an
+ordinary Docker bridge, then register it with Buildx's `remote` driver under
+the same `DOCKER_CONFIG` used by the service. Do not use Buildx's managed
+`docker-container` driver here: current Buildx releases automatically grant
+the daemon's `network.host` entitlement even when the outer container uses a
+bridge. `network=host` and all insecure daemon entitlements are forbidden. For
+example, after replacing `BUILDKIT_IMAGE_BY_DIGEST` with a reviewed immutable
+reference:
 
 ```sh
+sudo docker run --detach \
+  --name runtrue-actions-buildkitd \
+  --privileged \
+  --network bridge \
+  --restart unless-stopped \
+  BUILDKIT_IMAGE_BY_DIGEST
 sudo env DOCKER_CONFIG=/var/lib/runtrue-action-builder/docker \
   docker buildx create \
   --name runtrue-actions-builder \
-  --driver docker-container \
-  --driver-opt network=bridge \
-  --driver-opt image=BUILDKIT_IMAGE_BY_DIGEST \
-  --bootstrap
+  --driver remote \
+  docker-container://runtrue-actions-buildkitd
 sudo env DOCKER_CONFIG=/var/lib/runtrue-action-builder/docker \
-  docker buildx inspect runtrue-actions-builder
+  docker buildx inspect --bootstrap runtrue-actions-builder
+sudo docker inspect runtrue-actions-buildkitd \
+  --format '{{json .HostConfig.NetworkMode}} {{json .Config.Cmd}} {{.Config.Image}}'
 ```
+
+The final inspection must show bridge networking, the exact reviewed image,
+and no BuildKit daemon command-line entitlements.
 
 Do not reuse a general-purpose or host-networked builder. Limit the builder
 bridge's egress to the reviewed Docker Hub registry endpoints needed to fetch

@@ -21,7 +21,7 @@ const MAX_DOCKERFILE_BYTES: u64 = 1024 * 1024;
 const MAX_OCI_ARCHIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const BUILD_POLICY_ID: &str = "runtrue.repository-action-build.v2.network-none.pinned-materials";
 const BUILD_ENVIRONMENT_ID: &str =
-    "runtrue.buildkit.v0.30.0.docker-container.bridge.no-insecure-entitlements";
+    "runtrue.buildkit.v0.30.0.remote-docker-container.bridge.no-insecure-entitlements";
 const MAX_ALLOWED_BASE_IMAGES: usize = 32;
 
 #[derive(Debug, Parser)]
