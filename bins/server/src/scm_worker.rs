@@ -952,16 +952,14 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
         let snapshot = self
             .installation_provider
             .inspect_installation(external_installation_id, now_unix_seconds)
-            .map_err(|error| match error {
-                GitHubError::Transport | GitHubError::RateLimited { .. } => {
-                    RepositoryActionResolveError::Unavailable
-                }
-                _ => {
+            .map_err(|error| {
+                let classified = classify_repository_action_inspection_error(&error);
+                if matches!(classified, RepositoryActionResolveError::Unauthorized) {
                     eprintln!(
                         "repository action authorization failed: installation inspection ({error})"
                     );
-                    RepositoryActionResolveError::Unauthorized
                 }
+                classified
             })?;
         if snapshot.installation_id != external_installation_id
             || snapshot.suspended_at.is_some()
@@ -1073,6 +1071,31 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
             metadata_digest: metadata.digest,
             inputs: metadata.inputs,
         })
+    }
+}
+
+fn classify_repository_action_inspection_error(
+    error: &GitHubError,
+) -> RepositoryActionResolveError {
+    match error {
+        GitHubError::RateLimited { .. }
+        | GitHubError::ResponseTooLarge
+        | GitHubError::MalformedResponse
+        | GitHubError::UnexpectedStatus(408 | 425 | 500..=599)
+        | GitHubError::Transport
+        | GitHubError::JwtProvider => RepositoryActionResolveError::Unavailable,
+        GitHubError::InvalidConfiguration
+        | GitHubError::InvalidInstallState
+        | GitHubError::InvalidInstallation
+        | GitHubError::InstallationSubstitution
+        | GitHubError::InsufficientInstallationPermissions
+        | GitHubError::RepositoryCatalogTooLarge
+        | GitHubError::InvalidTokenScope
+        | GitHubError::InvalidCheckRequest
+        | GitHubError::RequestTooLarge
+        | GitHubError::UnexpectedStatus(_)
+        | GitHubError::AmbiguousCheckReconciliation
+        | GitHubError::PartialPublish { .. } => RepositoryActionResolveError::Unauthorized,
     }
 }
 
@@ -5132,6 +5155,30 @@ fn repository_credential_failures_distinguish_outages_from_denials() {
         assert!(matches!(
             classify_repository_credential_error(error),
             ScmSourceFetchError::CredentialUnavailable
+        ));
+    }
+
+    for error in [
+        GitHubError::Transport,
+        GitHubError::RateLimited {
+            retry_after_seconds: 30,
+        },
+        GitHubError::UnexpectedStatus(502),
+        GitHubError::MalformedResponse,
+    ] {
+        assert!(matches!(
+            classify_repository_action_inspection_error(&error),
+            RepositoryActionResolveError::Unavailable
+        ));
+    }
+    for error in [
+        GitHubError::InvalidInstallation,
+        GitHubError::InstallationSubstitution,
+        GitHubError::UnexpectedStatus(403),
+    ] {
+        assert!(matches!(
+            classify_repository_action_inspection_error(&error),
+            RepositoryActionResolveError::Unauthorized
         ));
     }
 }
