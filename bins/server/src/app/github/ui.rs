@@ -1337,10 +1337,49 @@ fn github_user_organization_catalog(
         .filter(|installation| installation.state == UiGitHubInstallationState::Active)
         .map(|installation| installation.account_login.to_ascii_lowercase())
         .collect::<std::collections::BTreeSet<_>>();
-    let mut organizations = BTreeMap::<String, BTreeMap<String, Value>>::new();
-    organizations.entry(viewer_login.to_owned()).or_default();
+    let mut organizations = BTreeMap::<String, (String, BTreeMap<String, Value>)>::new();
+    organizations
+        .entry(viewer_login.to_ascii_lowercase())
+        .or_insert_with(|| (viewer_login.to_owned(), BTreeMap::new()));
+    for installation in page
+        .installations
+        .iter()
+        .filter(|installation| installation.state == UiGitHubInstallationState::Active)
+    {
+        organizations
+            .entry(installation.account_login.to_ascii_lowercase())
+            .or_insert_with(|| (installation.account_login.clone(), BTreeMap::new()));
+    }
     for organization in &catalog.organizations {
-        organizations.entry(organization.clone()).or_default();
+        organizations
+            .entry(organization.to_ascii_lowercase())
+            .or_insert_with(|| (organization.clone(), BTreeMap::new()));
+    }
+    // The App installation is the authority for repositories that can be
+    // linked. Keep those candidates visible even when an organization's OAuth
+    // policy hides it from /user/orgs or /user/repos.
+    for candidate in &page.repository_candidates {
+        let external_id = candidate.external_repository_id.clone();
+        organizations
+            .entry(candidate.owner.to_ascii_lowercase())
+            .or_insert_with(|| (candidate.owner.clone(), BTreeMap::new()))
+            .1
+            .insert(
+                format!("{}:{external_id}", candidate.name),
+                json!({
+                    "name": candidate.name,
+                    "visibility": match candidate.visibility {
+                        RepositoryVisibility::Public => "Public",
+                        RepositoryVisibility::Internal => "Internal",
+                        RepositoryVisibility::Private => "Private",
+                    },
+                    "defaultBranch": candidate.default_branch,
+                    "externalRepositoryId": external_id,
+                    "installationId": candidate.installation_id,
+                    "csrfToken": candidate.csrf_token,
+                    "state": "available",
+                }),
+            );
     }
     for repository in &catalog.repositories {
         let external_id = repository.repository_id.to_string();
@@ -1355,8 +1394,9 @@ fn github_user_organization_catalog(
             "needs_installation"
         };
         organizations
-            .entry(repository.owner.clone())
-            .or_default()
+            .entry(repository.owner.to_ascii_lowercase())
+            .or_insert_with(|| (repository.owner.clone(), BTreeMap::new()))
+            .1
             .insert(
                 format!("{}:{external_id}", repository.name),
                 json!({
@@ -1378,7 +1418,7 @@ fn github_user_organization_catalog(
     Value::Array(
         organizations
             .into_iter()
-            .map(|(name, repositories)| {
+            .map(|(_, (name, repositories))| {
                 json!({
                     "id": name,
                     "name": name,
@@ -2484,5 +2524,69 @@ mod user_catalog_tests {
             .unwrap()
             .iter()
             .any(|organization| organization["name"] == "ada"));
+    }
+
+    #[test]
+    fn installed_repository_candidates_survive_an_oauth_catalog_omission() {
+        let page = GitHubInstallationsPage {
+            tenant_name: "Forge".to_owned(),
+            principal_name: "Ada".to_owned(),
+            session_csrf_token: "session-csrf".to_owned(),
+            app: GitHubAppHealth {
+                app_id: Some(42),
+                app_slug: Some("runtrue-ci".to_owned()),
+                provider_host: "github.example".to_owned(),
+                app: ComponentHealth::Ready,
+                signer: ComponentHealth::Ready,
+                webhook: ComponentHealth::Ready,
+                callback: ComponentHealth::Ready,
+            },
+            installations: vec![GitHubInstallationView {
+                installation_id: 42_417,
+                account_login: "AgentOps".to_owned(),
+                account_kind: UiGitHubAccountKind::Organization,
+                state: UiGitHubInstallationState::Active,
+                repository_selection: RepositorySelection::All,
+                permissions: vec![UiGitHubPermission::MetadataRead],
+            }],
+            repositories: Vec::new(),
+            repository_candidates: vec![GitHubRepositoryCandidateAction {
+                installation_id: "github-installation-42417".to_owned(),
+                external_repository_id: "2042673".to_owned(),
+                owner: "AgentOps".to_owned(),
+                name: "agentops-service".to_owned(),
+                visibility: RepositoryVisibility::Private,
+                default_branch: "main".to_owned(),
+                csrf_token: "candidate-csrf".to_owned(),
+            }],
+            events: Vec::new(),
+            alert: None,
+            install_action: None,
+        };
+        let oauth_catalog = GitHubUserCatalog {
+            organizations: vec!["agentops".to_owned()],
+            repositories: Vec::new(),
+        };
+
+        let organizations = github_user_organization_catalog("ada", &oauth_catalog, &page);
+        let organizations = organizations.as_array().unwrap();
+        let agentops = organizations
+            .iter()
+            .filter(|organization| {
+                organization["name"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("AgentOps"))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(agentops.len(), 1);
+        assert_eq!(agentops[0]["name"], "AgentOps");
+        assert_eq!(agentops[0]["repositories"].as_array().unwrap().len(), 1);
+        assert_eq!(agentops[0]["repositories"][0]["name"], "agentops-service");
+        assert_eq!(agentops[0]["repositories"][0]["state"], "available");
+        assert_eq!(
+            agentops[0]["repositories"][0]["installationId"],
+            "github-installation-42417"
+        );
     }
 }
