@@ -109,6 +109,8 @@ pub(crate) struct PermissionState {
     pub(crate) cache_read: ast::CacheRead,
     pub(crate) cache_write: ast::CacheWrite,
     pub(crate) secrets: BTreeMap<String, String>,
+    pub(crate) network_destinations: std::collections::BTreeSet<(String, u16)>,
+    pub(crate) allow_private_network: bool,
 }
 
 impl Default for PermissionState {
@@ -126,6 +128,8 @@ impl Default for PermissionState {
             cache_read: ast::CacheRead::Deny,
             cache_write: ast::CacheWrite::Deny,
             secrets: BTreeMap::new(),
+            network_destinations: Default::default(),
+            allow_private_network: false,
         }
     }
 }
@@ -144,6 +148,9 @@ impl PermissionState {
         self.cache_read = merge_cache_read(self.cache_read, other.cache_read);
         self.cache_write = merge_cache_write(self.cache_write, other.cache_write);
         self.secrets.extend(other.secrets.clone());
+        self.network_destinations
+            .extend(other.network_destinations.clone());
+        self.allow_private_network |= other.allow_private_network;
     }
 
     pub(crate) fn native(&self) -> NativePermissions {
@@ -159,7 +166,24 @@ impl PermissionState {
             checks: self.checks,
             artifacts: self.artifacts,
             registry: self.registry,
-            network: "deny",
+            network: if self.network_destinations.is_empty() {
+                ast::NetworkPermission::Keyword("deny".to_owned())
+            } else {
+                ast::NetworkPermission::Policy(ast::NetworkPolicy {
+                    dns: ast::DnsPolicy::Restricted,
+                    deny_private_ranges: !self.allow_private_network,
+                    allow: self
+                        .network_destinations
+                        .iter()
+                        .map(|(host, port)| ast::NetworkDestination {
+                            host: host.clone(),
+                            port: *port,
+                            protocol: ast::NetworkProtocol::Tcp,
+                        })
+                        .collect(),
+                    listen: Vec::new(),
+                })
+            },
             oidc: "deny",
             cache: NativeCachePermissions {
                 read: self.cache_read,
@@ -186,7 +210,7 @@ pub(crate) struct NativePermissions {
     pub(crate) checks: ast::Access,
     pub(crate) artifacts: ast::Access,
     pub(crate) registry: ast::Access,
-    pub(crate) network: &'static str,
+    pub(crate) network: ast::NetworkPermission,
     pub(crate) oidc: &'static str,
     pub(crate) cache: NativeCachePermissions,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -278,7 +302,12 @@ pub(crate) struct NativeStep {
     pub(crate) name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "if")]
     pub(crate) condition: Option<String>,
-    pub(crate) run: NativeRun,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) uses: Option<String>,
+    #[serde(default, rename = "with", skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) inputs: BTreeMap<String, ast::Scalar>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) run: Option<NativeRun>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) env: BTreeMap<String, ast::Scalar>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -305,6 +334,15 @@ pub(crate) enum NativeRun {
     Command(NativeCommand),
     Script(NativeScript),
     Container(NativeContainerRun),
+    Component(NativeComponentRun),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeComponentRun {
+    pub(crate) reference: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) inputs: BTreeMap<String, ast::Scalar>,
 }
 
 #[derive(Debug, Serialize)]

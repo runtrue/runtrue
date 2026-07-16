@@ -18,6 +18,13 @@ pub(super) fn adapters_for_lease(
         }
         (true, None) => return Err(RunnerError::BrokerUnavailable),
     };
+    if job
+        .steps
+        .iter()
+        .any(|step| step.capabilities.network != runtrue_workflow_ir::NetworkPermission::Deny)
+    {
+        adapters = adapters.with_network(Arc::new(super::network::HttpsNetworkAdapter::new()?));
+    }
     if job.steps.iter().any(step_requires_filesystem) {
         // Lease preflight runs before source hydration creates the workspace.
         // This adapter is never used for execution; it only lets the Wasm

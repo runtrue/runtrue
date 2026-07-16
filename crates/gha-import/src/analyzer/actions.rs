@@ -10,13 +10,13 @@ use super::{
 };
 use crate::{
     native::{
-        NativeCommand, NativeContainerInvocation, NativeContainerRun, NativeRun,
-        NativeSecretRequest, NativeStepCapabilities,
+        GeneratedComponentLock, NativeCommand, NativeComponentRun, NativeContainerInvocation,
+        NativeContainerRun, NativeRun, NativeSecretRequest, NativeStepCapabilities,
     },
     report::CompatibilityStatus,
-    validation::{is_full_git_commit, is_full_sha256_image, yaml_text},
+    validation::{is_exact_wasm_component, is_full_git_commit, is_full_sha256_image, yaml_text},
 };
-use runtrue_workflow_frontend::ResolvedRepositoryAction;
+use runtrue_workflow_frontend::{ResolvedRepositoryAction, ResolvedRepositoryProgram};
 use serde_yaml::Value as YamlValue;
 use std::collections::BTreeMap;
 
@@ -224,31 +224,176 @@ impl Analyzer {
         path: &str,
         effects: &mut JobEffects,
     ) -> ActionMapping {
-        if !is_full_sha256_image(&action.image) {
+        match &action.program {
+            ResolvedRepositoryProgram::Container { image, .. } => {
+                if !is_full_sha256_image(image) {
+                    self.unresolved_action_inputs(inputs, path, CompatibilityStatus::Unsafe);
+                    self.finding(
+                        CompatibilityStatus::Unsafe,
+                        "mutable-repository-action-resolution",
+                        format!("{path}.uses"),
+                        "trusted repository-action resolution is not a complete lowercase OCI digest pin",
+                        Some("Rebuild the exact action commit and record its immutable OCI manifest digest.".to_owned()),
+                    );
+                    return ActionMapping::placeholder();
+                }
+                self.map_prepared_container_action(
+                    PreparedContainerAction {
+                        source: reference,
+                        image,
+                        metadata: Some(action),
+                        finding_code: "pinned-repository-docker-action",
+                    },
+                    inputs,
+                    path,
+                    effects,
+                )
+            }
+            ResolvedRepositoryProgram::Component {
+                reference: component,
+                scm_api_url,
+                signature_identity,
+                wit_world,
+            } => self.map_prepared_component_action(
+                reference,
+                component,
+                scm_api_url,
+                signature_identity,
+                wit_world,
+                action,
+                inputs,
+                path,
+                effects,
+            ),
+        }
+    }
+
+    fn map_prepared_component_action(
+        &mut self,
+        source: &str,
+        component: &str,
+        scm_api_url: &str,
+        signature_identity: &str,
+        wit_world: &str,
+        metadata: &ResolvedRepositoryAction,
+        inputs: &BTreeMap<String, YamlValue>,
+        path: &str,
+        effects: &mut JobEffects,
+    ) -> ActionMapping {
+        if !is_exact_wasm_component(component) {
             self.unresolved_action_inputs(inputs, path, CompatibilityStatus::Unsafe);
             self.finding(
                 CompatibilityStatus::Unsafe,
-                "mutable-repository-action-resolution",
+                "mutable-repository-component-resolution",
                 format!("{path}.uses"),
-                "trusted repository-action resolution is not a complete lowercase OCI digest pin",
+                "trusted repository-action resolution is not an exact Wasm component digest",
                 Some(
-                    "Rebuild the exact action commit and record its immutable OCI manifest digest."
+                    "Publish and admit the exact component payload before importing the workflow."
                         .to_owned(),
                 ),
             );
             return ActionMapping::placeholder();
         }
-        self.map_prepared_container_action(
-            PreparedContainerAction {
-                source: reference,
-                image: &action.image,
-                metadata: Some(action),
-                finding_code: "pinned-repository-docker-action",
-            },
-            inputs,
-            path,
-            effects,
-        )
+        let Some((scm_host, scm_port)) = https_endpoint(scm_api_url) else {
+            self.unresolved_action_inputs(inputs, path, CompatibilityStatus::Unsafe);
+            self.finding(
+                CompatibilityStatus::Unsafe,
+                "invalid-component-scm-endpoint",
+                format!("{path}.uses"),
+                "trusted repository-action resolution supplied an invalid SCM API endpoint",
+                None,
+            );
+            return ActionMapping::placeholder();
+        };
+        let mut effective_inputs = metadata
+            .inputs
+            .iter()
+            .filter_map(|(name, input)| {
+                input
+                    .default
+                    .as_ref()
+                    .map(|value| (name.clone(), YamlValue::String(value.clone())))
+            })
+            .collect::<BTreeMap<_, _>>();
+        effective_inputs.extend(inputs.clone());
+        let mut native_inputs = BTreeMap::new();
+        for (name, value) in &effective_inputs {
+            let input_path = format!("{path}.with.{name}");
+            if is_github_token_expression(&yaml_text(value)) {
+                continue;
+            }
+            if has_secret_expression(&yaml_text(value)) || looks_like_secret_name(name) {
+                self.finding(
+                    CompatibilityStatus::Unsafe,
+                    "raw-component-secret",
+                    input_path,
+                    "raw secret expressions cannot be passed into a component input",
+                    Some("Use the execution-scoped SCM credential capability.".to_owned()),
+                );
+                continue;
+            }
+            if let Some(value) = self.convert_scalar(value, &input_path) {
+                native_inputs.insert(name.to_ascii_lowercase(), value);
+            }
+        }
+        let missing_required = metadata.inputs.iter().any(|(name, input)| {
+            if input.required && !effective_inputs.contains_key(name) {
+                self.finding(
+                    CompatibilityStatus::Unsupported,
+                    "missing-required-action-input",
+                    format!("{path}.with.{name}"),
+                    format!("required action input `{name}` was not supplied and has no default"),
+                    Some(format!("Supply `{name}` under `{path}.with`.")),
+                );
+                true
+            } else {
+                false
+            }
+        });
+        if missing_required {
+            return ActionMapping::placeholder();
+        }
+        effects.wasm_component = true;
+        effects.permissions.secrets.insert(
+            "runtrue-scm-provider-token".to_owned(),
+            "provider-api".to_owned(),
+        );
+        effects.network_destinations.insert((scm_host, scm_port));
+        effects.allow_private_network |= scm_api_url != "https://api.github.com";
+        let digest = component
+            .rsplit_once('@')
+            .map(|(_, digest)| digest.to_owned())
+            .expect("exact component reference has a digest");
+        self.lock_components.insert(GeneratedComponentLock {
+            source: component.to_owned(),
+            resolved: digest,
+            signature_identity: signature_identity.to_owned(),
+            wit_world: wit_world.to_owned(),
+        });
+        self.finding(
+            CompatibilityStatus::Emulated,
+            "pinned-repository-wasm-component",
+            format!("{path}.uses"),
+            format!("full-commit repository action `{source}` maps to an admitted digest-pinned Wasm component"),
+            None,
+        );
+        ActionMapping {
+            run: NativeRun::Component(NativeComponentRun {
+                reference: component.to_owned(),
+                inputs: native_inputs,
+            }),
+            env: BTreeMap::new(),
+            cache: None,
+            capabilities: Some(NativeStepCapabilities {
+                cache: None,
+                artifacts: None,
+                secrets: vec![NativeSecretRequest {
+                    name: "runtrue-scm-provider-token".to_owned(),
+                    purpose: "provider-api".to_owned(),
+                }],
+            }),
+            mapped: true,
+        }
     }
 
     fn map_prepared_container_action(
@@ -386,18 +531,25 @@ impl Analyzer {
             },
             None,
         );
-        let (entrypoint, args) = metadata.map_or((None, None), |metadata| {
-            (
-                metadata.entrypoint.clone(),
-                metadata.args.as_ref().and_then(|args| {
-                    args.iter()
-                        .map(|argument| render_action_argument(argument, &input_text))
-                        .collect::<Option<Vec<_>>>()
-                }),
-            )
-        });
+        let (entrypoint, args) =
+            metadata.map_or((None, None), |metadata| match &metadata.program {
+                ResolvedRepositoryProgram::Container {
+                    entrypoint, args, ..
+                } => (
+                    entrypoint.clone(),
+                    args.as_ref().and_then(|args| {
+                        args.iter()
+                            .map(|argument| render_action_argument(argument, &input_text))
+                            .collect::<Option<Vec<_>>>()
+                    }),
+                ),
+                ResolvedRepositoryProgram::Component { .. } => (None, None),
+            });
         if metadata
-            .and_then(|metadata| metadata.args.as_ref())
+            .and_then(|metadata| match &metadata.program {
+                ResolvedRepositoryProgram::Container { args, .. } => args.as_ref(),
+                ResolvedRepositoryProgram::Component { .. } => None,
+            })
             .is_some()
             && args.is_none()
         {
@@ -427,6 +579,22 @@ impl Analyzer {
             mapped: true,
         }
     }
+}
+
+fn https_endpoint(value: &str) -> Option<(String, u16)> {
+    let authority = value.strip_prefix("https://")?.split('/').next()?;
+    if authority.is_empty() || authority.contains(['@', '[', ']']) {
+        return None;
+    }
+    let (host, port) = if let Some((host, port)) = authority.rsplit_once(':') {
+        (host, port.parse().ok()?)
+    } else {
+        (authority, 443)
+    };
+    if host.is_empty() || host.chars().any(char::is_whitespace) || port == 0 {
+        return None;
+    }
+    Some((host.to_ascii_lowercase(), port))
 }
 
 fn scalar_text(value: &runtrue_workflow_ast::Scalar) -> String {

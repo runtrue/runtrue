@@ -30,17 +30,42 @@ pub struct WorkflowFrontendOptions {
     pub resolved_repository_actions: BTreeMap<String, ResolvedRepositoryAction>,
 }
 
-/// Exact repository-backed Docker action prepared by a trusted resolver.
+/// Exact repository-backed action prepared by a trusted resolver.
 ///
 /// The source frontend consumes the action metadata only after the resolver has
-/// bound it to the same commit used to build `image`.
+/// bound it to the same source commit as the immutable executable program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRepositoryAction {
-    pub image: String,
+    pub program: ResolvedRepositoryProgram,
     pub inputs: BTreeMap<String, ResolvedActionInput>,
-    pub entrypoint: Option<String>,
-    /// `None` preserves the image CMD; a non-empty `Some` replaces it.
-    pub args: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedRepositoryProgram {
+    Container {
+        image: String,
+        entrypoint: Option<String>,
+        /// `None` preserves the image CMD; a non-empty `Some` replaces it.
+        args: Option<Vec<String>>,
+    },
+    Component {
+        /// Immutable `wasm://...@sha256:...` reference admitted by Runtrue.
+        reference: String,
+        /// Exact provider API endpoint the component may contact.
+        scm_api_url: String,
+        signature_identity: String,
+        wit_world: String,
+    },
+}
+
+impl ResolvedRepositoryAction {
+    #[must_use]
+    pub const fn container_image(&self) -> Option<&str> {
+        match &self.program {
+            ResolvedRepositoryProgram::Container { image, .. } => Some(image.as_str()),
+            ResolvedRepositoryProgram::Component { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

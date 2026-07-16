@@ -11,8 +11,8 @@ use crate::{
     error::ImportError,
     github::GithubWorkflow,
     native::{
-        build_lockfile, GeneratedImageLock, NativeCache, NativeJob, NativeOutput, NativeRun,
-        NativeStepCapabilities, NativeWorkflow, PermissionState,
+        build_lockfile, GeneratedComponentLock, GeneratedImageLock, NativeCache, NativeJob,
+        NativeOutput, NativeRun, NativeStepCapabilities, NativeWorkflow, PermissionState,
     },
     report::{
         CompatibilityFinding, CompatibilityReport, CompatibilityStatus, ImportResult, StatusCounts,
@@ -38,6 +38,9 @@ pub(crate) struct JobEffects {
     pub(crate) outputs: BTreeMap<String, NativeOutput>,
     pub(crate) runner_capabilities: BTreeSet<String>,
     pub(crate) container_action_image: Option<String>,
+    pub(crate) wasm_component: bool,
+    pub(crate) network_destinations: BTreeSet<(String, u16)>,
+    pub(crate) allow_private_network: bool,
 }
 
 pub(crate) struct ActionMapping {
@@ -55,6 +58,7 @@ pub(crate) struct Analyzer {
     pub(crate) mapped_jobs: usize,
     pub(crate) mapped_steps: usize,
     pub(crate) lock_images: BTreeSet<GeneratedImageLock>,
+    pub(crate) lock_components: BTreeSet<GeneratedComponentLock>,
     pub(crate) pull_request_target_requested: bool,
     pub(crate) workflow_concurrency: Option<String>,
     pub(crate) default_job_container_image: Option<String>,
@@ -70,6 +74,7 @@ impl Analyzer {
             mapped_jobs: 0,
             mapped_steps: 0,
             lock_images: BTreeSet::new(),
+            lock_components: BTreeSet::new(),
             pull_request_target_requested: false,
             workflow_concurrency: None,
             default_job_container_image: options.default_job_container_image,
@@ -135,8 +140,12 @@ impl Analyzer {
                                                 .resolved_repository_actions
                                                 .get(&reference)
                                                 .is_some_and(|action| {
-                                                    crate::validation::is_full_sha256_image(
-                                                        &action.image,
+                                                    action.container_image().is_some_and(
+                                                        crate::validation::is_full_sha256_image,
+                                                    ) || matches!(
+                                                        &action.program,
+                                                        runtrue_workflow_frontend::ResolvedRepositoryProgram::Component { reference, .. }
+                                                            if crate::validation::is_exact_wasm_component(reference)
                                                     )
                                                 })
                                     },
@@ -148,7 +157,7 @@ impl Analyzer {
                     CompatibilityStatus::Emulated,
                     "trusted-pull-request-target",
                     "on.pull_request_target",
-                    "pull_request_target uses the trusted default-branch workflow and only digest-pinned container actions",
+                    "pull_request_target uses the trusted default-branch workflow and only digest-pinned container or component actions",
                     None,
                 );
             } else {
@@ -156,7 +165,7 @@ impl Analyzer {
                     CompatibilityStatus::Unsafe,
                     "pull-request-target-source-execution",
                     "on.pull_request_target",
-                    "pull_request_target is allowed only when every job contains digest-pinned container actions and no source-code run steps",
+                        "pull_request_target is allowed only when every job contains digest-pinned container or component actions and no source-code run steps",
                     Some(
                         "Package the automation as a digest-pinned container action and remove source-code execution from the trusted-target workflow."
                             .to_owned(),
@@ -230,10 +239,11 @@ impl Analyzer {
                 .map_err(|error| ImportError::GeneratedWorkflow(error.to_string()))?;
             native_ast_validated = true;
 
-            let parsed_lock = build_lockfile(self.lock_images)?.map(|(lock, text)| {
-                lockfile_toml = Some(text);
-                lock
-            });
+            let parsed_lock =
+                build_lockfile(self.lock_images, self.lock_components)?.map(|(lock, text)| {
+                    lockfile_toml = Some(text);
+                    lock
+                });
             let context = CompileContext {
                 workflow_path: self.source_name.clone(),
                 lockfile: parsed_lock,

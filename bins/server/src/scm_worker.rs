@@ -13,7 +13,8 @@ use runtrue_control_plane::{
 };
 #[cfg(feature = "github-actions")]
 use runtrue_gha_import::{
-    parse_repository_action_metadata, pinned_repository_action_references, GithubActionsFrontend,
+    parse_repository_action_metadata, parse_runtrue_repository_action_metadata,
+    pinned_repository_action_references, GithubActionsFrontend,
 };
 use runtrue_git::{
     CredentialRequest, GitCredential, GitCredentialProvider, GitError, GitLimits, GitRepository,
@@ -41,7 +42,8 @@ use runtrue_trusted_planner::{
     ReusableWorkflowSourceProvider, TrustedPlanner, TrustedPlannerError, DEFAULT_LOCKFILE_PATH,
 };
 use runtrue_workflow_frontend::{
-    ResolvedRepositoryAction, WorkflowFrontendRegistry, WorkflowSourceFrontend,
+    ResolvedRepositoryAction, ResolvedRepositoryProgram, WorkflowFrontendRegistry,
+    WorkflowSourceFrontend,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -799,11 +801,9 @@ pub trait ScmSourceFetcher: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRepositoryAction {
     pub reference: String,
-    pub image: String,
+    pub program: ResolvedRepositoryProgram,
     pub metadata_digest: ContentDigest,
     pub inputs: std::collections::BTreeMap<String, runtrue_workflow_frontend::ResolvedActionInput>,
-    pub entrypoint: Option<String>,
-    pub args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Error)]
@@ -980,6 +980,25 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
                 }
                 ScmSourceFetchError::Rejected => RepositoryActionResolveError::Rejected,
             })?;
+        match fetched.repository.read_blob(commit, "runtrue-action.yml") {
+            Ok(blob) => {
+                let metadata = parse_runtrue_repository_action_metadata(&blob.bytes)
+                    .map_err(|_| RepositoryActionResolveError::Rejected)?;
+                return Ok(PreparedRepositoryAction {
+                    reference: reference.to_owned(),
+                    program: ResolvedRepositoryProgram::Component {
+                        reference: metadata.component,
+                        scm_api_url: self.endpoints.api_origin().to_owned(),
+                        signature_identity: metadata.signature_identity,
+                        wit_world: metadata.wit_world,
+                    },
+                    metadata_digest: metadata.digest,
+                    inputs: metadata.inputs,
+                });
+            }
+            Err(GitError::PathNotFound) => {}
+            Err(_) => return Err(RepositoryActionResolveError::Rejected),
+        }
         let yml = fetched.repository.read_blob(commit, "action.yml");
         let yaml = fetched.repository.read_blob(commit, "action.yaml");
         let metadata_blob = match (yml, yaml) {
@@ -1005,11 +1024,13 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
         })?;
         Ok(PreparedRepositoryAction {
             reference: reference.to_owned(),
-            image,
+            program: ResolvedRepositoryProgram::Container {
+                image,
+                entrypoint: metadata.entrypoint,
+                args: metadata.args,
+            },
             metadata_digest: metadata.digest,
             inputs: metadata.inputs,
-            entrypoint: metadata.entrypoint,
-            args: metadata.args,
         })
     }
 }
@@ -1906,10 +1927,8 @@ impl ScmTaskWorker {
             resolved.insert(
                 reference,
                 ResolvedRepositoryAction {
-                    image: prepared.image,
+                    program: prepared.program,
                     inputs: prepared.inputs,
-                    entrypoint: prepared.entrypoint,
-                    args: prepared.args,
                 },
             );
         }

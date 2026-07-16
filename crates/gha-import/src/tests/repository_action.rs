@@ -66,3 +66,29 @@ fn metadata_rejects_unknown_fields_and_duplicate_keys() {
         assert!(parse_repository_action_metadata(source.as_bytes()).is_err());
     }
 }
+
+#[test]
+fn accepts_exact_runtrue_component_metadata() {
+    let source = format!(
+        r#"name: Runtrue Backport
+description: Reconcile backports in a component
+inputs:
+  config-path:
+    description: Trusted policy path
+    default: .github/backport.yml
+runs:
+  using: wasm
+  component: wasm://ghcr.io/runtrue/backport@sha256:{}
+  signature-identity: release@runtrue.dev
+  wit-world: runtrue:action/run@1.0.0
+"#,
+        "a".repeat(64)
+    );
+    let metadata = parse_runtrue_repository_action_metadata(source.as_bytes()).unwrap();
+    assert_eq!(metadata.signature_identity, "release@runtrue.dev");
+    assert_eq!(metadata.wit_world, "runtrue:action/run@1.0.0");
+    assert_eq!(
+        metadata.inputs["config-path"].default.as_deref(),
+        Some(".github/backport.yml")
+    );
+}

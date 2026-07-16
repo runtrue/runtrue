@@ -68,6 +68,12 @@ pub(crate) fn is_full_sha256_image(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+pub(crate) fn is_exact_wasm_component(value: &str) -> bool {
+    value
+        .strip_prefix("wasm://")
+        .is_some_and(is_full_sha256_image)
+}
+
 pub(crate) fn is_full_git_commit(value: &str) -> bool {
     value.len() == 40
         && value

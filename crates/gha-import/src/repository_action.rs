@@ -16,6 +16,15 @@ pub struct RepositoryActionMetadata {
     pub args: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntrueRepositoryActionMetadata {
+    pub digest: ContentDigest,
+    pub component: String,
+    pub inputs: BTreeMap<String, ResolvedActionInput>,
+    pub signature_identity: String,
+    pub wit_world: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActionMetadata {
@@ -70,6 +79,66 @@ struct ActionBranding {
     color: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntrueActionMetadata {
+    name: String,
+    description: String,
+    #[serde(default)]
+    inputs: BTreeMap<String, ActionInput>,
+    runs: RuntrueActionRuns,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RuntrueActionRuns {
+    using: String,
+    component: String,
+    signature_identity: String,
+    wit_world: String,
+}
+
+pub fn parse_runtrue_repository_action_metadata(
+    bytes: &[u8],
+) -> Result<RuntrueRepositoryActionMetadata, ImportError> {
+    if bytes.len() > MAX_ACTION_METADATA_BYTES {
+        return Err(ImportError::RepositoryActionMetadata(
+            "Runtrue action metadata exceeds the 256 KiB limit".to_owned(),
+        ));
+    }
+    let source = std::str::from_utf8(bytes).map_err(|_| {
+        ImportError::RepositoryActionMetadata("Runtrue action metadata is not UTF-8".to_owned())
+    })?;
+    let _: StrictYamlValue = serde_yaml::from_str(source)?;
+    let metadata: RuntrueActionMetadata = serde_yaml::from_str(source)?;
+    validate_text("name", &metadata.name)?;
+    validate_text("description", &metadata.description)?;
+    let inputs = parse_inputs(&metadata.inputs)?;
+    if metadata.runs.using != "wasm" {
+        return Err(ImportError::RepositoryActionMetadata(
+            "runtrue-action.yml requires runs.using: wasm".to_owned(),
+        ));
+    }
+    if !crate::validation::is_exact_wasm_component(&metadata.runs.component) {
+        return Err(ImportError::RepositoryActionMetadata(
+            "runs.component must be an exact wasm://...@sha256:<digest> reference".to_owned(),
+        ));
+    }
+    validate_text("runs.signature-identity", &metadata.runs.signature_identity)?;
+    if metadata.runs.wit_world != "runtrue:action/run@1.0.0" {
+        return Err(ImportError::RepositoryActionMetadata(
+            "runs.wit-world is not supported by this runtime generation".to_owned(),
+        ));
+    }
+    Ok(RuntrueRepositoryActionMetadata {
+        digest: ContentDigest::sha256(bytes),
+        component: metadata.runs.component,
+        inputs,
+        signature_identity: metadata.runs.signature_identity,
+        wit_world: metadata.runs.wit_world,
+    })
+}
+
 pub fn parse_repository_action_metadata(
     bytes: &[u8],
 ) -> Result<RepositoryActionMetadata, ImportError> {
@@ -88,22 +157,7 @@ pub fn parse_repository_action_metadata(
     if let Some(author) = &metadata.author {
         validate_text("author", author)?;
     }
-    let mut inputs = BTreeMap::new();
-    for (name, input) in &metadata.inputs {
-        validate_identifier("input", name)?;
-        validate_text("input description", &input.description)?;
-        if let Some(message) = &input.deprecation_message {
-            validate_text("input deprecation message", message)?;
-        }
-        let default = input.default.as_ref().map(action_scalar_text).transpose()?;
-        inputs.insert(
-            name.clone(),
-            ResolvedActionInput {
-                required: input.required,
-                default,
-            },
-        );
-    }
+    let inputs = parse_inputs(&metadata.inputs)?;
     for (name, output) in &metadata.outputs {
         validate_identifier("output", name)?;
         validate_text("output description", &output.description)?;
@@ -152,6 +206,28 @@ pub fn parse_repository_action_metadata(
         entrypoint: metadata.runs.entrypoint,
         args: metadata.runs.args,
     })
+}
+
+fn parse_inputs(
+    declared: &BTreeMap<String, ActionInput>,
+) -> Result<BTreeMap<String, ResolvedActionInput>, ImportError> {
+    let mut inputs = BTreeMap::new();
+    for (name, input) in declared {
+        validate_identifier("input", name)?;
+        validate_text("input description", &input.description)?;
+        if let Some(message) = &input.deprecation_message {
+            validate_text("input deprecation message", message)?;
+        }
+        let default = input.default.as_ref().map(action_scalar_text).transpose()?;
+        inputs.insert(
+            name.clone(),
+            ResolvedActionInput {
+                required: input.required,
+                default,
+            },
+        );
+    }
+    Ok(inputs)
 }
 
 fn action_scalar_text(value: &YamlValue) -> Result<String, ImportError> {

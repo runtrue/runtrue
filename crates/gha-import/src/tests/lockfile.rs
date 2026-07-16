@@ -221,7 +221,14 @@ jobs:
             resolved_repository_actions: std::collections::BTreeMap::from([(
                 reference.clone(),
                 runtrue_workflow_frontend::ResolvedRepositoryAction {
-                    image: image.clone(),
+                    program: runtrue_workflow_frontend::ResolvedRepositoryProgram::Container {
+                        image: image.clone(),
+                        entrypoint: Some("/bin/backport".to_owned()),
+                        args: Some(vec![
+                            "--config".to_owned(),
+                            "${{ inputs.config-path }}".to_owned(),
+                        ]),
+                    },
                     inputs: std::collections::BTreeMap::from([(
                         "config-path".to_owned(),
                         runtrue_workflow_frontend::ResolvedActionInput {
@@ -229,11 +236,6 @@ jobs:
                             default: Some(".github/default.yml".to_owned()),
                         },
                     )]),
-                    entrypoint: Some("/bin/backport".to_owned()),
-                    args: Some(vec![
-                        "--config".to_owned(),
-                        "${{ inputs.config-path }}".to_owned(),
-                    ]),
                 },
             )]),
             ..ImportOptions::default()
@@ -284,7 +286,11 @@ fn repository_action_requires_missing_inputs_and_applies_metadata_defaults() {
     let reference = format!("owner/action@{}", "a".repeat(40));
     let image = format!("registry.example/action@sha256:{}", "b".repeat(64));
     let action = runtrue_workflow_frontend::ResolvedRepositoryAction {
-        image,
+        program: runtrue_workflow_frontend::ResolvedRepositoryProgram::Container {
+            image,
+            entrypoint: None,
+            args: None,
+        },
         inputs: std::collections::BTreeMap::from([
             (
                 "optional".to_owned(),
@@ -301,8 +307,6 @@ fn repository_action_requires_missing_inputs_and_applies_metadata_defaults() {
                 },
             ),
         ]),
-        entrypoint: None,
-        args: None,
     };
     let source = format!(
         "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: {reference}\n"
@@ -342,4 +346,76 @@ fn repository_action_requires_missing_inputs_and_applies_metadata_defaults() {
     let yaml = result.native_yaml.as_deref().expect("native YAML");
     assert!(yaml.contains("INPUT_OPTIONAL: fallback"));
     assert!(yaml.contains("INPUT_REQUIRED: supplied"));
+}
+
+#[test]
+fn repository_component_action_maps_to_wasm_with_an_exact_lock() {
+    let source_reference = format!("ci/backport@{}", "a".repeat(40));
+    let digest = "b".repeat(64);
+    let component = format!("wasm://ghcr.io/runtrue/backport@sha256:{digest}");
+    let source = format!(
+        r#"on: push
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+jobs:
+  backport:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: {source_reference}
+        with:
+          config-path: .github/backport.yml
+          github-token: ${{{{ github.token }}}}
+"#
+    );
+    let result = import_github_actions_with_options(
+        &source,
+        "component.yml",
+        ImportOptions {
+            resolved_repository_actions: std::collections::BTreeMap::from([(
+                source_reference,
+                runtrue_workflow_frontend::ResolvedRepositoryAction {
+                    program: runtrue_workflow_frontend::ResolvedRepositoryProgram::Component {
+                        reference: component.clone(),
+                        scm_api_url: "https://github.example.test/api/v3".to_owned(),
+                        signature_identity: "release@runtrue.dev".to_owned(),
+                        wit_world: "runtrue:action/run@1.0.0".to_owned(),
+                    },
+                    inputs: std::collections::BTreeMap::from([
+                        (
+                            "config-path".to_owned(),
+                            runtrue_workflow_frontend::ResolvedActionInput {
+                                required: false,
+                                default: Some(".github/backport.yml".to_owned()),
+                            },
+                        ),
+                        (
+                            "github-token".to_owned(),
+                            runtrue_workflow_frontend::ResolvedActionInput {
+                                required: false,
+                                default: None,
+                            },
+                        ),
+                    ]),
+                },
+            )]),
+            ..ImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(result.report.compatible, "{}", result.report.render_human());
+    let yaml = result.native_yaml.as_deref().unwrap();
+    let workflow = ast::parse_yaml(yaml).unwrap();
+    let job = &workflow.jobs["backport"];
+    assert_eq!(job.runner.isolation, ast::Isolation::Wasm);
+    assert_eq!(job.steps[0].uses.as_deref(), Some(component.as_str()));
+    assert!(job.steps[0].run.is_none());
+    let lock = LockFile::parse(result.lockfile_toml.as_deref().unwrap().as_bytes()).unwrap();
+    assert_eq!(lock.components()[0].source(), component);
+    assert_eq!(
+        lock.components()[0].resolved().as_str(),
+        format!("sha256:{digest}")
+    );
+    assert!(yaml.contains("github.example.test"));
 }

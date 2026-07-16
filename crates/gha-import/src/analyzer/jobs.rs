@@ -62,6 +62,9 @@ impl Analyzer {
             outputs: BTreeMap::new(),
             runner_capabilities: BTreeSet::new(),
             container_action_image: None,
+            wasm_component: false,
+            network_destinations: BTreeSet::new(),
+            allow_private_network: false,
         };
         let mut steps = Vec::new();
         for (index, step) in job.steps.into_iter().enumerate() {
@@ -140,7 +143,17 @@ impl Analyzer {
             }
             (explicit, action) => explicit.or(action),
         };
-        if runner_image.is_none() {
+        if effects.wasm_component && runner_image.is_some() {
+            self.finding(
+                CompatibilityStatus::Unsupported,
+                "mixed-wasm-and-oci-job",
+                &path,
+                "a Wasm component action cannot share a job with an OCI job container",
+                Some("Place the component action in its own job.".to_owned()),
+            );
+            runner_image = None;
+        }
+        if runner_image.is_none() && !effects.wasm_component {
             if let Some(image) = self.default_job_container_image.clone() {
                 if is_full_sha256_image(&image) {
                     self.lock_images.insert(GeneratedImageLock {
@@ -210,7 +223,10 @@ impl Analyzer {
             &format!("{path}.runs-on"),
             effects.runner_capabilities.iter().cloned().collect(),
             runner_image,
+            effects.wasm_component,
         );
+        effects.permissions.network_destinations = effects.network_destinations;
+        effects.permissions.allow_private_network = effects.allow_private_network;
         let permission_state = effects.permissions.clone();
         ConvertedJob {
             job: NativeJob {
@@ -431,6 +447,7 @@ impl Analyzer {
         path: &str,
         mut capabilities: Vec<String>,
         image: Option<String>,
+        wasm_component: bool,
     ) -> NativeRunner {
         capabilities.sort();
         let labels = value.and_then(static_runner_labels);
@@ -515,7 +532,13 @@ impl Analyzer {
         NativeRunner {
             os: "linux",
             arch: "amd64",
-            isolation: if image.is_some() { "oci" } else { "microvm" },
+            isolation: if wasm_component {
+                "wasm"
+            } else if image.is_some() {
+                "oci"
+            } else {
+                "microvm"
+            },
             image,
             capabilities,
         }

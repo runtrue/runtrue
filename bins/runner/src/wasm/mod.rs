@@ -4,6 +4,7 @@ mod adapters;
 mod components;
 mod config;
 mod execution;
+mod network;
 mod validation;
 
 pub use config::WasmRuntimePaths;
@@ -18,7 +19,7 @@ use crate::{
 use runtrue_attest::{ImageVerifyingKey, SignedImageManifest};
 use runtrue_engine::{
     CancellationToken, Engine, ExecutionResult, Executor, ExecutorError, ExecutorOutput,
-    JobAttemptOutcome, StepStateObserver,
+    JobAttemptOutcome, PreparedAction, StepStateObserver,
 };
 use runtrue_executor_dispatch::ExecutorDispatcher;
 use runtrue_executor_wasm::{

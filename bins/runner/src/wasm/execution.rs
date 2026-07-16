@@ -107,7 +107,10 @@ impl WasmJobExecutor {
     ) -> Result<ExecutionResult, RunnerError> {
         self.validate_assignments(lease)?;
         let adapters = adapters_for_workspace(lease, workspace, broker)?;
-        let executor = self.executor.with_adapters(adapters);
+        let executor = self
+            .executor
+            .with_adapters(adapters)
+            .with_capsule_context(&lease.capsule)?;
         executor.preflight_capsule(&selected_capsule(&lease.capsule, &lease.job_id)?)?;
         let mut dispatcher = ExecutorDispatcher::new();
         dispatcher
@@ -195,6 +198,7 @@ impl WasmJobExecutor {
 pub(super) struct SharedWasmExecutor {
     inner: Arc<Mutex<WasmExecutor>>,
     adapters: CapabilityAdapters,
+    contextual_inputs: BTreeMap<String, String>,
 }
 
 impl SharedWasmExecutor {
@@ -202,6 +206,7 @@ impl SharedWasmExecutor {
         Self {
             inner: Arc::new(Mutex::new(executor)),
             adapters: CapabilityAdapters::new(),
+            contextual_inputs: BTreeMap::new(),
         }
     }
 
@@ -209,7 +214,25 @@ impl SharedWasmExecutor {
         Self {
             inner: self.inner.clone(),
             adapters,
+            contextual_inputs: self.contextual_inputs.clone(),
         }
+    }
+
+    fn with_capsule_context(mut self, capsule: &ExecutionCapsule) -> Result<Self, RunnerError> {
+        if let Some(event) = &capsule.context.normalized_event_json {
+            self.contextual_inputs
+                .insert("__runtrue_event".to_owned(), event.clone());
+        }
+        if let Some(scm) = &capsule.context.scm {
+            let value = serde_json::to_string(scm).map_err(|error| {
+                RunnerError::WasmConfiguration(format!(
+                    "encode signed SCM component context: {error}"
+                ))
+            })?;
+            self.contextual_inputs
+                .insert("__runtrue_scm".to_owned(), value);
+        }
+        Ok(self)
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, WasmExecutor>, RunnerError> {
@@ -248,10 +271,14 @@ impl Executor for SharedWasmExecutor {
         &mut self,
         request: &runtrue_engine::StepExecutionRequest,
     ) -> Result<ExecutorOutput, ExecutorError> {
+        let mut request = request.clone();
+        if let PreparedAction::Component { inputs, .. } = &mut request.action {
+            inputs.extend(self.contextual_inputs.clone());
+        }
         self.inner
             .lock()
             .map_err(|_| ExecutorError::Spawn("Wasm executor state is poisoned".to_owned()))?
-            .execute_with_adapters(request, &self.adapters)
+            .execute_with_adapters(&request, &self.adapters)
     }
 
     fn finish_job_attempt(
@@ -285,10 +312,11 @@ use super::{
     adapters_for_lease, adapters_for_workspace, decode_runtime_keys, exact_component_digest,
     load_component_keys, load_components, read_bounded_private_file, reject_aot_events,
     validate_no_symlink_components, validate_private_directory, AdmittedLease,
-    AotAuthenticationKey, AotCacheConfig, Arc, BTreeSet, CancellationToken, CapabilityAdapters,
-    Engine, ExecutionCapsule, ExecutionResult, Executor, ExecutorDispatcher, ExecutorError,
-    ExecutorOutput, HandleAuthenticationKey, Isolation, JobAttemptOutcome, Mutex, MutexGuard, Path,
-    PathBuf, PlannedJob, RunnerBrokerClient, RunnerError, StepAction, StepStateObserver,
-    WasmExecutor, WasmRuntimePaths, WasmTarget, Zeroizing, MAX_RUNTIME_KEY_BYTES,
+    AotAuthenticationKey, AotCacheConfig, Arc, BTreeMap, BTreeSet, CancellationToken,
+    CapabilityAdapters, Engine, ExecutionCapsule, ExecutionResult, Executor, ExecutorDispatcher,
+    ExecutorError, ExecutorOutput, HandleAuthenticationKey, Isolation, JobAttemptOutcome, Mutex,
+    MutexGuard, Path, PathBuf, PlannedJob, PreparedAction, RunnerBrokerClient, RunnerError,
+    StepAction, StepStateObserver, WasmExecutor, WasmRuntimePaths, WasmTarget, Zeroizing,
+    MAX_RUNTIME_KEY_BYTES,
 };
 use std::fmt;

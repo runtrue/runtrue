@@ -28,7 +28,10 @@ pub use error::ImportError;
 pub use report::{
     CompatibilityFinding, CompatibilityReport, CompatibilityStatus, ImportResult, StatusCounts,
 };
-pub use repository_action::{parse_repository_action_metadata, RepositoryActionMetadata};
+pub use repository_action::{
+    parse_repository_action_metadata, parse_runtrue_repository_action_metadata,
+    RepositoryActionMetadata, RuntrueRepositoryActionMetadata,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImportOptions {

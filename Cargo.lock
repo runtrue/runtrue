@@ -3321,6 +3321,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "ureq",
  "wat",
  "x25519-dalek",
  "x509-parser",

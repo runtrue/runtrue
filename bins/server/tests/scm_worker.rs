@@ -144,11 +144,13 @@ impl RepositoryActionResolver for FixtureRepositoryActionResolver {
         ));
         Ok(PreparedRepositoryAction {
             reference: reference.to_owned(),
-            image: self.image.clone(),
+            program: runtrue_workflow_frontend::ResolvedRepositoryProgram::Container {
+                image: self.image.clone(),
+                entrypoint: None,
+                args: None,
+            },
             metadata_digest: ContentDigest::sha256(b"exact action.yml"),
             inputs: std::collections::BTreeMap::new(),
-            entrypoint: None,
-            args: None,
         })
     }
 }
@@ -1392,15 +1394,23 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
         .resolve("tenant-1", "github-installation-1", &reference)
         .unwrap();
     assert_eq!(prepared.reference, reference);
-    assert_eq!(prepared.image, image);
+    let runtrue_workflow_frontend::ResolvedRepositoryProgram::Container {
+        image: prepared_image,
+        entrypoint,
+        args,
+    } = &prepared.program
+    else {
+        panic!("expected a container action");
+    };
+    assert_eq!(prepared_image, &image);
     assert_eq!(prepared.metadata_digest, ContentDigest::sha256(metadata));
     assert_eq!(
         prepared.inputs["config-path"].default.as_deref(),
         Some(".github/backport.yml")
     );
-    assert_eq!(prepared.entrypoint.as_deref(), Some("/bin/backport"));
+    assert_eq!(entrypoint.as_deref(), Some("/bin/backport"));
     assert_eq!(
-        prepared.args.as_deref(),
+        args.as_deref(),
         Some(
             [
                 "--config".to_owned(),
@@ -1428,6 +1438,45 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
             dockerfile_bytes: dockerfile.to_vec(),
         }]
     );
+
+    let component_digest = "d".repeat(64);
+    let runtrue_metadata = format!(
+        "name: Backport\ndescription: Backport merged changes\ninputs:\n  config-path:\n    description: Policy path\n    required: false\n    default: .github/backport.yml\nruns:\n  using: wasm\n  component: wasm://ghcr.io/runtrue/backport@sha256:{component_digest}\n  signature-identity: release@runtrue.dev\n  wit-world: runtrue:action/run@1.0.0\n"
+    );
+    fs::write(root.path().join("runtrue-action.yml"), &runtrue_metadata)
+        .expect("Runtrue action metadata");
+    git(root.path(), &["add", "runtrue-action.yml"]);
+    git(
+        root.path(),
+        &["commit", "--quiet", "-m", "component action"],
+    );
+    let component_commit = output(root.path(), &["rev-parse", "HEAD"]);
+    let component_reference = format!("ci/backport@{component_commit}");
+    let prepared_component = resolver
+        .resolve("tenant-1", "github-installation-1", &component_reference)
+        .unwrap();
+    let runtrue_workflow_frontend::ResolvedRepositoryProgram::Component {
+        reference: resolved_component,
+        scm_api_url,
+        signature_identity,
+        wit_world,
+    } = prepared_component.program
+    else {
+        panic!("expected a component action");
+    };
+    assert_eq!(
+        resolved_component,
+        format!("wasm://ghcr.io/runtrue/backport@sha256:{component_digest}")
+    );
+    assert_eq!(scm_api_url, "https://github.example.test/api/v3");
+    assert_eq!(signature_identity, "release@runtrue.dev");
+    assert_eq!(wit_world, "runtrue:action/run@1.0.0");
+    assert_eq!(
+        prepared_component.metadata_digest,
+        ContentDigest::sha256(runtrue_metadata.as_bytes())
+    );
+    assert_eq!(builder.requests.lock().unwrap().len(), 1);
+
     assert!(matches!(
         resolver.resolve("tenant-other", "github-installation-1", &reference),
         Err(RepositoryActionResolveError::Unauthorized)
@@ -1436,7 +1485,7 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
         resolver.resolve("tenant-1", "github-installation-1", "ci/backport@main"),
         Err(RepositoryActionResolveError::Rejected)
     ));
-    assert_eq!(fetch_requests.lock().unwrap().len(), 1);
+    assert_eq!(fetch_requests.lock().unwrap().len(), 2);
 }
 
 #[test]

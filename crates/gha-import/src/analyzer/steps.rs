@@ -132,11 +132,17 @@ impl Analyzer {
                 );
             }
         }
+        let (uses, inputs, run) = match mapping.run {
+            NativeRun::Component(component) => (Some(component.reference), component.inputs, None),
+            run => (None, Default::default(), Some(run)),
+        };
         NativeStep {
             id,
             name,
             condition,
-            run: mapping.run,
+            uses,
+            inputs,
+            run,
             env,
             capabilities: mapping.capabilities,
             cache: mapping.cache,
