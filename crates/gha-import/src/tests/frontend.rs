@@ -44,7 +44,7 @@ fn github_frontend_is_deterministic_and_binds_translation_identity() {
 fn explicit_runtrue_files_remain_native_inside_the_github_directory() {
     assert!(GithubActionsFrontend.supports(".github/workflows/ci.yml"));
     assert!(GithubActionsFrontend.supports("automation/ci.github.yaml"));
-    assert!(!GithubActionsFrontend.supports(".github/workflows/ai-review.runtrue.yaml"));
+    assert!(!GithubActionsFrontend.supports(".github/workflows/native.runtrue.yaml"));
     assert!(!GithubActionsFrontend.supports(".github/workflows/release.runtrue.yml"));
 }
 
