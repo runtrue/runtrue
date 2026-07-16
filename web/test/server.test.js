@@ -195,6 +195,8 @@ test("repository picker uses signed-in GitHub visibility and exposes app install
   assert.match(script, /function refreshGitHubAccess\(\)/);
   assert.match(script, /function reloadGitHubData\(\)/);
   assert.match(script, /function loadOrganizationRepositories\(organizationId\)/);
+  assert.match(script, /organization\.repositoriesStatus = loaded \? "ready" : "unavailable"/);
+  assert.doesNotMatch(script, /organization\.repositoriesStatus = state\.data\.userCatalog\.status === "ready"/);
 });
 
 test("repository picker uses a single scroll region on phones", async () => {

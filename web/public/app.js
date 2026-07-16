@@ -719,7 +719,7 @@
       state.data.github = catalog.github;
       const loaded = (catalog.organizations || []).find((item) => item.name.toLowerCase() === organization.name.toLowerCase());
       organization.repositories = loaded?.repositories || [];
-      organization.repositoriesStatus = state.data.userCatalog.status === "ready" ? "ready" : "unavailable";
+      organization.repositoriesStatus = loaded ? "ready" : "unavailable";
     } catch (error) {
       if (requestId !== state.repositoryRequestId) return;
       organization.repositoriesStatus = "unavailable";
