@@ -412,6 +412,16 @@ jobs:
     assert_eq!(job.runner.cpu, 1);
     assert_eq!(job.runner.memory, "256MiB");
     assert_eq!(job.steps[0].uses.as_deref(), Some(component.as_str()));
+    let network = job.steps[0]
+        .capabilities
+        .network
+        .as_ref()
+        .expect("repository component has an exact SCM endpoint");
+    assert_eq!(network.dns, ast::DnsPolicy::Restricted);
+    assert!(!network.deny_private_ranges);
+    assert_eq!(network.allow.len(), 1);
+    assert_eq!(network.allow[0].host, "github.example.test");
+    assert_eq!(network.allow[0].port, 443);
     assert!(job.steps[0].run.is_none());
     let lock = LockFile::parse(result.lockfile_toml.as_deref().unwrap().as_bytes()).unwrap();
     assert_eq!(lock.components()[0].source(), component);

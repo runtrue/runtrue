@@ -16,6 +16,7 @@ use crate::{
     report::CompatibilityStatus,
     validation::{is_exact_wasm_component, is_full_git_commit, is_full_sha256_image, yaml_text},
 };
+use runtrue_workflow_ast as ast;
 use runtrue_workflow_frontend::{ResolvedRepositoryAction, ResolvedRepositoryProgram};
 use serde_yaml::Value as YamlValue;
 use std::collections::BTreeMap;
@@ -358,7 +359,9 @@ impl Analyzer {
             "runtrue-scm-provider-token".to_owned(),
             "provider-api".to_owned(),
         );
-        effects.network_destinations.insert((scm_host, scm_port));
+        effects
+            .network_destinations
+            .insert((scm_host.clone(), scm_port));
         effects.allow_private_network |= scm_api_url != "https://api.github.com";
         let digest = component
             .rsplit_once('@')
@@ -385,6 +388,16 @@ impl Analyzer {
             env: BTreeMap::new(),
             cache: None,
             capabilities: Some(NativeStepCapabilities {
+                network: Some(ast::NetworkPolicy {
+                    dns: ast::DnsPolicy::Restricted,
+                    deny_private_ranges: scm_api_url == "https://api.github.com",
+                    allow: vec![ast::NetworkDestination {
+                        host: scm_host,
+                        port: scm_port,
+                        protocol: ast::NetworkProtocol::Tcp,
+                    }],
+                    listen: Vec::new(),
+                }),
                 cache: None,
                 artifacts: None,
                 secrets: vec![NativeSecretRequest {
@@ -569,6 +582,7 @@ impl Analyzer {
             env,
             cache: None,
             capabilities: needs_scm_credential.then_some(NativeStepCapabilities {
+                network: None,
                 cache: None,
                 artifacts: None,
                 secrets: vec![NativeSecretRequest {

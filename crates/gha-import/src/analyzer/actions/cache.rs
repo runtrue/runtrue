@@ -164,6 +164,7 @@ impl Analyzer {
                 mode,
             }),
             capabilities: Some(NativeStepCapabilities {
+                network: None,
                 cache: Some(NativeCachePermissions { read, write }),
                 artifacts: None,
                 secrets: Vec::new(),

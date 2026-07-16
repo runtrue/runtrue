@@ -385,6 +385,8 @@ pub(crate) struct NativeScript {
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeStepCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) network: Option<ast::NetworkPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cache: Option<NativeCachePermissions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) artifacts: Option<ast::Access>,

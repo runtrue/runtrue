@@ -170,6 +170,7 @@ impl Analyzer {
             env: Default::default(),
             cache: None,
             capabilities: Some(NativeStepCapabilities {
+                network: None,
                 cache: None,
                 artifacts: Some(ast::Access::Write),
                 secrets: Vec::new(),
