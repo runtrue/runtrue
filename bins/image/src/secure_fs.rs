@@ -54,6 +54,45 @@ pub(crate) fn open_regular_no_follow(
     Ok(file)
 }
 
+pub(crate) fn read_private_registry_config(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ImageCliError> {
+    let mut file = open_regular_no_follow(path, false)?;
+    let metadata = file.metadata()?;
+    if metadata.mode() & 0o077 != 0 {
+        return Err(ImageCliError::InsecureRegistryConfigMode {
+            path: path.to_path_buf(),
+            mode: metadata.mode() & 0o777,
+        });
+    }
+    let expected_uid = rustix::process::geteuid().as_raw();
+    if metadata.uid() != expected_uid {
+        return Err(ImageCliError::RegistryConfigOwner {
+            path: path.to_path_buf(),
+            expected: expected_uid,
+            actual: metadata.uid(),
+        });
+    }
+    if metadata.len() > max_bytes {
+        return Err(ImageCliError::FileTooLarge {
+            path: path.to_path_buf(),
+            limit: max_bytes,
+            actual: metadata.len(),
+        });
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len()).map_err(|_| ImageCliError::SizeOverflow)?,
+    );
+    Read::by_ref(&mut file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_err(|_| ImageCliError::SizeOverflow)? != metadata.len() {
+        return Err(ImageCliError::FileChanged(path.to_path_buf()));
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn write_new_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), ImageCliError> {
     reject_unsafe_path(path, true)?;
     let parent = path
@@ -153,5 +192,19 @@ mod tests {
             write_new_file(&link.join("escape"), b"bad", 0o600),
             Err(ImageCliError::UnsafePath(_))
         ));
+    }
+
+    #[test]
+    fn registry_credentials_must_be_owner_only_and_regular() {
+        let temp = TempDir::new().unwrap();
+        let config = temp.path().join("config.json");
+        write_new_file(&config, b"{}", 0o640).unwrap();
+        assert!(matches!(
+            read_private_registry_config(&config, 1024),
+            Err(ImageCliError::InsecureRegistryConfigMode { .. })
+        ));
+
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_private_registry_config(&config, 1024).unwrap(), b"{}");
     }
 }

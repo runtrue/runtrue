@@ -4,6 +4,7 @@ mod error;
 mod keys;
 mod manifest;
 mod output;
+mod registry;
 mod secure_fs;
 mod sign;
 mod snapshot;
@@ -28,6 +29,24 @@ fn run(cli: Cli) -> Result<(), ImageCliError> {
             public_key,
         } => keys::generate(private_key, public_key, cli.json),
         Command::Digest { file } => digest::command(file, cli.json),
+        Command::StageComponent {
+            oras,
+            oras_digest,
+            reference,
+            payload_digest,
+            registry_config,
+            output,
+        } => registry::stage(
+            registry::StageRequest {
+                oras,
+                oras_digest,
+                reference,
+                payload_digest,
+                registry_config,
+                output,
+            },
+            cli.json,
+        ),
         Command::Manifest {
             kind,
             name,

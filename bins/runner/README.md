@@ -252,6 +252,31 @@ capsule must have an exact local assignment; a matching digest under a different
 locator is not interchangeable. No registry lookup, network fetch, mutable
 selector, or command/native fallback exists.
 
+Private OCI registries are handled by the provisioning plane, not by the
+runner daemon. `runtrue-image stage-component` accepts only an exact OCI
+manifest digest, an expected Wasm-layer digest, a digest-pinned ORAS binary,
+and, for private registries, an owner-only Docker/ORAS credential file. It
+validates the OCI artifact type, single `application/wasm` layer, declared
+size, manifest digest, and payload digest before creating the runner's
+mode-`0600`, digest-named payload:
+
+```text
+runtrue-image stage-component \
+  --oras /opt/runtrue/bin/oras \
+  --oras-digest sha256:<trusted-oras-digest> \
+  --reference registry.example/team/action@sha256:<manifest-digest> \
+  --payload-digest sha256:<wasm-layer-digest> \
+  --registry-config /run/runtrue/registry/action.json \
+  --output /var/lib/runtrue/components/<wasm-layer-digest-hex>.wasm
+```
+
+When supplied, the registry config must be a regular, nonsymlink, mode-`0600`
+file owned by the invoking user. Its contents are copied into private staging
+and are never printed, placed in a Capsule, or passed to a workflow. Use a
+registry-scoped, read-only credential and remove the config after provisioning.
+The runner still performs its independent signed-manifest and payload checks at
+startup.
+
 The startup probe verifies signatures and payloads, compiles every component,
 and requires clean authenticated AOT state before adding `wasm` to inventory.
 A normal cold compile is accepted and publishes an authenticated entry. A

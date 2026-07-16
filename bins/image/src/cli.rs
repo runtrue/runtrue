@@ -30,6 +30,27 @@ pub(crate) enum Command {
         #[arg(long)]
         file: PathBuf,
     },
+    /// Fetch and verify an exact WASM component from a private OCI registry.
+    StageComponent {
+        /// Path to an ORAS binary whose bytes match --oras-digest.
+        #[arg(long)]
+        oras: PathBuf,
+        /// Exact SHA-256 digest of the trusted ORAS binary.
+        #[arg(long)]
+        oras_digest: String,
+        /// Exact OCI manifest reference, for example registry.example/org/action@sha256:HEX.
+        #[arg(long)]
+        reference: String,
+        /// Expected SHA-256 digest of the application/wasm layer.
+        #[arg(long)]
+        payload_digest: String,
+        /// Optional private, mode-0600 Docker/ORAS registry credential file.
+        #[arg(long)]
+        registry_config: Option<PathBuf>,
+        /// New digest-named WASM file to create for runner preloading.
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Create canonical unsigned image metadata.
     Manifest {
         #[arg(long, value_enum)]

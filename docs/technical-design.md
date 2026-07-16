@@ -479,6 +479,9 @@ A hardened image build and verification tool for:
 - Preinstalled toolchain layers.
 - Wasm AOT caches.
 - Image manifests, SBOMs, signatures, and TUF metadata.
+- Operator-side staging of digest-pinned Wasm components from private OCI
+  registries. Registry credentials remain outside Capsules and runners; only
+  exact, verified component bytes enter the runner preload store.
 
 ### 8.2 Optional services
 
@@ -1324,6 +1327,16 @@ WIT, Wasmtime, target, and cold/AOT compilation probes. Lease admission then
 requires every Component reference in the canonical signed Capsule to have an
 exact local assignment; there is no network fetch, mutable selector, or
 cross-backend fallback.
+
+Registry authentication belongs to provisioning. A pinned `runtrue-image`
+invocation uses a digest-pinned ORAS client and, when authentication is needed,
+an owner-only, registry-scoped Docker credential file to fetch an exact
+manifest and its exact Wasm blob. It admits only the Runtrue component artifact
+type with one `application/wasm` layer, verifies both digests and the declared
+byte length, and atomically creates a digest-named private payload. Credentials
+are not included in the Capsule, runner configuration, workflow environment,
+logs, or staged payload. This supports GHCR and other OCI Distribution
+registries without weakening the runner's no-network execution boundary.
 
 Controls:
 

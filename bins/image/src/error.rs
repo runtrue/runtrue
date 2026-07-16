@@ -20,6 +20,14 @@ pub(crate) enum ImageCliError {
     NotRegularFile(PathBuf),
     #[error("private key `{path}` has insecure mode {mode:o}; expected no group/other access")]
     InsecurePrivateKeyMode { path: PathBuf, mode: u32 },
+    #[error("registry credential file `{path}` has insecure mode {mode:o}; expected no group/other access")]
+    InsecureRegistryConfigMode { path: PathBuf, mode: u32 },
+    #[error("registry credential file `{path}` is owned by uid {actual}; expected uid {expected}")]
+    RegistryConfigOwner {
+        path: PathBuf,
+        expected: u32,
+        actual: u32,
+    },
     #[error("private image key has {0} bytes; expected exactly 32")]
     InvalidPrivateKeyLength(usize),
     #[error("private and public image key paths must be different")]
@@ -52,4 +60,15 @@ pub(crate) enum ImageCliError {
     ProvenanceMismatch,
     #[error("SBOM digest does not match the signed manifest")]
     SbomMismatch,
+    #[error("OCI component reference must name an exact sha256 manifest: `{0}`")]
+    InvalidOciReference(String),
+    #[error("OCI component manifest is invalid: {0}")]
+    InvalidOciManifest(String),
+    #[error("trusted ORAS binary digest does not match --oras-digest")]
+    OrasDigestMismatch,
+    #[error("ORAS {operation} failed with status {status}")]
+    OrasFailed {
+        operation: &'static str,
+        status: String,
+    },
 }
