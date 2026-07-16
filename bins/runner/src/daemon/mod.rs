@@ -1,3 +1,4 @@
+mod admission_gate;
 mod clock;
 mod error;
 mod event_loop;

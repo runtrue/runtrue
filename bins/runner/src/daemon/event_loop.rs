@@ -11,6 +11,7 @@ use runtrue_protocol::{supports_protocol_version, v1};
 use runtrue_runner_core::{CapsuleTrustStore, LeaseCompletion, RunnerAdmission};
 use runtrue_workflow_ir::Isolation;
 use std::{
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -40,9 +41,13 @@ pub struct RunnerDaemonConfig {
     pub mode: RunMode,
     pub max_capsule_bytes: usize,
     pub credential_store: Option<RunnerCredentialStore>,
+    /// Optional host-local gate coordinating reusable OCI image admission with
+    /// lease execution. A permit is retained for the complete active lease.
+    pub admission_lock: Option<PathBuf>,
 }
 
 use super::{
+    admission_gate::{LeaseAdmissionGate, PermitAttempt},
     clock::failed_execution_outcome,
     clock::{
         deadline_instant, duration, now_unix_ms, random_connection_id, timestamp, timestamp_millis,
@@ -62,6 +67,7 @@ pub struct RunnerDaemon<T, E> {
     config: RunnerDaemonConfig,
     state: RunnerStateStore,
     workspaces: WorkspaceManager,
+    admission_gate: Option<LeaseAdmissionGate>,
 }
 
 impl<T, E> RunnerDaemon<T, E>
@@ -77,12 +83,14 @@ where
         state: RunnerStateStore,
         workspaces: WorkspaceManager,
     ) -> Self {
+        let admission_gate = config.admission_lock.clone().map(LeaseAdmissionGate::new);
         Self {
             transport,
             executor,
             config,
             state,
             workspaces,
+            admission_gate,
         }
     }
 
@@ -92,6 +100,9 @@ where
             return Err(RunnerError::InventoryRunnerMismatch);
         }
         self.config.inventory.profile.validate()?;
+        if let Some(gate) = self.admission_gate.as_ref() {
+            gate.validate()?;
+        }
         self.executor.cleanup_stale()?;
         let protocol_version = self.config.inventory.wire.protocol_version;
         if !supports_protocol_version(protocol_version) {
@@ -390,6 +401,16 @@ where
             self.reject_offer(&offer, "wrong_runner").await?;
             return Ok(None);
         }
+        let admission_permit = match self.admission_gate.as_ref() {
+            Some(gate) => match gate.try_acquire()? {
+                PermitAttempt::Acquired(permit) => Some(Arc::new(permit)),
+                PermitAttempt::AdmissionPending => {
+                    self.reject_offer(&offer, "image_admission_pending").await?;
+                    return Ok(None);
+                }
+            },
+            None => None,
+        };
         let Some(expected_digest) = offer.capsule_digest.clone() else {
             self.reject_offer(&offer, "invalid_offer").await?;
             return Ok(None);
@@ -631,6 +652,7 @@ where
         let task_cancellation = cancellation.clone();
         let task_lease = admitted;
         let task_workspace = workspace.clone();
+        let task_admission_permit = admission_permit.clone();
         let executor = self.executor.clone();
         let (lifecycle_sender, lifecycle) = tokio_mpsc::channel(8);
         let lifecycle_observer: Arc<dyn StepStateObserver> = Arc::new(DaemonStepStateObserver {
@@ -661,6 +683,10 @@ where
             step_state_observer: Some(observer),
         };
         let task = tokio::task::spawn_blocking(move || {
+            // Keep the permit in the blocking task as well as ActiveExecution.
+            // If the daemon/session is torn down, admission cannot mutate the
+            // image store until cancellation has actually stopped the backend.
+            let _admission_permit = task_admission_permit;
             let mut outcome = executor.execute_with_services(
                 &task_lease,
                 &task_workspace,
@@ -689,6 +715,7 @@ where
             })
         });
         Ok(Some(ActiveExecution {
+            _admission_permit: admission_permit,
             offer,
             guard,
             cancellation,

@@ -3,10 +3,13 @@ use crate::state::PersistedCommittedObject;
 use runtrue_engine::CancellationToken;
 use runtrue_protocol::v1;
 use runtrue_runner_core::LeaseExecutionGuard;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use tokio::{sync::mpsc as tokio_mpsc, task::JoinHandle};
 
+use super::admission_gate::LeaseAdmissionPermit;
+
 pub(super) struct ActiveExecution {
+    pub(super) _admission_permit: Option<Arc<LeaseAdmissionPermit>>,
     pub(super) offer: v1::LeaseOffer,
     pub(super) guard: LeaseExecutionGuard,
     pub(super) cancellation: CancellationToken,

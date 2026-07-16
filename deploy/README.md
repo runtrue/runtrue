@@ -368,16 +368,67 @@ sudo install -m 0644 deploy/systemd/runtrue-server.service /etc/systemd/system/r
 ```
 
 Exact-commit repository Docker actions are an optional same-host extension for
-a configured OCI runner. Create the `runtrue-actions-builder` Buildx instance
-under the same `DOCKER_CONFIG` used by the service, generate a dedicated image
-signing key with `runtrue-image keygen`, and install the public key where the
-runner can verify it. Then review and install
+a configured OCI runner. Provision a dedicated `docker-container` Buildx
+instance under the same `DOCKER_CONFIG` used by the service. Its container must
+use an ordinary bridge network; `network=host` is forbidden. Pin and record the
+reviewed BuildKit image/config as part of the versioned build policy before
+creating it. For example, after replacing `BUILDKIT_IMAGE_BY_DIGEST` with a
+reviewed immutable reference:
+
+```sh
+sudo env DOCKER_CONFIG=/var/lib/runtrue-action-builder/docker \
+  docker buildx create \
+  --name runtrue-actions-builder \
+  --driver docker-container \
+  --driver-opt network=bridge \
+  --driver-opt image=BUILDKIT_IMAGE_BY_DIGEST \
+  --bootstrap
+sudo env DOCKER_CONFIG=/var/lib/runtrue-action-builder/docker \
+  docker buildx inspect runtrue-actions-builder
+```
+
+Do not reuse a general-purpose or host-networked builder. Limit the builder
+bridge's egress to the reviewed Docker Hub registry endpoints needed to fetch
+the exact allowlisted base image; it must not reach host-local, RFC1918,
+link-local, or cloud metadata services.
+
+Build policy
+`runtrue.repository-action-build.v2.network-none.pinned-materials` enforces
+`RUN --network=none` and admits only `scratch`, earlier stages, and the
+operator-configured exact OCI references. The supplied deployment example
+configures this material for the current `ci/backport` action:
+
+```text
+node:22.17.0-bookworm@sha256:2fa6c977460b56d4d8278947ab56faeb312bc4cc6c4cf78920c6de27812f51c5
+```
+
+This is deployment configuration, not a backport-specific rule in the core
+builder. Supply `--allowed-base-image` repeatedly or as a comma-separated list;
+the builder validates, sorts, and deduplicates the references. Keep the set as
+small as possible. The allowlist prevents attacker-selected base-image
+`ONBUILD` instructions from bypassing source-Dockerfile checks. The policy also rejects custom
+Dockerfile frontends, `ADD`, and all per-instruction `RUN` options. Actions must
+therefore vendor or copy every dependency needed by `RUN`; package-manager
+downloads during the image build are rejected. The policy and reviewed build
+environment IDs are embedded in the image and signed admission provenance. A
+deterministic digest of the sorted allowlist is likewise embedded and signed;
+all three values are included in image-tag derivation and cache keys. Bump the
+versioned IDs whenever the BuildKit image/release, driver/network configuration,
+platform, or build flags change.
+
+Generate a dedicated image signing key with `runtrue-image keygen`, and install
+the public key where the runner can verify it. Then review and install
 `action-builder.env.example` and `runtrue-action-builder.service`, and enable
 the two repository-action paths in `server.env`. The builder exports a local
 OCI archive and admits its exact digest into the worker's private Podman store;
 it does not give the control-plane server a container-engine socket. Existing
 verified assignments are reused without restarting the runner, and new images
-wait for the runner to become idle before changing the shared store.
+close a host-local admission gate, wait for existing lease permits to drain,
+and reject new offers until the image is loaded and its signed assignment is
+published atomically. Admission never infers runner safety from its state file.
+The builder records an assignment-digest receipt only after a successful runner
+restart; cached admission succeeds only while that receipt matches and the
+runner service is active.
 
 Create the bootstrap credential once without shell tracing or overwrite:
 

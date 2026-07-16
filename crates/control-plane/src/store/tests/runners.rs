@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn image_admission_rejection_is_retryable() {
+    assert!(transient_runner_rejection("image_admission_pending"));
+
+    let control = ControlPlane::open_in_memory("image-admission-retry", NOW).unwrap();
+    bootstrap(&control);
+    add_runner(&control);
+    control
+        .create_run_idempotent(
+            "image-admission-run-key",
+            &run_request("image-admission-run", "image-admission-job"),
+        )
+        .unwrap();
+
+    let mut offer_at = NOW + 1;
+    for _ in 0..4 {
+        let lease = control
+            .offer_next_lease_for_runner("runner-1", offer_at)
+            .unwrap()
+            .expect("image admission must remain retryable");
+        control
+            .reject_lease_with_code(
+                &lease.id,
+                "runner-1",
+                lease.fencing_generation,
+                lease.installation_fencing_epoch,
+                "image_admission_pending",
+                offer_at + 1,
+            )
+            .unwrap();
+        assert!(control
+            .offer_next_lease_for_runner("runner-1", offer_at + 1)
+            .unwrap()
+            .is_none());
+        offer_at += IMAGE_ADMISSION_RETRY_DELAY_MILLIS + 1;
+    }
+
+    let lease = control
+        .offer_next_lease_for_runner("runner-1", offer_at)
+        .unwrap()
+        .expect("admission retries must not consume normal rejection attempts");
+    control
+        .reject_lease_with_code(
+            &lease.id,
+            "runner-1",
+            lease.fencing_generation,
+            lease.installation_fencing_epoch,
+            "executor_preflight_rejected",
+            offer_at + 1,
+        )
+        .unwrap();
+    assert!(control
+        .offer_next_lease_for_runner("runner-1", offer_at + 2)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
 fn github_check_logs_are_always_present_bounded_and_markdown_safe() {
     let empty = render_check_logs(&[]);
     assert!(empty.contains("<strong>Logs</strong>"));

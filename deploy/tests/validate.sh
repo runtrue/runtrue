@@ -21,6 +21,17 @@ fail() {
 
 bash -n "${DEPLOY_DIR}/bootstrap.sh"
 bash -n "${DEPLOY_DIR}/healthcheck.sh"
+sh -n "${DEPLOY_DIR}/runtrue-admit-action-image"
+
+if rg -n 'RUNTRUE_RUNNER_STATE_FILE|active_lease' \
+  "${DEPLOY_DIR}/runtrue-admit-action-image"; then
+  fail 'repository-action admission infers lease safety from persisted state'
+fi
+grep -Fq 'RUNTRUE_RUNNER_ADMISSION_LOCK' \
+  "${DEPLOY_DIR}/runtrue-admit-action-image" ||
+  fail 'repository-action admission does not use the runner admission gate'
+grep -Fq 'action-admission.lock.leases' "${DEPLOY_DIR}/systemd/runtrue.tmpfiles" ||
+  fail 'the runner lease lock is not provisioned by tmpfiles'
 
 command -v go >/dev/null 2>&1 || fail 'Go is required to verify the GitHub App signer'
 (

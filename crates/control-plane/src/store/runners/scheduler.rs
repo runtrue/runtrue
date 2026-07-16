@@ -1,5 +1,7 @@
 use super::*;
 
+pub(in crate::store) const IMAGE_ADMISSION_RETRY_DELAY_MILLIS: u64 = 1_000;
+
 pub(in crate::store) fn runner_reserved_resources_tx(
     transaction: &Transaction<'_>,
     runner_id: &str,
@@ -606,16 +608,32 @@ impl ControlPlane {
                 Err(ControlPlaneError::ApprovalRequired) => continue,
                 Err(error) => return Err(error),
             }
-            let runner_rejections: u64 = transaction
+            let (runner_rejections, last_rejection_code, last_rejection_unix_ms): (
+                u64,
+                String,
+                u64,
+            ) = transaction
                 .query_row(
-                    "SELECT rejection_count FROM runner_job_rejections
+                    "SELECT rejection_count, last_code, updated_unix_ms
+                     FROM runner_job_rejections
                      WHERE runner_id = ?1 AND job_id = ?2",
                     params![runner_id, job.id],
-                    |row| u64_column(row, 0, "runner job rejection count"),
+                    |row| {
+                        Ok((
+                            u64_column(row, 0, "runner job rejection count")?,
+                            row.get(1)?,
+                            u64_column(row, 2, "runner job rejection update")?,
+                        ))
+                    },
                 )
                 .optional()?
-                .unwrap_or(0);
-            if runner_rejections >= 3 {
+                .unwrap_or((0, String::new(), 0));
+            let image_admission_backoff = last_rejection_code == "image_admission_pending"
+                && now_unix_ms
+                    < last_rejection_unix_ms.saturating_add(IMAGE_ADMISSION_RETRY_DELAY_MILLIS);
+            if image_admission_backoff
+                || (last_rejection_code != "image_admission_pending" && runner_rejections >= 3)
+            {
                 continue;
             }
             if let Some(group) = &planned.concurrency {

@@ -6,6 +6,9 @@ archive=
 reference=
 commit=
 metadata_digest=
+build_policy_id=
+build_environment_id=
+material_policy_digest=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --image) image=$2; shift 2 ;;
@@ -13,6 +16,9 @@ while [ "$#" -gt 0 ]; do
     --reference) reference=$2; shift 2 ;;
     --commit) commit=$2; shift 2 ;;
     --metadata-digest) metadata_digest=$2; shift 2 ;;
+    --build-policy-id) build_policy_id=$2; shift 2 ;;
+    --build-environment-id) build_environment_id=$2; shift 2 ;;
+    --material-policy-digest) material_policy_digest=$2; shift 2 ;;
     *) exit 64 ;;
   esac
 done
@@ -20,6 +26,18 @@ done
 case "$image" in
   *@sha256:????????????????????????????????????????????????????????????????) ;;
   *) exit 65 ;;
+esac
+expected_build_policy_id=runtrue.repository-action-build.v2.network-none.pinned-materials
+[ "$build_policy_id" = "$expected_build_policy_id" ] || exit 65
+expected_build_environment_id=runtrue.buildkit.v0.30.0.docker-container.bridge.no-insecure-entitlements
+[ "$build_environment_id" = "$expected_build_environment_id" ] || exit 65
+case "$material_policy_digest" in
+  sha256:????????????????????????????????????????????????????????????????) ;;
+  *) exit 65 ;;
+esac
+material_policy_hex=${material_policy_digest#sha256:}
+case "$material_policy_hex" in
+  *[!0-9a-f]*) exit 65 ;;
 esac
 case "$archive" in
   /*) ;;
@@ -41,13 +59,23 @@ esac
 : "${RUNTRUE_RUNNER_IMAGE_STORE:?missing RUNTRUE_RUNNER_IMAGE_STORE}"
 : "${RUNTRUE_RUNNER_MANIFEST_DIRECTORY:?missing RUNTRUE_RUNNER_MANIFEST_DIRECTORY}"
 : "${RUNTRUE_RUNNER_IMAGE_KEYRING:?missing RUNTRUE_RUNNER_IMAGE_KEYRING}"
-: "${RUNTRUE_RUNNER_STATE_FILE:=/var/lib/runtrue-runner/state/runner-state.json}"
+: "${RUNTRUE_RUNNER_ADMISSION_LOCK:=/var/lib/runtrue-runner/action-admission.lock}"
+: "${RUNTRUE_ACTION_ADMISSION_LOCK_TIMEOUT_SECONDS:=1800}"
 : "${RUNTRUE_IMAGE_COMMAND:=/usr/libexec/runtrue/runtrue-image}"
 case "$RUNTRUE_IMAGE_COMMAND" in
   /*) ;;
   *) exit 65 ;;
 esac
 [ -x "$RUNTRUE_IMAGE_COMMAND" ] && [ ! -L "$RUNTRUE_IMAGE_COMMAND" ] || exit 65
+command -v flock >/dev/null 2>&1 || exit 69
+case "$RUNTRUE_RUNNER_ADMISSION_LOCK" in
+  /*) ;;
+  *) exit 65 ;;
+esac
+case "$RUNTRUE_ACTION_ADMISSION_LOCK_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) exit 65 ;;
+esac
+[ "$RUNTRUE_ACTION_ADMISSION_LOCK_TIMEOUT_SECONDS" -gt 0 ] || exit 65
 
 umask 077
 : "${RUNTRUE_ACTION_BUILDER_WORK_ROOT:=/var/lib/runtrue-action-builder}"
@@ -57,17 +85,35 @@ case "$RUNTRUE_ACTION_BUILDER_WORK_ROOT" in
 esac
 install -d -o root -g runtrue-runner -m 0710 "$RUNTRUE_ACTION_BUILDER_WORK_ROOT"
 work=$(mktemp -d "$RUNTRUE_ACTION_BUILDER_WORK_ROOT/admit.XXXXXXXX")
-trap 'rm -rf "$work"' EXIT HUP INT TERM
+remove_image_on_failure=0
+committed=0
+publication_temporary=
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$status" -ne 0 ] && [ "$remove_image_on_failure" -eq 1 ] && \
+     [ "$committed" -eq 0 ]; then
+    runner_image_remove "$image" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$publication_temporary" ]; then
+    rm -f "$publication_temporary"
+  fi
+  rm -rf "$work"
+  exit "$status"
+}
+trap cleanup EXIT HUP INT TERM
 chown root:runtrue-runner "$work"
 chmod 0710 "$work"
 digest=${image##*@}
 hex=${digest#sha256:}
-name=repository-action-$(printf '%s' "$hex" | cut -c1-16)
+name=repository-action-$hex
 tar -xOf "$archive" "blobs/sha256/$hex" >"$work/payload.json"
 printf '%s  %s\n' "$hex" "$work/payload.json" | sha256sum --check --status
 
-printf '{"builder":"runtrue-action-builder/v1","source":"%s","commit":"%s","metadata_digest":"%s"}\n' \
-  "$reference" "$commit" "$metadata_digest" >"$work/provenance.json"
+printf '{"builder":"runtrue-action-builder/v1","build_policy_id":"%s","build_environment_id":"%s","material_policy_digest":"%s","source":"%s","commit":"%s","metadata_digest":"%s"}\n' \
+  "$build_policy_id" "$build_environment_id" "$material_policy_digest" \
+  "$reference" "$commit" "$metadata_digest" \
+  >"$work/provenance.json"
 printf '{"format":"runtrue-repository-action-source-v1","source":"%s","commit":"%s"}\n' \
   "$reference" "$commit" >"$work/sbom.json"
 
@@ -79,32 +125,93 @@ runner_runtime=$RUNTRUE_RUNNER_RUNTIME_DIRECTORY
 : "${RUNTRUE_RUNNER_TMPDIR:=$RUNTRUE_RUNNER_HOME/tmp}"
 [ -n "$RUNTRUE_RUNNER_HOME" ] && [ -d "$runner_runtime" ] || exit 66
 assignment=$RUNTRUE_RUNNER_MANIFEST_DIRECTORY/$name.signed.json
-if [ -f "$assignment" ] && [ ! -L "$assignment" ] && \
-   "$RUNTRUE_IMAGE_COMMAND" verify \
+receipt_directory=$RUNTRUE_ACTION_BUILDER_WORK_ROOT/receipts
+install -d -o root -g root -m 0700 "$receipt_directory"
+receipt=$receipt_directory/$name.loaded
+runner_image_exists() {
+  HOME="$RUNTRUE_RUNNER_HOME" \
+  XDG_RUNTIME_DIR="$runner_runtime" \
+  TMPDIR="$RUNTRUE_RUNNER_TMPDIR" \
+  setpriv --reuid=runtrue-runner --regid=runtrue-runner --init-groups sh -c \
+    'cd /tmp && exec podman --root "$1" image exists "$2"' \
+    runtrue-admit "$RUNTRUE_RUNNER_IMAGE_STORE" "$1"
+}
+
+runner_image_load() {
+  HOME="$RUNTRUE_RUNNER_HOME" \
+  XDG_RUNTIME_DIR="$runner_runtime" \
+  TMPDIR="$RUNTRUE_RUNNER_TMPDIR" \
+  setpriv --reuid=runtrue-runner --regid=runtrue-runner --init-groups sh -c \
+    'cd /tmp && exec podman --root "$1" load --input "$2"' \
+    runtrue-admit "$RUNTRUE_RUNNER_IMAGE_STORE" "$1"
+}
+
+runner_image_remove() {
+  HOME="$RUNTRUE_RUNNER_HOME" \
+  XDG_RUNTIME_DIR="$runner_runtime" \
+  TMPDIR="$RUNTRUE_RUNNER_TMPDIR" \
+  setpriv --reuid=runtrue-runner --regid=runtrue-runner --init-groups sh -c \
+    'cd /tmp && exec podman --root "$1" image rm --force "$2"' \
+    runtrue-admit "$RUNTRUE_RUNNER_IMAGE_STORE" "$1"
+}
+
+assignment_is_ready() {
+  [ -f "$assignment" ] && [ ! -L "$assignment" ] && \
+  "$RUNTRUE_IMAGE_COMMAND" verify \
      --signed-manifest "$assignment" \
      --public-key "$RUNTRUE_ACTION_IMAGE_PUBLIC_KEY" \
      --payload "$work/payload.json" \
      --provenance "$work/provenance.json" \
      --sbom "$work/sbom.json" \
      --now-unix-ms "$(date +%s%3N)" >/dev/null 2>&1 && \
-   HOME="$RUNTRUE_RUNNER_HOME" \
-   XDG_RUNTIME_DIR="$runner_runtime" \
-   TMPDIR="$RUNTRUE_RUNNER_TMPDIR" \
-   setpriv --reuid=runtrue-runner --regid=runtrue-runner --init-groups sh -c \
-     'cd /tmp && exec podman --root "$1" image exists "$2"' \
-     runtrue-admit "$RUNTRUE_RUNNER_IMAGE_STORE" "$image"; then
+  runner_image_exists "$image"
+}
+
+assignment_is_live() {
+  assignment_is_ready || return 1
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  assignment_digest=$(sha256sum "$assignment" | cut -d' ' -f1)
+  [ "$(cat "$receipt")" = "runtrue-action-admission-receipt-v1 sha256:$assignment_digest" ] ||
+    return 1
+  systemctl is-active --quiet runtrue-runner.service
+}
+
+atomic_install() {
+  source=$1
+  destination=$2
+  owner=$3
+  group=$4
+  mode=$5
+  directory=${destination%/*}
+  basename=${destination##*/}
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  publication_temporary=$(mktemp "$directory/.$basename.XXXXXXXX")
+  install -o "$owner" -g "$group" -m "$mode" "$source" "$publication_temporary"
+  mv -f "$publication_temporary" "$destination"
+  publication_temporary=
+}
+
+if assignment_is_live; then
   exit 0
 fi
 
-# The v0.x runner reads reusable assignments only at startup. Never mutate its
-# shared image store or restart it while a lease is active.
-attempt=0
-while [ -f "$RUNTRUE_RUNNER_STATE_FILE" ] && \
-      grep -Eq '"active_lease"[[:space:]]*:[[:space:]]*\{' "$RUNTRUE_RUNNER_STATE_FILE"; do
-  attempt=$((attempt + 1))
-  [ "$attempt" -lt 30 ] || exit 75
-  sleep 1
-done
+# Close the admission gate before waiting for active lease permits. Runners
+# acquire the gate briefly before taking a shared lease lock; holding the gate
+# here prevents any new lease from entering while existing work drains.
+[ -f "$RUNTRUE_RUNNER_ADMISSION_LOCK" ] && \
+  [ ! -L "$RUNTRUE_RUNNER_ADMISSION_LOCK" ] || exit 66
+lease_lock=$RUNTRUE_RUNNER_ADMISSION_LOCK.leases
+[ -f "$lease_lock" ] && [ ! -L "$lease_lock" ] || exit 66
+exec 9<>"$RUNTRUE_RUNNER_ADMISSION_LOCK"
+flock -x -w "$RUNTRUE_ACTION_ADMISSION_LOCK_TIMEOUT_SECONDS" 9 || exit 75
+exec 8<>"$lease_lock"
+flock -x -w "$RUNTRUE_ACTION_ADMISSION_LOCK_TIMEOUT_SECONDS" 8 || exit 75
+
+# Another builder may have completed the exact admission while this request
+# waited for the gate.
+if assignment_is_live; then
+  exit 0
+fi
 
 install -o runtrue-runner -g runtrue-runner -m 0600 \
   "$archive" "$work/image.oci.tar"
@@ -123,25 +230,42 @@ install -o runtrue-runner -g runtrue-runner -m 0600 \
   --compatibility runtrue-assignment-scope=reusable-image \
   --compatibility runtrue-oci-reference="$image" \
   --compatibility runtrue-signature-identity=runtrue-repository-action-builder/v1 \
+  --compatibility runtrue-build-policy-id="$build_policy_id" \
+  --compatibility runtrue-build-environment-id="$build_environment_id" \
+  --compatibility runtrue-material-policy-digest="$material_policy_digest" \
   --output "$work/manifest.json"
 "$RUNTRUE_IMAGE_COMMAND" sign \
   --manifest "$work/manifest.json" \
   --private-key "$RUNTRUE_ACTION_IMAGE_SIGNING_KEY" \
   --output "$work/signed.json"
 
-install -o runtrue-runner -g runtrue-runner -m 0600 \
-  "$RUNTRUE_ACTION_IMAGE_PUBLIC_KEY" \
-  "$RUNTRUE_RUNNER_IMAGE_KEYRING/repository-actions.pub"
-install -o runtrue-runner -g runtrue-runner -m 0600 \
-  "$work/signed.json" \
-  "$assignment"
-HOME="$RUNTRUE_RUNNER_HOME" \
-XDG_RUNTIME_DIR="$runner_runtime" \
-TMPDIR="$RUNTRUE_RUNNER_TMPDIR" \
-setpriv --reuid=runtrue-runner --regid=runtrue-runner --init-groups sh -c \
-  'cd /tmp && exec podman --root "$1" load --input "$2"' \
-  runtrue-admit "$RUNTRUE_RUNNER_IMAGE_STORE" "$work/image.oci.tar" >/dev/null
+# Materialize and verify the image before publishing its signed assignment. If
+# any pre-commit step fails, cleanup removes a newly introduced image and the
+# prior assignment remains untouched.
+if ! runner_image_exists "$image"; then
+  remove_image_on_failure=1
+  runner_image_load "$work/image.oci.tar" >/dev/null
+  runner_image_exists "$image"
+fi
 
-# The v0.x runner loads signed reusable-image assignments at startup. A later
-# provider generation can replace this bounded refresh with live admission.
-systemctl try-restart runtrue-runner.service
+atomic_install \
+  "$RUNTRUE_ACTION_IMAGE_PUBLIC_KEY" \
+  "$RUNTRUE_RUNNER_IMAGE_KEYRING/repository-actions.pub" \
+  runtrue-runner runtrue-runner 0600
+# From this point forward, preserving the loaded image is safer than rolling it
+# back: the next operation atomically publishes an assignment that references
+# it, and a signal can arrive immediately after that rename.
+committed=1
+atomic_install \
+  "$work/signed.json" "$assignment" \
+  runtrue-runner runtrue-runner 0600
+
+# The v0.x runner loads signed reusable-image assignments at startup. Restart
+# also starts an inactive runner; a successful post-restart receipt is the only
+# evidence that the currently active generation loaded this exact assignment.
+assignment_digest=$(sha256sum "$assignment" | cut -d' ' -f1)
+printf 'runtrue-action-admission-receipt-v1 sha256:%s\n' "$assignment_digest" \
+  >"$work/receipt"
+systemctl restart runtrue-runner.service
+systemctl is-active --quiet runtrue-runner.service
+atomic_install "$work/receipt" "$receipt" root root 0600

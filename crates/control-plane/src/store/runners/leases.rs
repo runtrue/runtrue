@@ -388,6 +388,7 @@ pub(in crate::store) fn transient_runner_rejection(code: &str) -> bool {
     matches!(
         code,
         "capsule_fetch_failed"
+            | "image_admission_pending"
             | "unsupported_isolation"
             | "trusted_native_disabled"
             | "job_resource_limit"
@@ -843,7 +844,13 @@ impl ControlPlane {
                  (runner_id, job_id, rejection_count, last_code, updated_unix_ms)
                  VALUES (?1, ?2, 1, ?3, ?4)
                  ON CONFLICT(runner_id, job_id) DO UPDATE SET
-                   rejection_count = rejection_count + 1,
+                   rejection_count = CASE
+                     WHEN excluded.last_code = 'image_admission_pending'
+                       THEN rejection_count
+                     WHEN last_code = 'image_admission_pending' AND rejection_count = 1
+                       THEN 1
+                     ELSE rejection_count + 1
+                   END,
                    last_code = excluded.last_code,
                    updated_unix_ms = excluded.updated_unix_ms",
                 params![

@@ -31,6 +31,10 @@ pub(super) struct Args {
     #[arg(long)]
     pub(super) state_directory: Option<PathBuf>,
 
+    /// Absolute host-local lock coordinating OCI image admission with leases.
+    #[arg(long)]
+    pub(super) admission_lock: Option<PathBuf>,
+
     /// Root for ephemeral per-lease workspaces.
     #[arg(long)]
     pub(super) workspace_directory: Option<PathBuf>,

@@ -449,6 +449,7 @@ fn fixture() -> (
             mode: RunMode::Once,
             max_capsule_bytes: 1024 * 1024,
             credential_store: None,
+            admission_lock: None,
         },
         offer,
         fetched,

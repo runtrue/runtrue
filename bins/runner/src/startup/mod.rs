@@ -288,6 +288,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             mode,
             max_capsule_bytes: MAX_CAPSULE_BYTES,
             credential_store: credential_store.clone(),
+            admission_lock: config.admission_lock.clone(),
         };
         match RunnerDaemon::new(
             transport,

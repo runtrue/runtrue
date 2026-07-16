@@ -26,6 +26,7 @@ pub(super) struct Config {
     pub(super) protocol_version: Option<u32>,
     pub(super) insecure_loopback: bool,
     pub(super) state_directory: PathBuf,
+    pub(super) admission_lock: Option<PathBuf>,
     pub(super) workspace_directory: PathBuf,
     pub(super) capsule_keyring: PathBuf,
     pub(super) trusted_native: bool,
@@ -59,6 +60,9 @@ impl Config {
             .state_directory
             .or_else(|| env::var_os("RUNTRUE_RUNNER_STATE_DIRECTORY").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIRECTORY));
+        let admission_lock = args
+            .admission_lock
+            .or_else(|| env::var_os("RUNTRUE_RUNNER_ADMISSION_LOCK").map(PathBuf::from));
         let workspace_directory = args
             .workspace_directory
             .or_else(|| env::var_os("RUNTRUE_RUNNER_WORKSPACE_DIRECTORY").map(PathBuf::from))
@@ -196,6 +200,7 @@ impl Config {
             protocol_version,
             insecure_loopback,
             state_directory,
+            admission_lock,
             workspace_directory,
             capsule_keyring,
             trusted_native,
