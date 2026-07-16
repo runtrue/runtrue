@@ -27,7 +27,26 @@ pub struct WorkflowFrontendOptions {
     /// Exact external Programs prepared by a trusted resolver before source
     /// translation. Keys are source-language references; values are immutable
     /// OCI image references. Frontends may consume only exact key matches.
-    pub resolved_repository_actions: BTreeMap<String, String>,
+    pub resolved_repository_actions: BTreeMap<String, ResolvedRepositoryAction>,
+}
+
+/// Exact repository-backed Docker action prepared by a trusted resolver.
+///
+/// The source frontend consumes the action metadata only after the resolver has
+/// bound it to the same commit used to build `image`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRepositoryAction {
+    pub image: String,
+    pub inputs: BTreeMap<String, ResolvedActionInput>,
+    pub entrypoint: Option<String>,
+    /// `None` preserves the image CMD; a non-empty `Some` replaces it.
+    pub args: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedActionInput {
+    pub required: bool,
+    pub default: Option<String>,
 }
 
 /// Adapter-specific diagnostic bytes with a generic, integrity-bound envelope.

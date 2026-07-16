@@ -54,7 +54,9 @@ pub(super) fn validate_admitted_job(job: &PlannedJob) -> Result<(), GuestAgentEr
                 shell: Shell::Bash | Shell::Sh,
                 ..
             } => {}
-            StepAction::Script { .. } | StepAction::Component { .. } => {
+            StepAction::Script { .. }
+            | StepAction::Component { .. }
+            | StepAction::Container { .. } => {
                 return Err(GuestAgentError::InvalidConfiguration(
                     "admitted step action has no exact guest adapter".to_owned(),
                 ));

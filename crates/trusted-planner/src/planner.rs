@@ -24,7 +24,9 @@ use runtrue_scm::{
     TrustedWorkflowSelection, WorkflowDefinitionApprovalEvidence,
     WorkflowDefinitionApprovalVerifier, WorkflowSourceInputs,
 };
-use runtrue_workflow_frontend::{WorkflowFrontendOptions, WorkflowFrontendRegistry};
+use runtrue_workflow_frontend::{
+    ResolvedRepositoryAction, WorkflowFrontendOptions, WorkflowFrontendRegistry,
+};
 use runtrue_workflow_ir::SourceTrust;
 use std::collections::BTreeMap;
 
@@ -36,7 +38,7 @@ pub struct TrustedPlanner<'a> {
     source_tree_digest: Option<ContentDigest>,
     scm_api_url: Option<String>,
     default_job_container_image: Option<String>,
-    resolved_repository_actions: BTreeMap<String, String>,
+    resolved_repository_actions: BTreeMap<String, ResolvedRepositoryAction>,
     source_frontends: Option<&'a WorkflowFrontendRegistry<'a>>,
 }
 
@@ -113,7 +115,10 @@ impl<'a> TrustedPlanner<'a> {
     /// resolver. Source-language frontends can consume only exact reference
     /// matches and the generated lock binds each mapping.
     #[must_use]
-    pub fn with_resolved_repository_actions(mut self, actions: BTreeMap<String, String>) -> Self {
+    pub fn with_resolved_repository_actions(
+        mut self,
+        actions: BTreeMap<String, ResolvedRepositoryAction>,
+    ) -> Self {
         self.resolved_repository_actions = actions;
         self
     }

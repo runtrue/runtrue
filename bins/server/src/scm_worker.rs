@@ -40,7 +40,9 @@ use runtrue_trusted_planner::{
     ProposedAnalysisFailure, ProposedWorkflowAnalysis, ReusableWorkflowProviderError,
     ReusableWorkflowSourceProvider, TrustedPlanner, TrustedPlannerError, DEFAULT_LOCKFILE_PATH,
 };
-use runtrue_workflow_frontend::{WorkflowFrontendRegistry, WorkflowSourceFrontend};
+use runtrue_workflow_frontend::{
+    ResolvedRepositoryAction, WorkflowFrontendRegistry, WorkflowSourceFrontend,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -799,6 +801,9 @@ pub struct PreparedRepositoryAction {
     pub reference: String,
     pub image: String,
     pub metadata_digest: ContentDigest,
+    pub inputs: std::collections::BTreeMap<String, runtrue_workflow_frontend::ResolvedActionInput>,
+    pub entrypoint: Option<String>,
+    pub args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Error)]
@@ -1002,6 +1007,9 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
             reference: reference.to_owned(),
             image,
             metadata_digest: metadata.digest,
+            inputs: metadata.inputs,
+            entrypoint: metadata.entrypoint,
+            args: metadata.args,
         })
     }
 }
@@ -1854,7 +1862,7 @@ impl ScmTaskWorker {
         workflow_path: &str,
         tenant_id: &str,
         installation_id: &str,
-    ) -> Result<std::collections::BTreeMap<String, String>, ProcessError> {
+    ) -> Result<std::collections::BTreeMap<String, ResolvedRepositoryAction>, ProcessError> {
         let workflow = repository.read_blob(commit, workflow_path).map_err(|_| {
             TaskFailure::terminal(
                 "trusted workflow source is unavailable for repository-action discovery",
@@ -1895,7 +1903,15 @@ impl ScmTaskWorker {
                 )
                 .into());
             }
-            resolved.insert(reference, prepared.image);
+            resolved.insert(
+                reference,
+                ResolvedRepositoryAction {
+                    image: prepared.image,
+                    inputs: prepared.inputs,
+                    entrypoint: prepared.entrypoint,
+                    args: prepared.args,
+                },
+            );
         }
         Ok(resolved)
     }

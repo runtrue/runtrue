@@ -445,6 +445,7 @@ fn validate_one_job(job: &PlannedJob) -> Result<(), FirecrackerError> {
                 ..
             } => {}
             StepAction::Command { .. }
+            | StepAction::Container { .. }
             | StepAction::Script { .. }
             | StepAction::Component { .. } => {
                 return Err(FirecrackerError::InvalidConfiguration(

@@ -20,6 +20,7 @@ use crate::{
     ImportOptions,
 };
 use runtrue_compiler::{CompileContext, Compiler};
+use runtrue_workflow_frontend::ResolvedRepositoryAction;
 use serde_yaml::Value as YamlValue;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -57,7 +58,7 @@ pub(crate) struct Analyzer {
     pub(crate) pull_request_target_requested: bool,
     pub(crate) workflow_concurrency: Option<String>,
     pub(crate) default_job_container_image: Option<String>,
-    pub(crate) resolved_repository_actions: BTreeMap<String, String>,
+    pub(crate) resolved_repository_actions: BTreeMap<String, ResolvedRepositoryAction>,
 }
 
 impl Analyzer {
@@ -133,8 +134,10 @@ impl Analyzer {
                                             || self
                                                 .resolved_repository_actions
                                                 .get(&reference)
-                                                .is_some_and(|image| {
-                                                    crate::validation::is_full_sha256_image(image)
+                                                .is_some_and(|action| {
+                                                    crate::validation::is_full_sha256_image(
+                                                        &action.image,
+                                                    )
                                                 })
                                     },
                                 )

@@ -37,7 +37,7 @@ pub(crate) fn validate_identifier(value: &str, path: &str) -> Result<(), Compile
 }
 
 pub(crate) fn validate_environment_name(value: &str, path: &str) -> Result<(), CompileError> {
-    let expression = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").expect("static regex");
+    let expression = Regex::new(r"^[A-Za-z_][A-Za-z0-9_-]*$").expect("static regex");
     if expression.is_match(value) {
         Ok(())
     } else {

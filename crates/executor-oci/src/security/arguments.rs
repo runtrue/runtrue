@@ -146,6 +146,51 @@ pub(crate) fn validate_command(
     Ok(())
 }
 
+pub(crate) fn validate_container_invocation(
+    entrypoint: Option<&str>,
+    arguments: Option<&[String]>,
+    limits: OciLimits,
+) -> Result<(), OciError> {
+    if arguments.is_some_and(|arguments| arguments.is_empty()) {
+        return Err(OciError::InvalidCommand(
+            "container arguments must be omitted or non-empty".to_owned(),
+        ));
+    }
+    if let Some(entrypoint) = entrypoint {
+        validate_command(entrypoint, arguments.unwrap_or_default(), limits)?;
+    } else if let Some(arguments) = arguments {
+        if arguments.len() > limits.max_arguments {
+            return Err(OciError::LimitExceeded {
+                kind: "container argument count",
+                limit: limits.max_arguments,
+                actual: arguments.len(),
+            });
+        }
+        let bytes = arguments.iter().try_fold(0_usize, |total, argument| {
+            if argument.contains('\0') {
+                return Err(OciError::InvalidCommand(
+                    "container argument contains a NUL byte".to_owned(),
+                ));
+            }
+            total
+                .checked_add(argument.len())
+                .ok_or(OciError::LimitExceeded {
+                    kind: "container argument bytes",
+                    limit: limits.max_argument_bytes,
+                    actual: usize::MAX,
+                })
+        })?;
+        if bytes > limits.max_argument_bytes {
+            return Err(OciError::LimitExceeded {
+                kind: "container argument bytes",
+                limit: limits.max_argument_bytes,
+                actual: bytes,
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_argument_bounds(
     arguments: &[String],
     limits: OciLimits,
@@ -186,7 +231,7 @@ pub(crate) fn ensure_secure_runtime_arguments(
     arguments: &[String],
     exact_image: &str,
     network: Option<&str>,
-    program: &str,
+    entrypoint: Option<&str>,
 ) -> Result<(), OciError> {
     for required in [
         "--pull=never",
@@ -218,7 +263,7 @@ pub(crate) fn ensure_secure_runtime_arguments(
         || "--network=none".to_owned(),
         |network| format!("--network={network}"),
     );
-    let expected_entrypoint = format!("--entrypoint={program}");
+    let expected_entrypoint = entrypoint.map(|entrypoint| format!("--entrypoint={entrypoint}"));
     if !arguments
         .iter()
         .any(|argument| argument.starts_with("--security-opt=seccomp="))
@@ -234,10 +279,10 @@ pub(crate) fn ensure_secure_runtime_arguments(
             .iter()
             .filter(|argument| argument.starts_with("--entrypoint="))
             .count()
-            != 1
-        || !arguments
-            .iter()
-            .any(|argument| argument == &expected_entrypoint)
+            != usize::from(expected_entrypoint.is_some())
+        || expected_entrypoint
+            .as_ref()
+            .is_some_and(|expected| !arguments.iter().any(|argument| argument == expected))
         || arguments.iter().any(|argument| {
             matches!(
                 argument.as_str(),

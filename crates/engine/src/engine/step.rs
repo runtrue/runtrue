@@ -44,6 +44,17 @@ pub(super) fn prepare_request(
                 .map(|binding| resolve_binding(binding, context))
                 .collect::<Result<_, _>>()?,
         },
+        StepAction::Container { entrypoint, args } => PreparedAction::Container {
+            entrypoint: entrypoint.clone(),
+            args: args
+                .as_ref()
+                .map(|args| {
+                    args.iter()
+                        .map(|binding| resolve_binding(binding, context))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?,
+        },
         StepAction::Script {
             shell,
             script,

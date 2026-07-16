@@ -195,7 +195,9 @@ impl WasmExecutor {
         self.validate_request(request, adapters)?;
         let (reference, inputs) = match &request.action {
             PreparedAction::Component { reference, inputs } => (reference, inputs),
-            PreparedAction::Command { .. } | PreparedAction::Script { .. } => {
+            PreparedAction::Command { .. }
+            | PreparedAction::Container { .. }
+            | PreparedAction::Script { .. } => {
                 return Err(WasmError::NoFallback);
             }
         };

@@ -24,7 +24,7 @@ pub(crate) fn validate_environment(
                 if index == 0 {
                     byte.is_ascii_alphabetic() || byte == b'_'
                 } else {
-                    byte.is_ascii_alphanumeric() || byte == b'_'
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
                 }
             })
         {

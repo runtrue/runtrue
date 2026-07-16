@@ -58,6 +58,54 @@ pub(crate) fn compile_run(
                 working_directory,
             ))
         }
+        ast::Run::Container(container) => {
+            if container
+                .container
+                .entrypoint
+                .as_ref()
+                .is_some_and(|entrypoint| entrypoint.is_empty() || entrypoint.contains('\0'))
+            {
+                return Err(CompileError::semantic(
+                    format!("{path}.run.container.entrypoint"),
+                    "container entrypoint must be non-empty and contain no NUL byte",
+                ));
+            }
+            let args = container
+                .container
+                .args
+                .as_ref()
+                .map(|args| {
+                    args.iter()
+                        .enumerate()
+                        .map(|(index, binding)| {
+                            convert_binding(binding, &format!("{path}.run.container.args[{index}]"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?;
+            if args.as_ref().is_some_and(Vec::is_empty) {
+                return Err(CompileError::semantic(
+                    format!("{path}.run.container.args"),
+                    "container args must be omitted or non-empty",
+                ));
+            }
+            if args.as_ref().is_some_and(|args| {
+                args.iter()
+                    .any(ir::ValueBinding::is_untrusted_runtime_context)
+            }) {
+                return Err(CompileError::semantic(
+                    format!("{path}.run.container.args"),
+                    "untrusted runtime values cannot be passed to container arguments",
+                ));
+            }
+            Ok((
+                ir::StepAction::Container {
+                    entrypoint: container.container.entrypoint.clone(),
+                    args,
+                },
+                None,
+            ))
+        }
         ast::Run::Script(script) => {
             if script.script.contains('\0') {
                 return Err(CompileError::semantic(

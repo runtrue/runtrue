@@ -139,7 +139,12 @@ fn prepared_repository_action_resolution_must_be_an_immutable_image() {
         ImportOptions {
             resolved_repository_actions: std::collections::BTreeMap::from([(
                 reference,
-                "containers.example/action:latest".to_owned(),
+                runtrue_workflow_frontend::ResolvedRepositoryAction {
+                    image: "containers.example/action:latest".to_owned(),
+                    inputs: std::collections::BTreeMap::new(),
+                    entrypoint: None,
+                    args: None,
+                },
             )]),
             ..ImportOptions::default()
         },

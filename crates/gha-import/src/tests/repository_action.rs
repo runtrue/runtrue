@@ -14,12 +14,29 @@ inputs:
 runs:
   using: docker
   image: Dockerfile
+  entrypoint: /bin/action
+  args: ["--config", "${{ inputs.config-path }}"]
 branding:
   icon: git-pull-request
   color: blue
 "#;
     let metadata = parse_repository_action_metadata(source).unwrap();
     assert_eq!(metadata.dockerfile, "Dockerfile");
+    assert_eq!(metadata.entrypoint.as_deref(), Some("/bin/action"));
+    assert_eq!(
+        metadata.args.as_deref(),
+        Some(
+            [
+                "--config".to_owned(),
+                "${{ inputs.config-path }}".to_owned()
+            ]
+            .as_slice()
+        )
+    );
+    assert_eq!(
+        metadata.inputs["config-path"].default.as_deref(),
+        Some(".github/backport.yml")
+    );
     assert_eq!(
         metadata.digest,
         runtrue_model::ContentDigest::sha256(source)
@@ -44,7 +61,7 @@ fn metadata_rejects_unknown_fields_and_duplicate_keys() {
     for source in [
         "name: action\ndescription: action\nruns: { using: docker, image: Dockerfile }\nunknown: true\n",
         "name: action\nname: changed\ndescription: action\nruns: { using: docker, image: Dockerfile }\n",
-        "name: action\ndescription: action\nruns: { using: docker, image: Dockerfile, args: [bad] }\n",
+        "name: action\ndescription: action\nruns: { using: docker, image: Dockerfile, env: { BAD: value } }\n",
     ] {
         assert!(parse_repository_action_metadata(source.as_bytes()).is_err());
     }

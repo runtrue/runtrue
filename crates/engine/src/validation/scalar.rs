@@ -110,6 +110,34 @@ pub(super) fn validate_scalar_invariants(capsule: &ExecutionCapsule) -> Result<(
                         )?;
                     }
                 }
+                StepAction::Container { entrypoint, args } => {
+                    if entrypoint
+                        .as_ref()
+                        .is_some_and(|value| value.is_empty() || value.contains('\0'))
+                    {
+                        return Err(EngineError::InvalidScalarValue(format!(
+                            "jobs.{}.steps.{}.container.entrypoint",
+                            job.id, step.id
+                        )));
+                    }
+                    if let Some(args) = args {
+                        if args.iter().any(ValueBinding::is_untrusted_runtime_context) {
+                            return Err(EngineError::UnsafeDynamicArgument(format!(
+                                "jobs.{}.steps.{}.container.args",
+                                job.id, step.id
+                            )));
+                        }
+                        for (index, value) in args.iter().enumerate() {
+                            binding(
+                                format!(
+                                    "jobs.{}.steps.{}.container.args[{index}]",
+                                    job.id, step.id
+                                ),
+                                value,
+                            )?;
+                        }
+                    }
+                }
                 StepAction::Script { script, .. } if script.contains('\0') => {
                     return Err(EngineError::InvalidScalarValue(format!(
                         "jobs.{}.steps.{}.script",

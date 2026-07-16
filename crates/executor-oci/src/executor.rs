@@ -15,6 +15,12 @@ pub(crate) struct PreparedService {
     pub(crate) healthcheck: Option<Healthcheck>,
 }
 
+struct PreparedContainerInvocation {
+    entrypoint: Option<String>,
+    arguments: Option<Vec<String>>,
+    script_file: Option<EphemeralFile>,
+}
+
 pub struct OciExecutor<P: ImageAdmissionProvider, R: RuntimeCommandRunner> {
     pub(crate) workspace: PathBuf,
     pub(crate) state_root: PathBuf,
@@ -419,17 +425,16 @@ where
                 ));
             }
         };
-        let (program, arguments, script_file) =
-            match self.prepare_action(request, &state_path, &step_key) {
-                Ok(action) => action,
-                Err(error) => {
-                    return Err(self.cleanup_after_failure(
-                        &request.job_id,
-                        request.job_attempt,
-                        error,
-                    ));
-                }
-            };
+        let action = match self.prepare_action(request, &state_path, &step_key) {
+            Ok(action) => action,
+            Err(error) => {
+                return Err(self.cleanup_after_failure(
+                    &request.job_id,
+                    request.job_attempt,
+                    error,
+                ));
+            }
+        };
         match self.start_job_services(request, &state_path) {
             Ok(false) => {}
             Ok(true) => {
@@ -457,9 +462,9 @@ where
             &container_name,
             &environment_path,
             &image,
-            &program,
-            &arguments,
-            script_file.as_ref().map(EphemeralFile::path),
+            action.entrypoint.as_deref(),
+            action.arguments.as_deref(),
+            action.script_file.as_ref().map(EphemeralFile::path),
             network.as_deref(),
         ) {
             Ok(invocation) => invocation,
@@ -494,7 +499,7 @@ where
         };
         let run_result = self.runtime.invoke(&invocation, &control);
         let cleanup_result = self.cleanup_container(&state_path, &container_name);
-        drop(script_file);
+        drop(action);
         drop(environment_file);
         if cleanup_result.is_ok() {
             if let Some(state) = self
@@ -742,11 +747,27 @@ where
         request: &StepExecutionRequest,
         state_path: &Path,
         step_key: &str,
-    ) -> Result<(String, Vec<String>, Option<EphemeralFile>), OciError> {
+    ) -> Result<PreparedContainerInvocation, OciError> {
         match &request.action {
             PreparedAction::Command { program, args } => {
                 validate_command(program, args, self.config.limits)?;
-                Ok((program.clone(), args.clone(), None))
+                Ok(PreparedContainerInvocation {
+                    entrypoint: Some(program.clone()),
+                    arguments: Some(args.clone()),
+                    script_file: None,
+                })
+            }
+            PreparedAction::Container { entrypoint, args } => {
+                validate_container_invocation(
+                    entrypoint.as_deref(),
+                    args.as_deref(),
+                    self.config.limits,
+                )?;
+                Ok(PreparedContainerInvocation {
+                    entrypoint: entrypoint.clone(),
+                    arguments: args.clone(),
+                    script_file: None,
+                })
             }
             PreparedAction::Script {
                 shell,
@@ -774,11 +795,11 @@ where
                         )));
                     }
                 };
-                Ok((
-                    shell.to_owned(),
-                    vec![CONTAINER_SCRIPT.to_owned()],
-                    Some(file),
-                ))
+                Ok(PreparedContainerInvocation {
+                    entrypoint: Some(shell.to_owned()),
+                    arguments: Some(vec![CONTAINER_SCRIPT.to_owned()]),
+                    script_file: Some(file),
+                })
             }
             PreparedAction::Component { reference, .. } => Err(OciError::UnsupportedFeature(
                 format!("component action `{reference}` requires the Wasm executor"),
@@ -794,8 +815,8 @@ where
         container_name: &str,
         environment_path: &Path,
         image: &AdmittedImage,
-        program: &str,
-        command_arguments: &[String],
+        entrypoint: Option<&str>,
+        command_arguments: Option<&[String]>,
         script_path: Option<&Path>,
         network: Option<&str>,
     ) -> Result<RuntimeInvocation, OciError> {
@@ -862,15 +883,15 @@ where
             |relative| format!("{CONTAINER_WORKSPACE}/{relative}"),
         );
         arguments.push(format!("--workdir={workdir}"));
-        // A job image is an execution filesystem, not an action invocation.
-        // Always replace image metadata's ENTRYPOINT so a reusable runner image
-        // cannot hijack a planned command (and an action image can safely be
-        // reused as an operator fallback while deployments migrate).
-        arguments.push(format!("--entrypoint={program}"));
+        if let Some(entrypoint) = entrypoint {
+            arguments.push(format!("--entrypoint={entrypoint}"));
+        }
         arguments.push(image.reference.clone());
-        arguments.extend(command_arguments.iter().cloned());
+        if let Some(command_arguments) = command_arguments {
+            arguments.extend(command_arguments.iter().cloned());
+        }
         validate_argument_bounds(&arguments, self.config.limits)?;
-        ensure_secure_runtime_arguments(&arguments, &image.reference, network, program)?;
+        ensure_secure_runtime_arguments(&arguments, &image.reference, network, entrypoint)?;
         Ok(RuntimeInvocation {
             kind: RuntimeInvocationKind::Run,
             program: self.config.runtime_program.clone(),
@@ -966,11 +987,11 @@ use crate::{
     ensure_descendant, ensure_mount_tree_is_safe, ensure_secure_runtime_arguments, fs, io,
     io_error, mount_argument, paths_overlap, prepare_private_state_root, record_first_error,
     scalar_text, short_identity, utf8_path, validate_argument_bounds, validate_broker_socket_mount,
-    validate_command, validate_environment, validate_healthcheck, validate_identifier,
-    validate_locked_image, validate_mount, validate_runtime_result, validate_seccomp_profile,
-    validate_service_dns_name, validate_working_directory, AdmittedImage, BTreeMap, BTreeSet,
-    ContentDigest, Duration, EnvironmentScope, EphemeralFile, ExecutionCapsule, Executor,
-    ExecutorError, ExecutorOutput, Healthcheck, ImageAdmissionProvider, Isolation,
+    validate_command, validate_container_invocation, validate_environment, validate_healthcheck,
+    validate_identifier, validate_locked_image, validate_mount, validate_runtime_result,
+    validate_seccomp_profile, validate_service_dns_name, validate_working_directory, AdmittedImage,
+    BTreeMap, BTreeSet, ContentDigest, Duration, EnvironmentScope, EphemeralFile, ExecutionCapsule,
+    Executor, ExecutorError, ExecutorOutput, Healthcheck, ImageAdmissionProvider, Isolation,
     JobAttemptOutcome, LockedImage, Mutex, NetworkPermission, NetworkProtocol, OciError,
     OciExecutorConfig, OciPlatform, OperatingSystem, Path, PathBuf, PlannedJob, PlannedService,
     PreparedAction, RuntimeCommandRunner, RuntimeControl, RuntimeInvocation, RuntimeInvocationKind,

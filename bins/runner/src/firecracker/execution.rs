@@ -37,6 +37,7 @@ pub(super) fn validate_guest_job(job: &runtrue_workflow_ir::PlannedJob) -> Resul
                 ..
             } => {}
             StepAction::Command { .. }
+            | StepAction::Container { .. }
             | StepAction::Script { .. }
             | StepAction::Component { .. } => {
                 return Err(RunnerError::FirecrackerAssignment(

@@ -9,12 +9,23 @@ use super::{
     ActionMapping, Analyzer, JobEffects,
 };
 use crate::{
-    native::{NativeCommand, NativeRun, NativeSecretRequest, NativeStepCapabilities},
+    native::{
+        NativeCommand, NativeContainerInvocation, NativeContainerRun, NativeRun,
+        NativeSecretRequest, NativeStepCapabilities,
+    },
     report::CompatibilityStatus,
     validation::{is_full_git_commit, is_full_sha256_image, yaml_text},
 };
+use runtrue_workflow_frontend::ResolvedRepositoryAction;
 use serde_yaml::Value as YamlValue;
 use std::collections::BTreeMap;
+
+struct PreparedContainerAction<'a> {
+    source: &'a str,
+    image: &'a str,
+    metadata: Option<&'a ResolvedRepositoryAction>,
+    finding_code: &'a str,
+}
 
 impl Analyzer {
     pub(crate) fn convert_action_step(
@@ -193,24 +204,27 @@ impl Analyzer {
             return ActionMapping::placeholder();
         }
         self.map_prepared_container_action(
-            image,
-            image,
+            PreparedContainerAction {
+                source: image,
+                image,
+                metadata: None,
+                finding_code: "pinned-container-action",
+            },
             inputs,
             path,
             effects,
-            "pinned-container-action",
         )
     }
 
     fn map_resolved_repository_action(
         &mut self,
         reference: &str,
-        image: &str,
+        action: &ResolvedRepositoryAction,
         inputs: &BTreeMap<String, YamlValue>,
         path: &str,
         effects: &mut JobEffects,
     ) -> ActionMapping {
-        if !is_full_sha256_image(image) {
+        if !is_full_sha256_image(&action.image) {
             self.unresolved_action_inputs(inputs, path, CompatibilityStatus::Unsafe);
             self.finding(
                 CompatibilityStatus::Unsafe,
@@ -225,24 +239,31 @@ impl Analyzer {
             return ActionMapping::placeholder();
         }
         self.map_prepared_container_action(
-            reference,
-            image,
+            PreparedContainerAction {
+                source: reference,
+                image: &action.image,
+                metadata: Some(action),
+                finding_code: "pinned-repository-docker-action",
+            },
             inputs,
             path,
             effects,
-            "pinned-repository-docker-action",
         )
     }
 
     fn map_prepared_container_action(
         &mut self,
-        source: &str,
-        image: &str,
+        prepared: PreparedContainerAction<'_>,
         inputs: &BTreeMap<String, YamlValue>,
         path: &str,
         effects: &mut JobEffects,
-        finding_code: &str,
     ) -> ActionMapping {
+        let PreparedContainerAction {
+            source,
+            image,
+            metadata,
+            finding_code,
+        } = prepared;
         if effects
             .container_action_image
             .as_ref()
@@ -258,9 +279,46 @@ impl Analyzer {
             return ActionMapping::placeholder();
         }
 
+        let mut effective_inputs = metadata.map_or_else(BTreeMap::new, |metadata| {
+            metadata
+                .inputs
+                .iter()
+                .filter_map(|(name, input)| {
+                    input
+                        .default
+                        .as_ref()
+                        .map(|value| (name.clone(), YamlValue::String(value.clone())))
+                })
+                .collect()
+        });
+        effective_inputs.extend(inputs.clone());
+        let missing_required = metadata
+            .into_iter()
+            .flat_map(|metadata| &metadata.inputs)
+            .any(|(name, input)| {
+                if input.required && !effective_inputs.contains_key(name) {
+                    self.finding(
+                        CompatibilityStatus::Unsupported,
+                        "missing-required-action-input",
+                        format!("{path}.with.{name}"),
+                        format!(
+                            "required action input `{name}` was not supplied and has no default"
+                        ),
+                        Some(format!("Supply `{name}` under `{path}.with`.")),
+                    );
+                    true
+                } else {
+                    false
+                }
+            });
+        if missing_required {
+            return ActionMapping::placeholder();
+        }
+
         let mut env = BTreeMap::new();
+        let mut input_text = BTreeMap::new();
         let mut needs_scm_credential = false;
-        for (name, value) in inputs {
+        for (name, value) in &effective_inputs {
             let input_path = format!("{path}.with.{name}");
             if is_github_token_expression(&yaml_text(value)) {
                 needs_scm_credential = true;
@@ -285,14 +343,12 @@ impl Analyzer {
             let normalized = format!(
                 "INPUT_{}",
                 name.chars()
-                    .map(|character| if character.is_ascii_alphanumeric() {
-                        character.to_ascii_uppercase()
-                    } else {
-                        '_'
-                    })
+                    .map(|character| if character == ' ' { '_' } else { character })
+                    .flat_map(char::to_uppercase)
                     .collect::<String>()
             );
             if let Some(value) = self.convert_scalar(value, &input_path) {
+                input_text.insert(name.to_ascii_lowercase(), scalar_text(&value));
                 if env.insert(normalized.clone(), value).is_some() {
                     self.finding(
                         CompatibilityStatus::Unsupported,
@@ -324,16 +380,39 @@ impl Analyzer {
             finding_code,
             format!("{path}.uses"),
             if finding_code == "pinned-repository-docker-action" {
-                "full-commit repository Docker action maps to its prepared immutable OCI image and the Runtrue container-action entrypoint contract"
+                "full-commit repository Docker action maps to its prepared immutable OCI image and declared Docker entrypoint/CMD semantics"
             } else {
-                "pinned Docker action maps to its exact OCI image and the Runtrue container-action entrypoint contract"
+                "pinned Docker action maps to its exact OCI image and image entrypoint/CMD semantics"
             },
             None,
         );
+        let (entrypoint, args) = metadata.map_or((None, None), |metadata| {
+            (
+                metadata.entrypoint.clone(),
+                metadata.args.as_ref().and_then(|args| {
+                    args.iter()
+                        .map(|argument| render_action_argument(argument, &input_text))
+                        .collect::<Option<Vec<_>>>()
+                }),
+            )
+        });
+        if metadata
+            .and_then(|metadata| metadata.args.as_ref())
+            .is_some()
+            && args.is_none()
+        {
+            self.finding(
+                CompatibilityStatus::Unsupported,
+                "unsupported-action-argument-expression",
+                format!("{path}.uses"),
+                "runs.args contains an expression other than a statically resolved inputs value",
+                Some("Use only static text and `${{ inputs.<name> }}` in runs.args.".to_owned()),
+            );
+            return ActionMapping::placeholder();
+        }
         ActionMapping {
-            run: NativeRun::Command(NativeCommand {
-                command: vec!["/usr/local/bin/runtrue-action".to_owned()],
-                working_directory: None,
+            run: NativeRun::Container(NativeContainerRun {
+                container: NativeContainerInvocation { entrypoint, args },
             }),
             env,
             cache: None,
@@ -348,6 +427,31 @@ impl Analyzer {
             mapped: true,
         }
     }
+}
+
+fn scalar_text(value: &runtrue_workflow_ast::Scalar) -> String {
+    match value {
+        runtrue_workflow_ast::Scalar::String(value) => value.clone(),
+        runtrue_workflow_ast::Scalar::Integer(value) => value.to_string(),
+        runtrue_workflow_ast::Scalar::Number(value) => value.to_string(),
+        runtrue_workflow_ast::Scalar::Boolean(value) => value.to_string(),
+    }
+}
+
+fn render_action_argument(template: &str, inputs: &BTreeMap<String, String>) -> Option<String> {
+    let mut rendered = String::new();
+    let mut remaining = template;
+    while let Some(start) = remaining.find("${{") {
+        rendered.push_str(&remaining[..start]);
+        let expression = &remaining[start + 3..];
+        let end = expression.find("}}")?;
+        let path = expression[..end].trim().strip_prefix("inputs.")?;
+        let value = inputs.get(&path.to_ascii_lowercase())?;
+        rendered.push_str(value);
+        remaining = &expression[end + 2..];
+    }
+    rendered.push_str(remaining);
+    Some(rendered)
 }
 
 pub(crate) fn is_canonical_repository_action(action: &str) -> bool {

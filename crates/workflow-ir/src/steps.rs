@@ -35,6 +35,10 @@ pub enum StepAction {
         program: String,
         args: Vec<ValueBinding>,
     },
+    Container {
+        entrypoint: Option<String>,
+        args: Option<Vec<ValueBinding>>,
+    },
     Script {
         shell: Shell,
         script: String,

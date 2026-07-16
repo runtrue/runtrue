@@ -54,6 +54,22 @@ pub struct Finalizer {
 pub enum Run {
     Command(CommandRun),
     Script(ScriptRun),
+    Container(ContainerRun),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerRun {
+    pub container: ContainerInvocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerInvocation {
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<ValueBinding>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

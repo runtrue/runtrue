@@ -18,7 +18,8 @@ use github::GithubWorkflow;
 #[cfg(test)]
 use runtrue_workflow_ast as ast;
 use runtrue_workflow_frontend::{
-    PreparedWorkflowSource, WorkflowFrontendOptions, WorkflowFrontendReport, WorkflowSourceFrontend,
+    PreparedWorkflowSource, ResolvedRepositoryAction, WorkflowFrontendOptions,
+    WorkflowFrontendReport, WorkflowSourceFrontend,
 };
 use std::collections::BTreeMap;
 use strict_yaml::{validate_expanded_yaml_budget, StrictYamlValue};
@@ -36,7 +37,7 @@ pub struct ImportOptions {
     pub default_job_container_image: Option<String>,
     /// Trusted, exact repository-action resolutions produced outside this
     /// pure frontend. A missing entry remains a blocking incompatibility.
-    pub resolved_repository_actions: BTreeMap<String, String>,
+    pub resolved_repository_actions: BTreeMap<String, ResolvedRepositoryAction>,
 }
 
 /// GitHub Actions source adapter. The server registers this as Runtrue's first

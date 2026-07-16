@@ -1,5 +1,6 @@
 use crate::{strict_yaml::StrictYamlValue, validation::safe_relative_path, ImportError};
 use runtrue_model::ContentDigest;
+use runtrue_workflow_frontend::ResolvedActionInput;
 use serde::Deserialize;
 use serde_yaml::Value as YamlValue;
 use std::collections::BTreeMap;
@@ -10,6 +11,9 @@ const MAX_ACTION_METADATA_BYTES: usize = 256 * 1024;
 pub struct RepositoryActionMetadata {
     pub digest: ContentDigest,
     pub dockerfile: String,
+    pub inputs: BTreeMap<String, ResolvedActionInput>,
+    pub entrypoint: Option<String>,
+    pub args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +57,10 @@ struct ActionOutput {
 struct ActionRuns {
     using: String,
     image: String,
+    #[serde(default)]
+    entrypoint: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,10 +88,21 @@ pub fn parse_repository_action_metadata(
     if let Some(author) = &metadata.author {
         validate_text("author", author)?;
     }
+    let mut inputs = BTreeMap::new();
     for (name, input) in &metadata.inputs {
         validate_identifier("input", name)?;
         validate_text("input description", &input.description)?;
-        let _ = (input.required, &input.default, &input.deprecation_message);
+        if let Some(message) = &input.deprecation_message {
+            validate_text("input deprecation message", message)?;
+        }
+        let default = input.default.as_ref().map(action_scalar_text).transpose()?;
+        inputs.insert(
+            name.clone(),
+            ResolvedActionInput {
+                required: input.required,
+                default,
+            },
+        );
     }
     for (name, output) in &metadata.outputs {
         validate_identifier("output", name)?;
@@ -99,6 +118,23 @@ pub fn parse_repository_action_metadata(
             "only runs.using: docker repository actions are supported".to_owned(),
         ));
     }
+    if let Some(entrypoint) = &metadata.runs.entrypoint {
+        validate_text("runs.entrypoint", entrypoint)?;
+    }
+    if let Some(args) = &metadata.runs.args {
+        if args.is_empty() || args.len() > 256 {
+            return Err(ImportError::RepositoryActionMetadata(
+                "runs.args must contain between 1 and 256 arguments".to_owned(),
+            ));
+        }
+        for argument in args {
+            if argument.len() > 8 * 1024 || argument.contains('\0') {
+                return Err(ImportError::RepositoryActionMetadata(
+                    "runs.args contains an invalid argument".to_owned(),
+                ));
+            }
+        }
+    }
     if !safe_relative_path(&metadata.runs.image, false)
         || metadata.runs.image.starts_with("docker://")
         || !metadata.runs.image.rsplit('/').next().is_some_and(|name| {
@@ -112,7 +148,29 @@ pub fn parse_repository_action_metadata(
     Ok(RepositoryActionMetadata {
         digest: ContentDigest::sha256(bytes),
         dockerfile: metadata.runs.image,
+        inputs,
+        entrypoint: metadata.runs.entrypoint,
+        args: metadata.runs.args,
     })
+}
+
+fn action_scalar_text(value: &YamlValue) -> Result<String, ImportError> {
+    let text = match value {
+        YamlValue::String(value) => value.clone(),
+        YamlValue::Bool(value) => value.to_string(),
+        YamlValue::Number(value) => value.to_string(),
+        _ => {
+            return Err(ImportError::RepositoryActionMetadata(
+                "input defaults must be scalar strings, booleans, or numbers".to_owned(),
+            ));
+        }
+    };
+    if text.len() > 8 * 1024 || text.contains('\0') {
+        return Err(ImportError::RepositoryActionMetadata(
+            "input default is invalid".to_owned(),
+        ));
+    }
+    Ok(text)
 }
 
 fn validate_text(field: &str, value: &str) -> Result<(), ImportError> {

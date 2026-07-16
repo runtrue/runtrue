@@ -62,6 +62,47 @@ fn run_command_has_mandatory_isolation_and_no_tag_or_socket_exposure() {
 }
 
 #[test]
+fn container_action_preserves_or_overrides_image_invocation_metadata() {
+    let mut fixture = fixture_with(AdmissionMode::Exact);
+    let mut image_default = request(PreparedAction::Container {
+        entrypoint: None,
+        args: None,
+    });
+    image_default
+        .environment
+        .insert("INPUT_CONFIG-PATH".to_owned(), "policy.yml".to_owned());
+    fixture.executor.execute_request(&image_default).unwrap();
+    let invocation = &fixture.executor.runtime().invocations[0];
+    assert!(!invocation
+        .arguments
+        .iter()
+        .any(|argument| argument.starts_with("--entrypoint=")));
+    assert_eq!(invocation.arguments.last().map(String::as_str), Some(IMAGE));
+    assert_eq!(
+        fixture.executor.runtime().environment_files,
+        vec![b"INPUT_CONFIG-PATH=policy.yml\n".to_vec()]
+    );
+
+    let mut fixture = fixture_with(AdmissionMode::Exact);
+    let overridden = request(PreparedAction::Container {
+        entrypoint: Some("/bin/action".to_owned()),
+        args: Some(vec!["--mode".to_owned(), "strict".to_owned()]),
+    });
+    fixture.executor.execute_request(&overridden).unwrap();
+    let invocation = &fixture.executor.runtime().invocations[0];
+    assert!(invocation
+        .arguments
+        .iter()
+        .any(|argument| argument == "--entrypoint=/bin/action"));
+    let image = invocation
+        .arguments
+        .iter()
+        .position(|argument| argument == IMAGE)
+        .unwrap();
+    assert_eq!(&invocation.arguments[image + 1..], &["--mode", "strict"]);
+}
+
+#[test]
 fn cancellation_and_zero_timeout_do_not_start_the_runtime() {
     let mut fixture = fixture_with(AdmissionMode::Exact);
     let canceled = command_request();

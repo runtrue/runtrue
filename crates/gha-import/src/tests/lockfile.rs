@@ -139,8 +139,8 @@ jobs:
         workflow.jobs["reconcile"].runner.image.as_deref(),
         Some(image.as_str())
     );
-    assert!(yaml.contains("/usr/local/bin/runtrue-action"));
-    assert!(yaml.contains("INPUT_CONFIG_PATH"));
+    assert!(yaml.contains("container:"));
+    assert!(yaml.contains("INPUT_CONFIG-PATH"));
     let lock = LockFile::parse(result.lockfile_toml.as_deref().unwrap().as_bytes()).unwrap();
     assert_eq!(lock.images()[0].source(), image);
     assert!(result.report.findings.iter().any(|finding| {
@@ -220,7 +220,21 @@ jobs:
         ImportOptions {
             resolved_repository_actions: std::collections::BTreeMap::from([(
                 reference.clone(),
-                image.clone(),
+                runtrue_workflow_frontend::ResolvedRepositoryAction {
+                    image: image.clone(),
+                    inputs: std::collections::BTreeMap::from([(
+                        "config-path".to_owned(),
+                        runtrue_workflow_frontend::ResolvedActionInput {
+                            required: false,
+                            default: Some(".github/default.yml".to_owned()),
+                        },
+                    )]),
+                    entrypoint: Some("/bin/backport".to_owned()),
+                    args: Some(vec![
+                        "--config".to_owned(),
+                        "${{ inputs.config-path }}".to_owned(),
+                    ]),
+                },
             )]),
             ..ImportOptions::default()
         },
@@ -237,8 +251,95 @@ jobs:
     let lock = LockFile::parse(result.lockfile_toml.as_deref().unwrap().as_bytes()).unwrap();
     assert_eq!(lock.images()[0].source(), reference);
     assert_eq!(lock.images()[0].resolved(), image);
+    let ast::Run::Container(invocation) = workflow.jobs["reconcile"].steps[0]
+        .run
+        .as_ref()
+        .expect("container invocation")
+    else {
+        panic!("expected container invocation");
+    };
+    assert_eq!(
+        invocation.container.entrypoint.as_deref(),
+        Some("/bin/backport")
+    );
+    assert_eq!(
+        invocation.container.args.as_deref(),
+        Some(
+            [
+                ast::ValueBinding::Scalar(ast::Scalar::String("--config".to_owned())),
+                ast::ValueBinding::Scalar(ast::Scalar::String(".github/backport.yml".to_owned())),
+            ]
+            .as_slice()
+        )
+    );
+    assert!(yaml.contains("INPUT_CONFIG-PATH"));
     assert!(result.report.findings.iter().any(|finding| {
         finding.code == "pinned-repository-docker-action"
             && finding.status == CompatibilityStatus::Emulated
     }));
+}
+
+#[test]
+fn repository_action_requires_missing_inputs_and_applies_metadata_defaults() {
+    let reference = format!("owner/action@{}", "a".repeat(40));
+    let image = format!("registry.example/action@sha256:{}", "b".repeat(64));
+    let action = runtrue_workflow_frontend::ResolvedRepositoryAction {
+        image,
+        inputs: std::collections::BTreeMap::from([
+            (
+                "optional".to_owned(),
+                runtrue_workflow_frontend::ResolvedActionInput {
+                    required: false,
+                    default: Some("fallback".to_owned()),
+                },
+            ),
+            (
+                "required".to_owned(),
+                runtrue_workflow_frontend::ResolvedActionInput {
+                    required: true,
+                    default: None,
+                },
+            ),
+        ]),
+        entrypoint: None,
+        args: None,
+    };
+    let source = format!(
+        "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: {reference}\n"
+    );
+    let result = import_github_actions_with_options(
+        &source,
+        "required.yml",
+        ImportOptions {
+            resolved_repository_actions: std::collections::BTreeMap::from([(
+                reference.clone(),
+                action.clone(),
+            )]),
+            ..ImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(!result.report.compatible);
+    assert!(result
+        .report
+        .findings
+        .iter()
+        .any(|finding| { finding.code == "missing-required-action-input" && finding.blocking }));
+
+    let source = format!(
+        "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: {reference}\n        with:\n          required: supplied\n"
+    );
+    let result = import_github_actions_with_options(
+        &source,
+        "defaults.yml",
+        ImportOptions {
+            resolved_repository_actions: std::collections::BTreeMap::from([(reference, action)]),
+            ..ImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(result.report.compatible, "{}", result.report.render_human());
+    let yaml = result.native_yaml.as_deref().expect("native YAML");
+    assert!(yaml.contains("INPUT_OPTIONAL: fallback"));
+    assert!(yaml.contains("INPUT_REQUIRED: supplied"));
 }

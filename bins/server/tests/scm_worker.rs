@@ -146,6 +146,9 @@ impl RepositoryActionResolver for FixtureRepositoryActionResolver {
             reference: reference.to_owned(),
             image: self.image.clone(),
             metadata_digest: ContentDigest::sha256(b"exact action.yml"),
+            inputs: std::collections::BTreeMap::new(),
+            entrypoint: None,
+            args: None,
         })
     }
 }
@@ -1291,7 +1294,7 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
         root.path(),
         &["config", "user.name", "Repository Action Test"],
     );
-    let metadata = b"name: Backport\ndescription: Backport merged changes\nruns:\n  using: docker\n  image: Dockerfile\n";
+    let metadata = b"name: Backport\ndescription: Backport merged changes\ninputs:\n  config-path:\n    description: Policy path\n    required: false\n    default: .github/backport.yml\nruns:\n  using: docker\n  image: Dockerfile\n  entrypoint: /bin/backport\n  args: [--config, '${{ inputs.config-path }}']\n";
     let dockerfile = b"FROM scratch\nCOPY runtrue-action /usr/local/bin/runtrue-action\n";
     fs::write(root.path().join("action.yml"), metadata).expect("action metadata");
     fs::write(root.path().join("Dockerfile"), dockerfile).expect("Dockerfile");
@@ -1391,6 +1394,21 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
     assert_eq!(prepared.reference, reference);
     assert_eq!(prepared.image, image);
     assert_eq!(prepared.metadata_digest, ContentDigest::sha256(metadata));
+    assert_eq!(
+        prepared.inputs["config-path"].default.as_deref(),
+        Some(".github/backport.yml")
+    );
+    assert_eq!(prepared.entrypoint.as_deref(), Some("/bin/backport"));
+    assert_eq!(
+        prepared.args.as_deref(),
+        Some(
+            [
+                "--config".to_owned(),
+                "${{ inputs.config-path }}".to_owned()
+            ]
+            .as_slice()
+        )
+    );
     let fetched = fetch_requests.lock().unwrap();
     assert_eq!(fetched.len(), 1);
     assert_eq!(fetched[0].tenant_id, "tenant-1");
@@ -1464,8 +1482,8 @@ fn trusted_full_commit_repository_action_is_prepared_and_locked_generically() {
     assert!(capsule.jobs[0].steps.iter().any(|step| {
         matches!(
             &step.action,
-            runtrue_workflow_ir::StepAction::Command { program, args }
-                if program == "/usr/local/bin/runtrue-action" && args.is_empty()
+            runtrue_workflow_ir::StepAction::Container { entrypoint, args }
+                if entrypoint.is_none() && args.is_none()
         )
     }));
 }

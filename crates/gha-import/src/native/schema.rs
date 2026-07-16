@@ -304,6 +304,22 @@ pub(crate) const fn is_false(value: &bool) -> bool {
 pub(crate) enum NativeRun {
     Command(NativeCommand),
     Script(NativeScript),
+    Container(NativeContainerRun),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeContainerRun {
+    pub(crate) container: NativeContainerInvocation,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeContainerInvocation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) entrypoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]

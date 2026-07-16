@@ -33,6 +33,9 @@ pub(super) fn native_command(
             Err(ExecutorError::UnsupportedComponent(reference.clone()))
         }
         PreparedAction::Command { program, args } => Ok((program.clone(), args.clone())),
+        PreparedAction::Container { .. } => Err(ExecutorError::UnsupportedCapsuleFeature(
+            "image entrypoint execution requires the OCI executor".to_owned(),
+        )),
         PreparedAction::Script {
             shell,
             script,

@@ -47,9 +47,11 @@ pub(super) fn prepare_action(
             };
             Ok((PathBuf::from(shell), vec!["-c".to_owned(), script.clone()]))
         }
-        StepAction::Component { .. } => Err(GuestAgentError::InvalidConfiguration(
-            "component actions require a dedicated guest component runtime".to_owned(),
-        )),
+        StepAction::Component { .. } | StepAction::Container { .. } => {
+            Err(GuestAgentError::InvalidConfiguration(
+                "component and image-entrypoint actions require dedicated runtimes".to_owned(),
+            ))
+        }
     }
 }
 

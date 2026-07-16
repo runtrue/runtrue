@@ -150,6 +150,10 @@ pub enum PreparedAction {
         program: String,
         args: Vec<String>,
     },
+    Container {
+        entrypoint: Option<String>,
+        args: Option<Vec<String>>,
+    },
     Script {
         shell: Shell,
         script: String,
