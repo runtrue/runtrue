@@ -753,9 +753,27 @@ pub(super) fn store_tenant_approval(
     approval_id: &str,
     reviewer: &str,
 ) {
+    store_tenant_approval_kind(
+        control_plane,
+        repository_id,
+        capsule_id,
+        approval_id,
+        reviewer,
+        ApprovalKind::WorkflowDefinition,
+    );
+}
+
+pub(super) fn store_tenant_approval_kind(
+    control_plane: &ControlPlane,
+    repository_id: &str,
+    capsule_id: &str,
+    approval_id: &str,
+    reviewer: &str,
+    kind: ApprovalKind,
+) {
     let request = ApprovalRequest::create(
         approval_id,
-        ApprovalKind::WorkflowDefinition,
+        kind,
         ContentDigest::sha256(approval_id.as_bytes()),
         10,
         1,

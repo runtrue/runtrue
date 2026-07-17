@@ -225,6 +225,26 @@ pub struct ScmContinuationContext {
     pub analysis_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_snapshot_id: Option<String>,
+    /// Repository-scoped identity for the static privileged capability
+    /// envelope. Unlike the Capsule approval subject, this intentionally
+    /// excludes the triggering event and source commit so an unchanged
+    /// workflow can reuse a durable capability grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privileged_capability_digest: Option<ContentDigest>,
+    /// Exact repository-action Programs prepared before approval. The worker
+    /// reuses these immutable resolutions during continuation and still must
+    /// reproduce the byte-identical signed Capsule before approval is
+    /// consumed.
+    #[serde(default = "empty_object", skip_serializing_if = "is_empty_object")]
+    pub resolved_repository_actions: Value,
+}
+
+fn empty_object() -> Value {
+    Value::Object(Default::default())
+}
+
+fn is_empty_object(value: &Value) -> bool {
+    value.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
 /// A signed SCM capsule plus its exact future run request. Empty approvals mean

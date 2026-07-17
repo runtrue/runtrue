@@ -122,8 +122,11 @@
       byId("catalog-content").innerHTML = `<div class="catalog-empty"><div><div class="empty-icon" aria-hidden="true">+</div><h3>${empty[0]}</h3><p>${empty[1]}</p></div></div>`;
       return;
     }
-    const rows = repositories.map((repository) => `<tr><td><button class="repo-link" type="button" data-open-repository="${escapeHtml(repository.id)}"><span class="repo-glyph" aria-hidden="true">R</span><span><strong>${escapeHtml(repository.organization)}/${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.visibility)} · ${escapeHtml(repository.defaultBranch)}</small></span></button></td><td>${escapeHtml(repository.source)}</td><td><span class="status-badge">${escapeHtml(repository.state)}</span></td></tr>`).join("");
-    byId("catalog-content").innerHTML = `<div class="table-wrap"><table class="repo-table"><thead><tr><th>Repository</th><th>Source</th><th>State</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    const rows = repositories.map((repository) => {
+      const pending = pendingApprovalsForRepository(repository.id).length;
+      return `<tr><td><button class="repo-link" type="button" data-open-repository="${escapeHtml(repository.id)}"><span class="repo-glyph" aria-hidden="true">R</span><span><strong>${escapeHtml(repository.organization)}/${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.visibility)} · ${escapeHtml(repository.defaultBranch)}</small></span></button></td><td>${escapeHtml(repository.source)}</td><td>${pending ? `<span class="approval-count-badge">${escapeHtml(pending)} pending</span>` : `<span class="muted-cell">None</span>`}</td><td><span class="status-badge">${escapeHtml(repository.state)}</span></td></tr>`;
+    }).join("");
+    byId("catalog-content").innerHTML = `<div class="table-wrap"><table class="repo-table"><thead><tr><th>Repository</th><th>Source</th><th>Approvals</th><th>State</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function renderAlert() {
@@ -163,8 +166,23 @@
     const pending = approvals.filter((approval) => approval.status === "pending").length;
     byId("sidebar-approval-count").textContent = pending;
     byId("approval-count-copy").textContent = `${pending} pending · ${approvals.length} total`;
-    byId("approval-list").innerHTML = visible.map((approval) => `<article class="approval-row"><div class="approval-main"><span class="state-badge ${tone(approval.status)}">${escapeHtml(titleCase(approval.status))}</span><h3>${escapeHtml(titleCase(approval.kind))}</h3><p><span class="mono">${escapeHtml(approval.id)}</span> · Rule ${escapeHtml(approval.ruleId)}</p><ul class="approval-signals"><li>${escapeHtml(approval.requiredApprovals)} required</li><li>${escapeHtml(approval.decisionCount)} decisions</li><li>Expires ${escapeHtml(formatDate(approval.expiresAt))}</li></ul></div><div class="risk-score ${approval.riskScore >= 70 ? "high" : ""}"><span>Risk</span><strong>${escapeHtml(approval.riskScore)}</strong></div><button class="btn btn-secondary btn-inline" type="button" data-open-approval="${escapeHtml(approval.id)}">Review</button></article>`).join("");
+    byId("approval-list").innerHTML = visible.map(approvalRow).join("");
     byId("approvals-empty").hidden = visible.length > 0;
+  }
+
+  function pendingApprovalsForRepository(repositoryId) {
+    return (state.data?.approvals || []).filter((approval) => approval.repositoryId === repositoryId && approval.status === "pending");
+  }
+
+  function approvalRow(approval) {
+    const waitingPullRequests = approval.waitingPullRequests || [];
+    const trigger = waitingPullRequests.length
+      ? `Pull request${waitingPullRequests.length === 1 ? "" : "s"} ${waitingPullRequests.map((number) => `#${number}`).join(", ")}`
+      : approval.source?.pullRequest ? `Pull request #${approval.source.pullRequest}` : titleCase(approval.source?.event || "Execution request");
+    const remaining = Number(approval.remainingApprovals ?? approval.requiredApprovals ?? 0);
+    const waiting = Number(approval.waitingExecutions || 0);
+    const scope = approval.kind === "privileged-execution" && approval.oneShot === false ? "Reusable capability grant" : titleCase(approval.kind);
+    return `<article class="approval-row"><div class="approval-main"><div class="approval-row-heading"><span class="state-badge ${tone(approval.status)}">${escapeHtml(titleCase(approval.status))}</span><span class="approval-repository">${escapeHtml(approval.repository || "Repository")}</span></div><h3>${escapeHtml(approval.workflow?.name || titleCase(approval.kind))}</h3><p>${escapeHtml(scope)} · ${escapeHtml(trigger)}</p><ul class="approval-signals"><li>${escapeHtml(remaining)} approval${remaining === 1 ? "" : "s"} needed</li>${waiting ? `<li>${escapeHtml(waiting)} execution${waiting === 1 ? "" : "s"} waiting</li>` : ""}<li>${escapeHtml(approval.jobs?.length || 0)} job${approval.jobs?.length === 1 ? "" : "s"}</li><li>Expires ${escapeHtml(formatDate(approval.expiresAt))}</li></ul></div><div class="risk-score ${approval.riskScore >= 70 ? "high" : ""}"><span>Risk</span><strong>${escapeHtml(approval.riskScore)}</strong></div><button class="btn btn-secondary btn-inline" type="button" data-open-approval="${escapeHtml(approval.id)}">Review</button></article>`;
   }
 
   function renderGitHub() {
@@ -236,6 +254,7 @@
     state.repositorySettings = null;
     renderRepositorySettings();
     const runs = (state.data.runs || []).filter((run) => run.repositoryId === repository.id);
+    const approvals = (state.data.approvals || []).filter((approval) => approval.repositoryId === repository.id);
     byId("repository-page-title").textContent = repository.key;
     const providerLink = byId("repository-provider-link");
     providerLink.hidden = !repository.repositoryUrl;
@@ -250,9 +269,11 @@
     byId("repository-connection-state").textContent = repository.state;
     byId("repository-connection-state").className = `state-badge ${tone(repository.state)}`;
     byId("repository-connection-metadata").innerHTML = definitionLinkCard("GitHub repository", repository.key, repository.repositoryUrl) + definitionCard("External ID", repository.externalId);
-    byId("repository-execution-metadata").innerHTML = definitionCard("Runs", runs.length) + definitionCard("Latest activity", runs[0] ? formatDate(runs[0].createdAt) : "No runs yet");
+    const pendingApprovals = approvals.filter((approval) => approval.status === "pending").length;
+    byId("repository-execution-metadata").innerHTML = definitionCard("Runs", runs.length) + definitionCard("Pending approvals", pendingApprovals) + definitionCard("Latest activity", runs[0] ? formatDate(runs[0].createdAt) : "No runs yet");
     byId("repository-uninstall-name").textContent = repository.key;
     renderRepositoryRuns(runs);
+    renderRepositoryApprovals(approvals);
     setRepositorySection("overview");
     switchView("repository");
   }
@@ -261,6 +282,14 @@
     byId("repository-runs-body").innerHTML = runs.map((run) => `<tr><td><strong class="mono run-id" title="${escapeHtml(run.id)}">${escapeHtml(compactId(run.id))}</strong><small class="mono" title="${escapeHtml(run.planId)}">Capsule ${escapeHtml(compactId(run.planId))}</small></td><td><span class="state-badge ${tone(run.status)}">${escapeHtml(titleCase(run.status))}</span></td><td class="date-cell">${escapeHtml(formatDate(run.createdAt))}</td><td><button class="text-button run-open-button" type="button" data-open-run="${escapeHtml(run.id)}">Details <span aria-hidden="true">→</span></button></td></tr>`).join("");
     byId("repository-runs-empty").hidden = runs.length > 0;
     byId("repository-runs-body").closest("table").hidden = runs.length === 0;
+  }
+
+  function renderRepositoryApprovals(approvals) {
+    const pending = approvals.filter((approval) => approval.status === "pending").length;
+    byId("repository-approval-count").textContent = pending;
+    byId("repository-approval-count").hidden = pending === 0;
+    byId("repository-approval-list").innerHTML = approvals.map(approvalRow).join("");
+    byId("repository-approvals-empty").hidden = approvals.length > 0;
   }
 
   function setRepositorySection(section) {
@@ -451,6 +480,7 @@
 
   function showRecordDetails(kicker, title, copy, fields) {
     state.activeApprovalId = null;
+    byId("record-detail-dialog").classList.remove("approval-dialog");
     byId("approve-workflow-approval").hidden = true;
     byId("deny-workflow-approval").hidden = true;
     byId("record-detail-footer-copy").textContent = "Read-only.";
@@ -541,13 +571,117 @@
   function openApproval(id) {
     const approval = (state.data.approvals || []).find((item) => item.id === id);
     if (!approval) return;
-    showRecordDetails("Approval request", titleCase(approval.kind), approval.id, [["Status", titleCase(approval.status)], ["Risk score", approval.riskScore], ["Rule", approval.ruleId, true], ["Required approvals", approval.requiredApprovals], ["Decisions", approval.decisionCount], ["Subject digest", approval.subjectDigest, true], ["Created", formatDate(approval.createdAt)], ["Expires", formatDate(approval.expiresAt)]]);
-    if (approval.status === "pending" && approval.kind === "workflow-definition") {
+    const waitingPullRequests = approval.waitingPullRequests || [];
+    const trigger = waitingPullRequests.length
+      ? `Pull request${waitingPullRequests.length === 1 ? "" : "s"} ${waitingPullRequests.map((number) => `#${number}`).join(", ")}`
+      : approval.source?.pullRequest
+        ? `Pull request #${approval.source.pullRequest}`
+        : `${titleCase(approval.source?.event || "Repository event")}${approval.source?.action ? ` · ${titleCase(approval.source.action)}` : ""}`;
+    const reasons = (approval.reasons || []).map((reason) => `<li><strong>${escapeHtml(approvalReasonTitle(reason))}</strong><span>${escapeHtml(approvalReasonDescription(reason))}</span></li>`).join("");
+    const permissions = approvalPermissionSummary(approval.permissions).map((permission) => `<li><div class="approval-access-copy"><span>${escapeHtml(permission.label)}</span>${(permission.details || []).map((detail) => `<small>${escapeHtml(detail)}</small>`).join("")}</div><strong class="${permission.elevated ? "danger-text" : ""}">${escapeHtml(permission.value)}</strong></li>`).join("");
+    const jobs = (approval.jobs || []).map((job) => `<li><span class="job-index" aria-hidden="true">${escapeHtml((approval.jobs || []).indexOf(job) + 1)}</span><div><strong>${escapeHtml(job.name || job.id)}</strong><small class="mono">${escapeHtml(job.id)}</small></div></li>`).join("");
+    const decisions = (approval.decisions || []).map((decision) => `<li><div><strong>${escapeHtml(titleCase(decision.decision))} by ${escapeHtml(decision.actor)}</strong><small>${escapeHtml(formatDate(decision.decidedAt))}</small></div><span>${escapeHtml(decision.reason)}</span></li>`).join("");
+    const reusableGrant = approval.kind === "privileged-execution" && approval.oneShot === false;
+    showRecordDetails("Approval request", approvalTitle(approval), `${approval.repository} · ${trigger}`, []);
+    byId("record-detail-dialog").classList.add("approval-dialog");
+    byId("record-detail-grid").innerHTML = `<div class="approval-review">
+      <section class="approval-review-lead"><div><span class="state-badge ${tone(approval.status)}">${escapeHtml(titleCase(approval.status))}</span><h3>${escapeHtml(approval.workflow?.name || "Workflow execution")}</h3><p>Review the exact execution plan and requested access before deciding.</p></div><div class="risk-score ${approval.riskScore >= 70 ? "high" : ""}"><span>Risk</span><strong>${escapeHtml(approval.riskScore)}</strong></div></section>
+      <section class="approval-review-section"><h3>What will run</h3><div class="approval-context-grid"><div><span>Repository</span><strong>${escapeHtml(approval.repository)}</strong></div><div><span>Workflow</span><strong>${escapeHtml(approval.workflow?.name || "Not recorded")}</strong><small class="mono">${escapeHtml(approval.workflow?.path || "")}</small></div><div><span>Trigger</span><strong>${escapeHtml(trigger)}</strong></div><div><span>Source commit</span><strong class="mono">${escapeHtml(compactId(approval.source?.commit, 12))}</strong><small>${escapeHtml(approval.source?.ref || "Repository source")}</small></div></div></section>
+      <section class="approval-review-section"><h3>Why approval is required</h3><p>${escapeHtml(approvalKindDescription(approval.kind, approval.oneShot))}</p><ul class="approval-reason-list">${reasons || "<li><strong>Policy review</strong><span>The active policy requires a human decision for this capability set.</span></li>"}</ul></section>
+      <section class="approval-review-section"><h3>Access requested</h3><ul class="approval-access-list">${permissions || "<li><span>Additional access</span><strong>None</strong></li>"}</ul></section>
+      <section class="approval-review-section"><h3>Jobs (${escapeHtml(approval.jobs?.length || 0)})</h3><ul class="approval-job-list">${jobs || "<li><div><strong>No jobs recorded</strong></div></li>"}</ul></section>
+      ${decisions ? `<section class="approval-review-section"><h3>Decisions</h3><ul class="approval-decision-list">${decisions}</ul></section>` : ""}
+      <details class="approval-exact-plan"><summary>${reusableGrant ? "Capability identity" : "Exact-plan identity"}</summary><dl><div><dt>Capsule</dt><dd class="mono">${escapeHtml(approval.capsuleId)}</dd></div><div><dt>${reusableGrant ? "Capability digest" : "Subject digest"}</dt><dd class="mono">${escapeHtml(approval.subjectDigest)}</dd></div><div><dt>Rule</dt><dd class="mono">${escapeHtml(approval.ruleId)}</dd></div><div><dt>Requested</dt><dd>${escapeHtml(formatDate(approval.createdAt))}</dd></div><div><dt>${approval.status === "approved" && reusableGrant ? "Valid until" : "Approval deadline"}</dt><dd>${escapeHtml(formatDate(approval.expiresAt))}</dd></div></dl><p>${reusableGrant ? "This grant authorizes future matching executions for this repository until it expires. A workflow, action, access, or policy change creates a new approval request." : "This approval authorizes one execution of this exact plan. If it is not approved before the deadline, the request expires and the run will not start."}</p></details>
+    </div>`;
+    if (approval.status === "pending" && approval.canDecide) {
       state.activeApprovalId = approval.id;
       byId("approve-workflow-approval").hidden = false;
       byId("deny-workflow-approval").hidden = false;
-      byId("record-detail-footer-copy").textContent = "Approval applies to this commit only.";
+      byId("record-detail-footer-copy").textContent = reusableGrant ? "Approval grants this unchanged workflow capability set until it expires." : "Approval authorizes this exact execution once and must be decided before the deadline.";
+    } else {
+      byId("record-detail-footer-copy").textContent = approval.status === "pending" ? "You do not have permission to decide this request." : `This request is ${titleCase(approval.status).toLowerCase()}.`;
     }
+  }
+
+  function approvalTitle(approval) {
+    if (approval.kind === "privileged-execution" && approval.oneShot === false) return "Approve workflow capabilities";
+    return approval.kind === "privileged-execution" ? "Approve privileged execution" : "Approve workflow changes";
+  }
+
+  function approvalKindDescription(kind, oneShot = true) {
+    if (kind === "privileged-execution" && oneShot === false) return "This unchanged workflow requests capabilities that can change repository or external state. Approval grants this exact capability set to matching executions in this repository until it expires.";
+    if (kind === "privileged-execution") return "This plan requests capabilities that can change repository or external state. Approval releases only this signed plan to the runner.";
+    return "The workflow definition or execution inputs changed. Approval authorizes only the reviewed definition and source commit.";
+  }
+
+  function approvalReasonTitle(code) {
+    const titles = {
+      "scm-contents-write": "Repository contents write",
+      "scm-issues-write": "Issue write access",
+      "scm-pull-requests-write": "Pull request write access",
+      "scm-statuses-write": "Commit status write access",
+      "secret-access": "Secret access",
+      "step-secret-access": "Step secret access",
+      "network-egress": "Network access",
+      "wildcard-network-egress": "Unrestricted network access",
+      "oidc-access": "OIDC identity access",
+      "signing-access": "Signing access",
+      "verified-cache-write": "Verified cache write",
+      "repository-write": "Repository write access",
+    };
+    return titles[code] || titleCase(code);
+  }
+
+  function approvalReasonDescription(code) {
+    const descriptions = {
+      "scm-contents-write": "The workflow can create or modify repository content.",
+      "scm-issues-write": "The workflow can create or update issues and comments.",
+      "scm-pull-requests-write": "The workflow can create or update pull requests.",
+      "scm-statuses-write": "The workflow can publish statuses on commits.",
+      "secret-access": "The plan can receive one or more protected secret values.",
+      "step-secret-access": "A workflow step can receive protected secret values.",
+      "network-egress": "The plan can connect to approved external destinations.",
+      "wildcard-network-egress": "The plan can connect to destinations not individually listed.",
+      "oidc-access": "The plan can request a workload identity token.",
+      "signing-access": "The plan can request a protected signing operation.",
+      "verified-cache-write": "The plan can update shared verified cache state.",
+      "repository-write": "The workflow can modify checked-out repository content.",
+    };
+    return descriptions[code] || "This capability raised the plan's policy risk and requires review.";
+  }
+
+  function approvalPermissionSummary(permissions = {}) {
+    const entries = [];
+    const add = (label, value, details = []) => { if (value && value !== "deny") entries.push({ label, value: titleCase(value), elevated: value === "write" || value === "allow", details }); };
+    add("Repository", permissions.repository);
+    Object.entries(permissions.scm || {}).forEach(([name, value]) => add(`GitHub ${titleCase(name)}`, value));
+    add("Checks", permissions.checks); add("Artifacts", permissions.artifacts); add("Registry", permissions.registry);
+    if (permissions.network?.mode && permissions.network.mode !== "deny") {
+      const destinations = (permissions.network.destinations || []).map((destination) => {
+        const host = destination.host || "Any host";
+        const port = destination.port ? `:${destination.port}` : "";
+        const protocol = destination.protocol ? ` (${String(destination.protocol).toUpperCase()})` : "";
+        return `${host}${port}${protocol}`;
+      });
+      const details = [
+        destinations.length ? `Destinations: ${destinations.join(", ")}` : "Destinations: Any destination",
+        `DNS: ${titleCase(permissions.network.dns || "Not specified")}`,
+        `Private network ranges: ${permissions.network.deny_private_ranges ? "Blocked" : "Allowed"}`,
+      ];
+      if (permissions.network.listen?.length) details.push(`Listening ports: ${permissions.network.listen.join(", ")}`);
+      add("Network", permissions.network.mode, details);
+    }
+    if (permissions.secrets?.length) {
+      const details = permissions.secrets.map((secret) => {
+        if (typeof secret === "string") return secret;
+        const name = secret?.name || "Protected secret";
+        return secret?.purpose ? `${name} · ${titleCase(secret.purpose)}` : name;
+      });
+      entries.push({ label: "Secrets", value: `${permissions.secrets.length} requested`, elevated: true, details });
+    }
+    if (permissions.oidc_audiences?.length) entries.push({ label: "OIDC audiences", value: `${permissions.oidc_audiences.length} requested`, elevated: true });
+    if (permissions.signing?.length) entries.push({ label: "Signing capabilities", value: `${permissions.signing.length} requested`, elevated: true });
+    return entries;
   }
 
   async function decideWorkflowApproval(decision) {
@@ -564,13 +698,16 @@
         decision,
       });
       const response = await fetch(`/api/v1/ui/approvals/${encodeURIComponent(approval.id)}/decisions`, { method: "POST", body, credentials: "same-origin", headers: { accept: "application/json" } });
-      if (!response.ok) throw new Error(response.status === 403 ? "You are not authorized to decide this workflow approval." : "The approval decision could not be recorded.");
+      if (!response.ok) throw new Error(response.status === 403 ? "You are not authorized to decide this approval." : "The approval decision could not be recorded.");
       const result = await response.json();
       approval.status = result.status;
       approval.decisionCount = Number(approval.decisionCount || 0) + (result.replayed ? 0 : 1);
+      approval.remainingApprovals = result.status === "approved" ? 0 : approval.remainingApprovals;
       renderApprovals();
+      renderRepositories();
+      if (state.activeRepository) renderRepositoryApprovals((state.data.approvals || []).filter((item) => item.repositoryId === state.activeRepository.id));
       byId("record-detail-dialog").close();
-      showToast(decision === "approve" ? "Proposed workflow approved and queued." : "Proposed workflow rejected.");
+      showToast(decision === "approve" ? "Execution approved. Runtrue is preparing the run." : "Execution rejected.");
     } catch (error) {
       showToast(error.message || "The approval decision could not be recorded.");
     } finally {
@@ -626,9 +763,38 @@
           : ["No organizations", ""];
     byId("org-list").innerHTML = organizations.length ? organizations.map((organization) => {
       const count = organization.repositoriesStatus === "ready" ? organization.repositories.length : "›";
-      return `<button class="org-option ${organization.id === state.activeOrganization ? "active" : ""}" type="button" data-org-id="${escapeHtml(organization.id)}"><span class="org-avatar">${escapeHtml(organization.initials)}</span><strong>${escapeHtml(organization.name)}</strong><span>${count}</span></button>`;
+      const active = organization.id === state.activeOrganization;
+      return `<button class="org-option ${active ? "active" : ""}" type="button" role="option" aria-selected="${active}" data-org-id="${escapeHtml(organization.id)}"><span class="org-avatar">${escapeHtml(organization.initials)}</span><strong>${escapeHtml(organization.name)}</strong><span>${count}</span></button>`;
     }).join("") : `<div class="org-empty"><h4>${empty[0]}</h4><p>${empty[1]}</p></div>`;
     byId("org-list").querySelectorAll("[data-org-id]").forEach((button) => button.addEventListener("click", () => selectOrganization(button.dataset.orgId)));
+  }
+
+  function repositoryKey(repository) {
+    return `${repository.state}:${repository.externalRepositoryId}`;
+  }
+
+  function repositoriesAreCompatible(first, candidate) {
+    if (!first || first.state !== candidate.state) return false;
+    if (!["needs_installation", "existing_installation"].includes(first.state)) return true;
+    return first.ownerId === candidate.ownerId;
+  }
+
+  function visibleSelectableRepositories() {
+    const organization = state.data.organizations.find((item) => item.id === state.activeOrganization);
+    if (!organization || organization.repositoriesStatus !== "ready") return [];
+    const query = byId("repo-search").value.trim().toLowerCase();
+    return organization.repositories.filter((repository) => repository.state !== "added" && repository.name.toLowerCase().includes(query));
+  }
+
+  function updateSelectAll() {
+    const button = byId("select-all-repositories");
+    const visible = visibleSelectableRepositories();
+    const selected = [...state.selectedRepositories.values()];
+    const reference = selected[0] || visible[0];
+    const compatible = visible.filter((repository) => repositoriesAreCompatible(reference, repository));
+    const allSelected = compatible.length > 0 && compatible.every((repository) => state.selectedRepositories.has(repositoryKey(repository)));
+    button.disabled = compatible.length === 0;
+    button.textContent = allSelected ? "Clear" : "Select all";
   }
 
   function renderRepositoryChoices() {
@@ -661,26 +827,25 @@
         const status = "Already added";
         return `<div class="repo-option imported"><span aria-hidden="true">•</span><span><strong>${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.defaultBranch)}</small></span><span>${status}</span></div>`;
       }
-      const key = `${repository.state}:${repository.externalRepositoryId}`;
+      const key = repositoryKey(repository);
       const selected = state.selectedRepositories.has(key);
       const status = repository.state === "existing_installation" ? "Import repository" : repository.state === "needs_installation" ? "Install App" : repository.visibility;
       return `<label class="repo-option ${selected ? "selected" : ""}"><input type="checkbox" data-repository-key="${escapeHtml(key)}" ${selected ? "checked" : ""}><span><strong>${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.defaultBranch)}</small></span><span>${escapeHtml(status)}</span></label>`;
     }).join("") : `<div class="repo-empty">No matching repositories.</div>`;
     byId("repo-list").querySelectorAll("[data-repository-key]").forEach((input) => input.addEventListener("change", () => {
-      const repository = organization.repositories.find((item) => `${item.state}:${item.externalRepositoryId}` === input.dataset.repositoryKey);
+      const repository = organization.repositories.find((item) => repositoryKey(item) === input.dataset.repositoryKey);
       if (input.checked) {
         const selected = [...state.selectedRepositories.values()];
-        const modeChanged = selected.some((item) => item.state !== repository.state);
-        const accountChanged = ["needs_installation", "existing_installation"].includes(repository.state)
-          && selected.some((item) => item.ownerId !== repository.ownerId);
-        if (modeChanged || accountChanged) {
+        const incompatible = selected.find((item) => !repositoriesAreCompatible(item, repository));
+        if (incompatible) {
           state.selectedRepositories.clear();
-          showToast(modeChanged ? "Select repositories to add or install in one step at a time." : "Install the App on one GitHub account at a time.");
+          showToast(incompatible.state !== repository.state ? "Select repositories to add or install in one step at a time." : "Install the App on one GitHub account at a time.");
         }
         state.selectedRepositories.set(input.dataset.repositoryKey, repository);
       } else state.selectedRepositories.delete(input.dataset.repositoryKey);
       updateSelection(); renderRepositoryChoices();
     }));
+    updateSelectAll();
   }
 
   function updateSelection() {
@@ -690,6 +855,7 @@
     byId("selection-count").textContent = selected.length;
     byId("confirm-add").disabled = selected.length === 0;
     byId("confirm-add").textContent = requiresInstallation ? "Install selected" : importsExisting ? "Import selected" : "Add selected";
+    updateSelectAll();
   }
 
   function updateGitHubDialogActions() {
@@ -730,10 +896,24 @@
   }
 
   function selectOrganization(organizationId) {
+    const changed = state.activeOrganization !== organizationId;
     state.activeOrganization = organizationId;
     byId("repo-search").value = "";
+    if (changed) state.selectedRepositories.clear();
     renderOrganizations(); renderRepositoryChoices();
     loadOrganizationRepositories(organizationId);
+  }
+
+  function toggleVisibleRepositories() {
+    const visible = visibleSelectableRepositories();
+    const selected = [...state.selectedRepositories.values()];
+    const reference = selected[0] || visible[0];
+    const compatible = visible.filter((repository) => repositoriesAreCompatible(reference, repository));
+    const allSelected = compatible.length > 0 && compatible.every((repository) => state.selectedRepositories.has(repositoryKey(repository)));
+    if (allSelected) compatible.forEach((repository) => state.selectedRepositories.delete(repositoryKey(repository)));
+    else compatible.forEach((repository) => state.selectedRepositories.set(repositoryKey(repository), repository));
+    if (!allSelected && compatible.length < visible.length) showToast("Selected repositories that use the same add action.");
+    renderRepositoryChoices(); updateSelection();
   }
 
   async function loadOrganizations({ preserveSelection = false, reloadSelected = false } = {}) {
@@ -842,7 +1022,7 @@
     document.querySelectorAll("[data-repository-section]").forEach((button) => button.addEventListener("click", () => setRepositorySection(button.dataset.repositorySection)));
     byId("mobile-menu").addEventListener("click", openNavigation); byId("sidebar-scrim").addEventListener("click", closeNavigation);
     byId("open-add-dialog").addEventListener("click", openAddDialog); byId("manage-github").addEventListener("click", submitInstallAction); byId("dialog-manage-github").addEventListener("click", submitInstallAction); byId("dialog-refresh-github").addEventListener("click", reloadGitHubData);
-    byId("close-dialog").addEventListener("click", () => byId("add-repo-dialog").close()); byId("cancel-add").addEventListener("click", () => byId("add-repo-dialog").close()); byId("confirm-add").addEventListener("click", confirmSelectedRepositories);
+    byId("close-dialog").addEventListener("click", () => byId("add-repo-dialog").close()); byId("cancel-add").addEventListener("click", () => byId("add-repo-dialog").close()); byId("confirm-add").addEventListener("click", confirmSelectedRepositories); byId("select-all-repositories").addEventListener("click", toggleVisibleRepositories);
     byId("org-search").addEventListener("input", renderOrganizations); byId("repo-search").addEventListener("input", renderRepositoryChoices);
     byId("run-log-filter").addEventListener("change", renderRunLogs);
     byId("retry-run-detail").addEventListener("click", () => { if (state.activeRunId) openRun(state.activeRunId); });

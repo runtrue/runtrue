@@ -483,7 +483,27 @@ async fn github_enterprise_setup_binds_exact_web_api_and_clone_origins() {
 
 #[tokio::test]
 async fn github_browser_api_requires_session_csrf_and_never_leaks_credentials() {
-    let (_, oidc, provider, _, application) = github_human_application();
+    let (control, oidc, provider, _, application) = github_human_application();
+    control
+        .create_repository(&tenant_repository(
+            "repo-browser-approval",
+            "tenant-browser",
+            "approval-target",
+        ))
+        .unwrap();
+    store_tenant_capsule(
+        &control,
+        "repo-browser-approval",
+        "capsule-browser-approval",
+    );
+    store_tenant_approval_kind(
+        &control,
+        "repo-browser-approval",
+        "capsule-browser-approval",
+        "approval-browser-privileged",
+        "runtrue-workflow-approver",
+        ApprovalKind::PrivilegedExecution,
+    );
 
     let anonymous = application
         .clone()
@@ -550,6 +570,17 @@ async fn github_browser_api_requires_session_csrf_and_never_leaks_credentials() 
     assert_eq!(page["capabilities"]["audit"], true);
     assert!(page["runs"].is_array());
     assert!(page["approvals"].is_array());
+    let privileged = &page["approvals"][0];
+    assert_eq!(privileged["id"], "approval-browser-privileged");
+    assert_eq!(privileged["kind"], "privileged-execution");
+    assert_eq!(privileged["repositoryId"], "repo-browser-approval");
+    assert_eq!(privileged["repository"], "octo/approval-target");
+    assert_eq!(privileged["workflow"]["name"], "ci");
+    assert_eq!(privileged["workflow"]["path"], ".runtrue/workflows/ci.yaml");
+    assert_eq!(privileged["jobs"][0]["name"], "Build");
+    assert_eq!(privileged["remainingApprovals"], 1);
+    assert_eq!(privileged["canDecide"], true);
+    let approval_subject = privileged["subjectDigest"].as_str().unwrap().to_owned();
     assert!(page["runners"]["items"].is_array());
     assert!(page["apiTokens"].is_array());
     assert!(page["audit"].is_array());
@@ -557,6 +588,24 @@ async fn github_browser_api_requires_session_csrf_and_never_leaks_credentials() 
     assert!(!page.contains(GITHUB_CREDENTIAL_REFERENCE));
     assert!(!page.contains("private-key"));
     assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+
+    let decision = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/ui/approvals/approval-browser-privileged/decisions")
+                .header("cookie", &cookies)
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&idempotency_key=browser-privileged-decision&subject_digest={approval_subject}&decision=approve"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(decision.status(), StatusCode::OK);
+    assert_eq!(json_body(decision).await["status"], "approved");
 
     let post_form = |csrf_value: Option<&str>| {
         let mut fields = Vec::new();

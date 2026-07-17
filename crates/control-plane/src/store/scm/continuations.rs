@@ -19,6 +19,7 @@ pub(in crate::store) fn validate_exact_capsule_approvals(
     capsule: &ExecutionCapsule,
     metadata: &CapsuleApiMetadata,
     approvals: &[ApprovalRequest],
+    privileged_capability_digest: Option<&ContentDigest>,
 ) -> Result<(), ControlPlaneError> {
     let workflow = approvals
         .iter()
@@ -49,8 +50,16 @@ pub(in crate::store) fn validate_exact_capsule_approvals(
             approval.expires_unix_ms,
             approval.rule.clone(),
         )?;
+        let expected_subject = if approval.kind == runtrue_policy::ApprovalKind::PrivilegedExecution
+        {
+            privileged_capability_digest.ok_or(ControlPlaneError::InvalidInput(
+                "privileged SCM approval is missing its capability identity",
+            ))?
+        } else {
+            &metadata.approval_subject_digest
+        };
         if &expected != approval
-            || approval.subject_digest != metadata.approval_subject_digest
+            || &approval.subject_digest != expected_subject
             || approval.risk_score != metadata.risk_score
             || !ids.insert(approval.id.as_str())
         {
@@ -58,6 +67,11 @@ pub(in crate::store) fn validate_exact_capsule_approvals(
                 "approval request does not match exact capsule metadata",
             ));
         }
+    }
+    if capsule.approval.privileged_execution != privileged_capability_digest.is_some() {
+        return Err(ControlPlaneError::InvalidInput(
+            "SCM privileged capability identity does not match its gate",
+        ));
     }
     Ok(())
 }
@@ -320,10 +334,12 @@ pub(in crate::store) fn pending_approvals_conn(
                 .optional()?
                 .ok_or_else(|| not_found("approval", id))?;
         let approval: ApprovalRequest = serde_json::from_str(&encoded)?;
+        let reusable_repository_grant =
+            kind == runtrue_policy::ApprovalKind::PrivilegedExecution && !approval.rule.one_shot;
         if approval.id != id
             || approval.kind != kind
             || approval.subject_digest.as_str() != subject_digest
-            || capsule_id != pending.capsule_id
+            || capsule_id != pending.capsule_id && !reusable_repository_grant
             || repository_id != pending.repository_id
         {
             return Err(ControlPlaneError::CorruptState(
@@ -881,6 +897,40 @@ pub(in crate::store) fn enqueue_scm_continuations_for_approval_tx(
             [pending_execution_id],
         )?;
     }
+    Ok(())
+}
+
+pub(in crate::store) fn enqueue_preapproved_scm_continuation_tx(
+    transaction: &Transaction<'_>,
+    pending_execution_id: &str,
+    approval_id: &str,
+    now_unix_ms: u64,
+) -> Result<(), ControlPlaneError> {
+    let payload = ScmContinuationTaskPayload {
+        pending_execution_id: pending_execution_id.to_owned(),
+        approval_id: approval_id.to_owned(),
+    };
+    let digest = hash_serializable(&(
+        "scm-reusable-approval-v1",
+        pending_execution_id,
+        approval_id,
+    ))?;
+    let task_id = format!(
+        "scm-continuation-{}",
+        digest.as_str().trim_start_matches("sha256:")
+    );
+    let payload_json = serde_json::to_string(&canonicalize_json(serde_json::to_value(payload)?))?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO durable_tasks
+         (id, kind, payload_json, status, available_unix_ms, attempts, created_unix_ms)
+         VALUES (?1, 'scm.approval.continue', ?2, 'pending', ?3, 0, ?3)",
+        params![task_id, payload_json, to_i64(now_unix_ms)?],
+    )?;
+    transaction.execute(
+        "UPDATE scm_pending_executions SET state = 'continuation-pending'
+         WHERE id = ?1 AND state = 'awaiting-approval'",
+        [pending_execution_id],
+    )?;
     Ok(())
 }
 

@@ -107,7 +107,15 @@ pub(in crate::store) fn validate_scm_prepared_execution(
             "SCM source snapshot and fetch journal must be bound together",
         ));
     }
-    validate_exact_capsule_approvals(capsule, &execution.metadata, &execution.approvals)?;
+    validate_exact_capsule_approvals(
+        capsule,
+        &execution.metadata,
+        &execution.approvals,
+        execution
+            .continuation
+            .as_ref()
+            .and_then(|context| context.privileged_capability_digest.as_ref()),
+    )?;
     let gated = capsule.approval.workflow_definition || capsule.approval.privileged_execution;
     if gated != execution.continuation.is_some() {
         return Err(ControlPlaneError::InvalidInput(
@@ -253,6 +261,7 @@ impl ControlPlane {
                     &transaction,
                     &request.capsule_id,
                     &subject_digest,
+                    &subject_digest,
                     runtrue_policy::ApprovalKind::WorkflowDefinition,
                     request.created_unix_ms,
                 )?);
@@ -261,6 +270,7 @@ impl ControlPlane {
                 authorized_approvals.push(authorize_required_approval_tx(
                     &transaction,
                     &request.capsule_id,
+                    &subject_digest,
                     &subject_digest,
                     runtrue_policy::ApprovalKind::PrivilegedExecution,
                     request.created_unix_ms,

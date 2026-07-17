@@ -164,7 +164,12 @@ impl ControlPlane {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT request_json FROM approval_requests
-             WHERE (?1 = '' OR status = ?1) AND id > ?2 ORDER BY id LIMIT ?3",
+             WHERE (?1 = '' OR status = ?1)
+               AND (?2 = ''
+                    OR created_unix_ms < (SELECT created_unix_ms FROM approval_requests WHERE id = ?2)
+                    OR (created_unix_ms = (SELECT created_unix_ms FROM approval_requests WHERE id = ?2)
+                        AND id < ?2))
+             ORDER BY created_unix_ms DESC, id DESC LIMIT ?3",
         )?;
         let values = statement
             .query_map(
@@ -199,8 +204,13 @@ impl ControlPlane {
         let mut statement = connection.prepare(
             "SELECT a.request_json FROM approval_requests a
              JOIN repositories repo ON repo.id = a.repository_id
-             WHERE repo.tenant_id = ?1 AND (?2 = '' OR a.status = ?2) AND a.id > ?3
-             ORDER BY a.id LIMIT ?4",
+             WHERE repo.tenant_id = ?1
+               AND (?2 = '' OR a.status = ?2)
+               AND (?3 = ''
+                    OR a.created_unix_ms < (SELECT created_unix_ms FROM approval_requests WHERE id = ?3)
+                    OR (a.created_unix_ms = (SELECT created_unix_ms FROM approval_requests WHERE id = ?3)
+                        AND a.id < ?3))
+             ORDER BY a.created_unix_ms DESC, a.id DESC LIMIT ?4",
         )?;
         let values = statement
             .query_map(

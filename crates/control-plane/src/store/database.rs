@@ -73,8 +73,12 @@ pub(super) const MIGRATION_30: &str =
     include_str!("../../migrations/0030_repository_workflow_settings.sql");
 pub(super) const MIGRATION_31: &str =
     include_str!("../../migrations/0031_repository_workflow_directories.sql");
+pub(super) const MIGRATION_32: &str =
+    include_str!("../../migrations/0032_reusable_capability_approvals.sql");
+pub(super) const MIGRATION_33: &str =
+    include_str!("../../migrations/0033_rebind_reusable_run_approvals.sql");
 #[cfg(test)]
-pub(super) const CURRENT_SCHEMA_VERSION: u32 = 31;
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 33;
 
 fn open_secure_database_file(path: &Path) -> Result<(File, DatabaseIdentity), ControlPlaneError> {
     let parent = path
@@ -242,7 +246,14 @@ impl ControlPlane {
         validate_text("installation_id", &installation_id)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", true)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        // The single-node control plane serializes access through the connection
+        // mutex, so WAL does not buy us concurrent writers. More importantly, a
+        // host-side SQLite client can unlink WAL sidecars that are still open in
+        // the container mount namespace. The server would then keep committing
+        // into an invisible file and lose those commits on restart. A persistent
+        // rollback journal avoids that split-brain state while retaining atomic
+        // transactions and bounded busy handling.
+        connection.pragma_update(None, "journal_mode", "TRUNCATE")?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let migrations = [
             MIGRATION_1,
@@ -276,6 +287,8 @@ impl ControlPlane {
             MIGRATION_29,
             MIGRATION_30,
             MIGRATION_31,
+            MIGRATION_32,
+            MIGRATION_33,
         ];
         if usize::try_from(version).map_or(true, |version| version > migrations.len()) {
             return Err(ControlPlaneError::UnsupportedSchemaVersion(version));

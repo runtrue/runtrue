@@ -46,25 +46,40 @@ pub(in crate::store) struct AuthorizedRunApproval {
 pub(in crate::store) fn authorize_required_approval_tx(
     transaction: &Transaction<'_>,
     capsule_id: &str,
-    subject_digest: &ContentDigest,
+    approval_subject_digest: &ContentDigest,
+    run_subject_digest: &ContentDigest,
     kind: runtrue_policy::ApprovalKind,
     now_unix_ms: u64,
 ) -> Result<AuthorizedRunApproval, ControlPlaneError> {
+    let repository_id: String = transaction.query_row(
+        "SELECT repository_id FROM capsules WHERE id = ?1",
+        [capsule_id],
+        |row| row.get(0),
+    )?;
     let mut statement = transaction.prepare(
         "SELECT id, request_json FROM approval_requests
-         WHERE capsule_id = ?1 AND subject_digest = ?2 AND status = 'approved'
+         WHERE subject_digest = ?2 AND status = 'approved'
+           AND (capsule_id = ?1 OR repository_id = ?3)
          ORDER BY created_unix_ms, id",
     )?;
     let candidates = statement
-        .query_map(params![capsule_id, subject_digest.as_str()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
+        .query_map(
+            params![capsule_id, approval_subject_digest.as_str(), repository_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     let mut selected = None;
     for (id, encoded) in candidates {
         let approval: ApprovalRequest = serde_json::from_str(&encoded)?;
-        if approval.kind == kind {
+        let exact_capsule: bool = transaction.query_row(
+            "SELECT capsule_id = ?2 FROM approval_requests WHERE id = ?1",
+            params![id, capsule_id],
+            |row| row.get(0),
+        )?;
+        let reusable_repository_grant =
+            kind == runtrue_policy::ApprovalKind::PrivilegedExecution && !approval.rule.one_shot;
+        if approval.kind == kind && (exact_capsule || reusable_repository_grant) {
             selected = Some((id, approval));
             break;
         }
@@ -73,7 +88,7 @@ pub(in crate::store) fn authorize_required_approval_tx(
         return Err(ControlPlaneError::ApprovalRequired);
     };
     approval
-        .authorize(subject_digest, now_unix_ms)
+        .authorize(approval_subject_digest, now_unix_ms)
         .map_err(|_| ControlPlaneError::ApprovalRequired)?;
     transaction.execute(
         "UPDATE approval_requests SET status = ?2, request_json = ?3 WHERE id = ?1",
@@ -86,7 +101,10 @@ pub(in crate::store) fn authorize_required_approval_tx(
     Ok(AuthorizedRunApproval {
         approval_id,
         kind,
-        subject_digest: subject_digest.clone(),
+        // A reusable approval is selected with its repository capability
+        // digest, but every admitted run remains bound to its exact Capsule
+        // subject. The scheduler checks this value before leasing work.
+        subject_digest: run_subject_digest.clone(),
         one_shot: approval.rule.one_shot,
     })
 }
@@ -232,6 +250,62 @@ impl ControlPlane {
     pub fn approval_request(&self, id: &str) -> Result<ApprovalRequest, ControlPlaneError> {
         let connection = self.connection()?;
         approval_conn(&connection, id)
+    }
+
+    /// Return the repository and immutable Capsule bound to an approval.
+    ///
+    /// Approval decisions are exact-subject operations. Keeping this binding
+    /// in the control plane lets presentation layers show useful context
+    /// without attempting to infer ownership from the approval identifier.
+    pub fn approval_request_binding(
+        &self,
+        id: &str,
+    ) -> Result<(String, String), ControlPlaneError> {
+        validate_text("approval id", id)?;
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT repository_id, capsule_id FROM approval_requests WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| not_found("approval", id))
+    }
+
+    pub fn approval_pending_execution_count(&self, id: &str) -> Result<u64, ControlPlaneError> {
+        validate_text("approval id", id)?;
+        let connection = self.connection()?;
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM scm_pending_executions
+             WHERE state IN ('awaiting-approval', 'continuation-pending')
+               AND (workflow_approval_id = ?1 OR privileged_approval_id = ?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        u64::try_from(count).map_err(|_| ControlPlaneError::IntegerRange {
+            field: "approval pending execution count",
+        })
+    }
+
+    pub fn approval_pending_execution_events(
+        &self,
+        id: &str,
+    ) -> Result<Vec<Value>, ControlPlaneError> {
+        validate_text("approval id", id)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT context_json FROM scm_pending_executions
+             WHERE state IN ('awaiting-approval', 'continuation-pending')
+               AND (workflow_approval_id = ?1 OR privileged_approval_id = ?1)
+             ORDER BY created_unix_ms, id LIMIT 100",
+        )?;
+        let contexts = statement
+            .query_map([id], |row| {
+                json_blob_column::<ScmContinuationContext>(row, 0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(contexts.into_iter().map(|context| context.event).collect())
     }
 
     pub fn approval_requests_for_capsule(

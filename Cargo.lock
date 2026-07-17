@@ -3564,6 +3564,7 @@ name = "runtrue-workflow-frontend"
 version = "0.1.0"
 dependencies = [
  "runtrue-model",
+ "serde",
 ]
 
 [[package]]

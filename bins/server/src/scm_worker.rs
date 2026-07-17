@@ -51,7 +51,7 @@ use runtrue_workflow_frontend::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Component, Path, PathBuf},
     sync::{
@@ -78,6 +78,7 @@ const MAX_TASK_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_DEFINITION_DIFF_LINES_PER_SIDE: usize = 80;
 const MAX_DEFINITION_DIFF_BYTES: usize = 16 * 1024;
 const APPROVAL_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+const CAPABILITY_GRANT_LIFETIME_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 #[cfg(feature = "github-actions")]
 const GITHUB_INSTALLATION_PAGE_SIZE: usize = 100;
 #[cfg(feature = "github-actions")]
@@ -2714,6 +2715,10 @@ impl ScmTaskWorker {
             &repository.tenant_id,
             &action_installation_id,
         )?;
+        let durable_repository_actions = serde_json::to_value(&resolved_repository_actions)
+            .map_err(|_| {
+                TaskFailure::terminal("prepared repository-action mapping is not durable")
+            })?;
         let reusable_source_provider = MirrorReusableSourceProvider {
             mirror_root: self.mirror_root.as_ref(),
             current_repository: prepared_source.repository.repository(),
@@ -2812,6 +2817,7 @@ impl ScmTaskWorker {
             None,
             prepared_source.source_snapshot.as_ref(),
             prepared_source.fetch_id.as_deref(),
+            &durable_repository_actions,
         )?];
         let proposed_analysis = if matches!(event.event_type, EventType::PullRequest { .. })
             && planned.selection.workflow_definition_approval_required
@@ -2843,6 +2849,7 @@ impl ScmTaskWorker {
                         Some(analysis_id.clone()),
                         prepared_source.source_snapshot.as_ref(),
                         prepared_source.fetch_id.as_deref(),
+                        &durable_repository_actions,
                     )?;
                     let source_identity = proposed
                         .continuation
@@ -2958,7 +2965,39 @@ impl ScmTaskWorker {
         analysis_id: Option<String>,
         source_snapshot: Option<&SourceSnapshotRecord>,
         scm_fetch_id: Option<&str>,
+        resolved_repository_actions: &serde_json::Value,
     ) -> Result<PreparedScmExecution, ProcessError> {
+        #[derive(Serialize)]
+        #[serde(deny_unknown_fields)]
+        struct PrivilegedCapabilitySubject<'a> {
+            version: &'static str,
+            repository_id: &'a str,
+            workflow: &'a runtrue_workflow_ir::WorkflowIdentity,
+            permissions: &'a runtrue_workflow_ir::PermissionSet,
+            jobs: &'a [runtrue_workflow_ir::PlannedJob],
+            dynamic_jobs: &'a [runtrue_workflow_ir::DynamicJobTemplate],
+            policy_version_ids: &'a [String],
+            resolved_repository_actions: &'a serde_json::Value,
+        }
+        let privileged_capability_digest = compilation
+            .capsule
+            .approval
+            .privileged_execution
+            .then(|| {
+                serde_json::to_vec(&PrivilegedCapabilitySubject {
+                    version: "runtrue-repository-capability-v1",
+                    repository_id: &repository.id,
+                    workflow: &compilation.capsule.workflow,
+                    permissions: &compilation.capsule.permissions,
+                    jobs: &compilation.capsule.jobs,
+                    dynamic_jobs: &compilation.capsule.dynamic_jobs,
+                    policy_version_ids: &compilation.capsule.context.policy_version_ids,
+                    resolved_repository_actions,
+                })
+                .map(ContentDigest::sha256)
+                .map_err(|_| TaskFailure::terminal("capability identity encoding failed"))
+            })
+            .transpose()?;
         let canonical_capsule = compilation
             .capsule
             .canonical_bytes()
@@ -3022,10 +3061,6 @@ impl ScmTaskWorker {
             created_unix_ms: task.created_unix_ms,
             jobs,
         };
-        let expires_unix_ms = task
-            .created_unix_ms
-            .checked_add(APPROVAL_LIFETIME_MS)
-            .ok_or_else(|| TaskFailure::terminal("SCM approval expiry is out of range"))?;
         let mut approvals = Vec::new();
         for kind in [
             compilation
@@ -3050,10 +3085,27 @@ impl ScmTaskWorker {
             let mut suffix = identity_suffix.to_vec();
             suffix.push(0);
             suffix.extend_from_slice(kind_suffix);
+            let reusable = kind == ApprovalKind::PrivilegedExecution;
+            let lifetime_ms = if reusable {
+                CAPABILITY_GRANT_LIFETIME_MS
+            } else {
+                APPROVAL_LIFETIME_MS
+            };
+            let expires_unix_ms = task
+                .created_unix_ms
+                .checked_add(lifetime_ms)
+                .ok_or_else(|| TaskFailure::terminal("SCM approval expiry is out of range"))?;
+            let subject_digest = if reusable {
+                privileged_capability_digest
+                    .clone()
+                    .ok_or_else(|| TaskFailure::terminal("capability identity is missing"))?
+            } else {
+                compilation.approval_subject_digest.clone()
+            };
             let approval = ApprovalRequest::create(
                 identity.id("approval", b"approval", &suffix),
                 kind,
-                compilation.approval_subject_digest.clone(),
+                subject_digest,
                 compilation.risk_report.score,
                 task.created_unix_ms,
                 expires_unix_ms,
@@ -3066,7 +3118,7 @@ impl ScmTaskWorker {
                         "github-repository-writer".to_owned(),
                     ]),
                     forbidden_approvers: BTreeSet::new(),
-                    one_shot: true,
+                    one_shot: !reusable,
                 },
             )
             .map_err(|_| TaskFailure::terminal("SCM approval request construction failed"))?;
@@ -3093,6 +3145,8 @@ impl ScmTaskWorker {
                 ),
                 analysis_id,
                 source_snapshot_id: source_snapshot.map(|snapshot| snapshot.id.clone()),
+                privileged_capability_digest,
+                resolved_repository_actions: resolved_repository_actions.clone(),
             })
         };
         Ok(PreparedScmExecution {
@@ -3179,7 +3233,7 @@ impl ScmTaskWorker {
                 finish_clock()?,
             );
         }
-        let (repository, continuation_repository, source_snapshot, action_installation_id) =
+        let (repository, continuation_repository, source_snapshot) =
             if let Some(fetcher) = &self.source_fetcher {
                 let (repository, installation, link) = self
                     .control_plane
@@ -3190,7 +3244,6 @@ impl ScmTaskWorker {
                         &event.repository.name,
                     )
                     .map_err(TaskFailure::from_repository_lookup)?;
-                let action_installation_id = installation.id.clone();
                 let fetched = fetcher
                     .fetch(&ScmSourceFetchRequest {
                         installation,
@@ -3232,7 +3285,6 @@ impl ScmTaskWorker {
                         requested_commits: commits,
                     },
                     Some(snapshot),
-                    action_installation_id,
                 )
             } else {
                 if event.installation_id != self.control_plane.installation_id() {
@@ -3255,12 +3307,7 @@ impl ScmTaskWorker {
                     .map_err(|_| {
                         TaskFailure::retryable("Git mirror repository is unavailable or unsafe")
                     })?;
-                (
-                    repository,
-                    EventGitRepository::Legacy(git),
-                    None,
-                    self.control_plane.installation_id().to_owned(),
-                )
+                (repository, EventGitRepository::Legacy(git), None)
             };
         if repository.id != pending.repository_id
             || event.repository.full_name != format!("{}/{}", repository.owner, repository.name)
@@ -3279,25 +3326,10 @@ impl ScmTaskWorker {
             current_name: &repository.name,
             endpoints: &self.config.github_provider_endpoints,
         };
-        let action_revision = if matches!(event.event_type, EventType::PullRequest { .. }) {
-            pending
-                .context
-                .source_identity
-                .base_commit
-                .as_deref()
-                .ok_or_else(|| {
-                    TaskFailure::terminal("pull request continuation has no trusted base revision")
-                })?
-        } else {
-            pending.context.source_identity.source_commit.as_str()
-        };
-        let resolved_repository_actions = self.resolve_repository_actions(
-            continuation_repository.repository(),
-            action_revision,
-            &pending.context.source_identity.workflow_path,
-            &repository.tenant_id,
-            &action_installation_id,
-        )?;
+        let resolved_repository_actions: BTreeMap<String, ResolvedRepositoryAction> =
+            serde_json::from_value(pending.context.resolved_repository_actions.clone()).map_err(
+                |_| TaskFailure::terminal("durable repository-action mapping is invalid"),
+            )?;
         let mut planner = TrustedPlanner::new(continuation_repository.repository())
             .with_source_frontends(workflow_frontends())
             .with_reusable_source_provider(&reusable_source_provider)
@@ -3420,6 +3452,8 @@ impl ScmTaskWorker {
             source_identity,
             analysis_id: pending.context.analysis_id.clone(),
             source_snapshot_id: pending.context.source_snapshot_id.clone(),
+            privileged_capability_digest: pending.context.privileged_capability_digest.clone(),
+            resolved_repository_actions: pending.context.resolved_repository_actions.clone(),
         };
         if revalidated_context != pending.context {
             return self.close_stale_continuation(
@@ -5424,11 +5458,21 @@ mod tests {
             } if run_id == proposed_run_id
         ));
         assert_eq!(control.jobs_for_run(&proposed_run_id).unwrap().len(), 1);
-        assert!(control
+        let completed_approvals = control
             .approval_requests_for_capsule(&proposed_capsule_id)
-            .unwrap()
-            .into_iter()
-            .all(|approval| approval.status == ApprovalStatus::Consumed));
+            .unwrap();
+        let workflow_approval = completed_approvals
+            .iter()
+            .find(|approval| approval.kind == ApprovalKind::WorkflowDefinition)
+            .unwrap();
+        assert_eq!(workflow_approval.status, ApprovalStatus::Consumed);
+        assert!(workflow_approval.rule.one_shot);
+        let capability_approval = completed_approvals
+            .iter()
+            .find(|approval| approval.kind == ApprovalKind::PrivilegedExecution)
+            .unwrap();
+        assert_eq!(capability_approval.status, ApprovalStatus::Approved);
+        assert!(!capability_approval.rule.one_shot);
     }
 }
 #[test]

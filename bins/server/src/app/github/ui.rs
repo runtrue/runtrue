@@ -30,16 +30,22 @@ use runtrue_control_plane::{
     SecretMetadataReference,
 };
 use runtrue_policy::{
-    ApprovalDecision, ApprovalKind, CedarAction, CedarResource, CedarResourceKind, Decision,
+    ApprovalDecision, ApprovalKind, ApprovalRequest, CedarAction, CedarResource, CedarResourceKind,
+    Decision,
 };
 use runtrue_secrets::SecretPlaintext;
 use runtrue_workflow_ir::ExecutionCapsule;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 const BROWSER_RUN_LOG_FRAME_LIMIT: usize = 1_000;
 const BROWSER_RUN_LOG_BYTE_LIMIT: usize = 2 * 1024 * 1024;
+const BROWSER_PENDING_APPROVAL_LIMIT: usize = 100;
+const BROWSER_RESOLVED_APPROVAL_LIMIT: usize = 100;
 
 struct BrowserResponse(Box<Response>);
 
@@ -98,11 +104,6 @@ pub(in crate::app) async fn browser_decide_workflow_approval(
         Ok(session) => session,
         Err(response) => return *response,
     };
-    if let Err(response) =
-        authorize_browser_tenant(&state, &request_id, &context, CedarAction::ApproveWorkflow)
-    {
-        return *response;
-    }
     let approval = match state.control_plane.approval_request(&approval_id) {
         Ok(approval) => approval,
         Err(error) => return control_plane_problem(&request_id, error),
@@ -111,16 +112,34 @@ pub(in crate::app) async fn browser_decide_workflow_approval(
         Ok(tenant) => tenant,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    if tenant != context.tenant_id
-        || approval.kind != ApprovalKind::WorkflowDefinition
-        || approval.subject_digest.to_string() != presented_subject
-    {
+    let (repository_id, _) = match state.control_plane.approval_request_binding(&approval_id) {
+        Ok(binding) => binding,
+        Err(error) => return control_plane_problem(&request_id, error),
+    };
+    let Some(action) = browser_approval_action(approval.kind) else {
         return problem_response(
             &request_id,
             StatusCode::NOT_FOUND,
             "Approval not found",
-            "the workflow approval was not found",
+            "this approval cannot be decided from the repository UI",
         );
+    };
+    if tenant != context.tenant_id || approval.subject_digest.to_string() != presented_subject {
+        return problem_response(
+            &request_id,
+            StatusCode::NOT_FOUND,
+            "Approval not found",
+            "the approval was not found",
+        );
+    }
+    if let Err(response) = authorize_browser_resource(
+        &state,
+        &request_id,
+        &context,
+        action,
+        browser_approval_resource(&approval, &tenant, &repository_id),
+    ) {
+        return *response;
     }
     match state.control_plane.decide_approval_idempotent(
         &idempotency_key,
@@ -142,6 +161,33 @@ pub(in crate::app) async fn browser_decide_workflow_approval(
         }))
         .into_response(),
         Err(error) => control_plane_problem(&request_id, error),
+    }
+}
+
+const fn browser_approval_action(kind: ApprovalKind) -> Option<CedarAction> {
+    match kind {
+        ApprovalKind::WorkflowDefinition => Some(CedarAction::ApproveWorkflow),
+        ApprovalKind::PrivilegedExecution => Some(CedarAction::ApprovePrivilegedRun),
+        ApprovalKind::EnvironmentDeployment
+        | ApprovalKind::ArtifactPromotion
+        | ApprovalKind::BreakGlass => None,
+    }
+}
+
+fn browser_approval_resource(
+    approval: &ApprovalRequest,
+    tenant_id: &str,
+    repository_id: &str,
+) -> CedarResource {
+    CedarResource {
+        kind: CedarResourceKind::ApprovalRequest,
+        id: approval.id.clone(),
+        tenant_id: tenant_id.to_owned(),
+        repository_id: Some(repository_id.to_owned()),
+        author_id: None,
+        risk_score: approval.risk_score,
+        privileged: approval.kind == ApprovalKind::PrivilegedExecution,
+        untrusted: approval.kind == ApprovalKind::WorkflowDefinition,
     }
 }
 
@@ -1864,7 +1910,8 @@ fn browser_dashboard_sections(
 ) -> Result<Value, BrowserResponse> {
     let allowed = |action| authorize_browser_tenant(state, request_id, context, action).is_ok();
     let can_view_runs = allowed(CedarAction::ViewRun);
-    let can_view_approvals = allowed(CedarAction::ApproveWorkflow);
+    let can_view_approvals =
+        allowed(CedarAction::ApproveWorkflow) || allowed(CedarAction::ApprovePrivilegedRun);
     let can_view_runners = allowed(CedarAction::ManageRunnerPool);
     let can_view_tokens = allowed(CedarAction::ManageApiToken);
     let can_view_audit = allowed(CedarAction::ReadAudit);
@@ -1915,26 +1962,50 @@ fn browser_dashboard_sections(
     };
 
     let approvals = if can_view_approvals {
-        let records = state
+        let mut records = state
             .control_plane
-            .list_approval_requests_page_for_tenant(&context.tenant_id, None, None, 100)
+            .list_approval_requests_page_for_tenant(
+                &context.tenant_id,
+                Some("pending"),
+                None,
+                BROWSER_PENDING_APPROVAL_LIMIT,
+            )
             .map_err(|error| control_plane_problem(request_id, error))?;
+        let recent = state
+            .control_plane
+            .list_approval_requests_page_for_tenant(
+                &context.tenant_id,
+                None,
+                None,
+                BROWSER_RESOLVED_APPROVAL_LIMIT,
+            )
+            .map_err(|error| control_plane_problem(request_id, error))?;
+        records.extend(
+            recent
+                .into_iter()
+                .filter(|candidate| candidate.status != runtrue_policy::ApprovalStatus::Pending),
+        );
         Some(
             records
                 .into_iter()
-                .map(|record| {
-                    Ok(json!({
-                        "id": record.id,
-                        "kind": record.kind,
-                        "subjectDigest": record.subject_digest.to_string(),
-                        "status": record.status,
-                        "riskScore": record.risk_score,
-                        "ruleId": record.rule.id,
-                        "requiredApprovals": record.rule.required_approvals,
-                        "decisionCount": record.decisions.len(),
-                        "createdAt": timestamp(record.created_unix_ms).map_err(|()| internal_problem(request_id))?,
-                        "expiresAt": timestamp(record.expires_unix_ms).map_err(|()| internal_problem(request_id))?,
-                    }))
+                .filter_map(|record| {
+                    match browser_approval_view(
+                        state,
+                        request_id,
+                        context,
+                        &repository_names,
+                        record,
+                    ) {
+                        Ok(Some(view)) => Some(Ok(view)),
+                        Ok(None) => None,
+                        // Approval history can outlive the Capsule schema that
+                        // produced it. A single legacy or otherwise unreadable
+                        // record must not make the whole authenticated
+                        // dashboard unavailable. Keep rendering approvals that
+                        // can be validated against their immutable Capsule and
+                        // omit only the record that cannot be enriched.
+                        Err(_) => None,
+                    }
                 })
                 .collect::<Result<Vec<_>, Response>>()?,
         )
@@ -2051,6 +2122,139 @@ fn browser_dashboard_sections(
         "apiTokens": api_tokens,
         "audit": audit,
     }))
+}
+
+fn browser_approval_view(
+    state: &AppState,
+    request_id: &RequestId,
+    context: &AuthContext,
+    repository_names: &BTreeMap<String, String>,
+    record: ApprovalRequest,
+) -> Result<Option<Value>, Response> {
+    let Some(action) = browser_approval_action(record.kind) else {
+        return Ok(None);
+    };
+    let (repository_id, capsule_id) = state
+        .control_plane
+        .approval_request_binding(&record.id)
+        .map_err(|error| control_plane_problem(request_id, error))?;
+    let resource = browser_approval_resource(&record, &context.tenant_id, &repository_id);
+    if authorize_browser_resource(state, request_id, context, action, resource).is_err() {
+        return Ok(None);
+    }
+    let signed_capsule = state
+        .control_plane
+        .signed_capsule(&capsule_id)
+        .map_err(|error| control_plane_problem(request_id, error))?;
+    if signed_capsule.repository_id != repository_id {
+        return Err(internal_problem(request_id));
+    }
+    let capsule: ExecutionCapsule = serde_json::from_slice(&signed_capsule.canonical_capsule)
+        .map_err(|_| internal_problem(request_id))?;
+    let event = capsule
+        .context
+        .normalized_event_json
+        .as_deref()
+        .and_then(|encoded| serde_json::from_str::<Value>(encoded).ok())
+        .unwrap_or(Value::Null);
+    let event_string = |pointer: &str| {
+        event
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let event_number = |pointer: &str| event.pointer(pointer).and_then(Value::as_u64);
+    let approved_decisions = record
+        .decisions
+        .values()
+        .filter(|decision| decision.decision == Decision::Approve)
+        .count();
+    let remaining_approvals =
+        usize::from(record.rule.required_approvals).saturating_sub(approved_decisions);
+    let decisions = record
+        .decisions
+        .values()
+        .map(|decision| {
+            Ok(json!({
+                "actor": decision.actor_id,
+                "decision": decision.decision,
+                "reason": decision.reason,
+                "decidedAt": timestamp(decision.decided_unix_ms)
+                    .map_err(|()| internal_problem(request_id))?,
+            }))
+        })
+        .collect::<Result<Vec<_>, Response>>()?;
+    let repository = match repository_names.get(&repository_id) {
+        Some(repository) => repository.clone(),
+        None => {
+            let repository = state
+                .control_plane
+                .repository(&repository_id)
+                .map_err(|error| control_plane_problem(request_id, error))?;
+            if repository.tenant_id != context.tenant_id {
+                return Err(internal_problem(request_id));
+            }
+            format!("{}/{}", repository.owner, repository.name)
+        }
+    };
+    let waiting_events = state
+        .control_plane
+        .approval_pending_execution_events(&record.id)
+        .map_err(|error| control_plane_problem(request_id, error))?;
+    let waiting_pull_requests = waiting_events
+        .iter()
+        .filter_map(|event| {
+            event
+                .pointer("/pull_request/number")
+                .and_then(Value::as_u64)
+                .or_else(|| {
+                    event
+                        .pointer("/issue_comment/issue_number")
+                        .and_then(Value::as_u64)
+                })
+        })
+        .collect::<BTreeSet<_>>();
+    Ok(Some(json!({
+        "id": record.id,
+        "kind": record.kind,
+        "repositoryId": repository_id,
+        "repository": repository,
+        "capsuleId": capsule_id,
+        "subjectDigest": record.subject_digest.to_string(),
+        "status": record.status,
+        "riskScore": record.risk_score,
+        "ruleId": record.rule.id,
+        "oneShot": record.rule.one_shot,
+        "requiredApprovals": record.rule.required_approvals,
+        "decisionCount": record.decisions.len(),
+        "remainingApprovals": remaining_approvals,
+        "waitingExecutions": state.control_plane.approval_pending_execution_count(&record.id)
+            .map_err(|error| control_plane_problem(request_id, error))?,
+        "waitingPullRequests": waiting_pull_requests,
+        "decisions": decisions,
+        "createdAt": timestamp(record.created_unix_ms).map_err(|()| internal_problem(request_id))?,
+        "expiresAt": timestamp(record.expires_unix_ms).map_err(|()| internal_problem(request_id))?,
+        "workflow": {
+            "name": capsule.workflow.name,
+            "path": capsule.workflow.source_path,
+        },
+        "source": {
+            "commit": capsule.context.source_commit,
+            "baseCommit": capsule.context.base_commit,
+            "ref": event_string("/source/ref_name"),
+            "event": event_string("/event_type/kind"),
+            "action": event_string("/event_type/action"),
+            "pullRequest": event_number("/pull_request/number")
+                .or_else(|| event_number("/issue_comment/issue_number")),
+        },
+        "reasons": capsule.approval.reasons,
+        "permissions": capsule.permissions,
+        "jobs": capsule.jobs.into_iter().map(|job| json!({
+            "id": job.id,
+            "name": job.name,
+        })).collect::<Vec<_>>(),
+        "canDecide": true,
+    })))
 }
 
 pub(in crate::app) async fn start_github_installation_from_ui(

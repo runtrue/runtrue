@@ -123,7 +123,12 @@ pub(crate) fn force_delete_journal_mode(path: &Path) -> Result<(), BackupError> 
     let connection = Connection::open(path)?;
     connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")?;
     drop(connection);
-    for suffix in ["-wal", "-shm"] {
+    // Opening a restored control-plane database switches it to TRUNCATE mode.
+    // SQLite may leave an empty rollback-journal sidecar behind when that
+    // connection closes, even after switching the database back to DELETE.
+    // A restore is an exact manifest reconstruction, so remove every SQLite
+    // sidecar before validating the restored file set.
+    for suffix in ["-wal", "-shm", "-journal"] {
         let mut sidecar = path.as_os_str().to_owned();
         sidecar.push(suffix);
         let sidecar = PathBuf::from(sidecar);

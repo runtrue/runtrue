@@ -8,7 +8,7 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,id=runtrue-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=runtrue-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=runtrue-rust-1.94-release-target-v1,target=/src/target,sharing=locked \
+    --mount=type=cache,id=runtrue-rust-1.94-release-target-v3,target=/src/target,sharing=locked \
     cargo build --locked --release -p runtrue-server --bin runtrue-server && \
     install -D -m 0555 target/release/runtrue-server /out/runtrue-server
 

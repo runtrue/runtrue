@@ -130,20 +130,50 @@ fn url_path_component(value: &str) -> String {
 }
 
 fn organization_catalog(page: &GitHubInstallationsPage) -> Value {
-    let mut organizations = BTreeMap::<String, Vec<Value>>::new();
+    let mut organizations = BTreeMap::<String, BTreeMap<String, Value>>::new();
+    for installation in &page.installations {
+        if installation.state == super::model::GitHubInstallationState::Active {
+            organizations
+                .entry(installation.account_login.clone())
+                .or_default();
+        }
+    }
+    for repository in &page.repositories {
+        if repository.control_plane_id.is_none() {
+            continue;
+        }
+        organizations
+            .entry(repository.owner.clone())
+            .or_default()
+            .insert(
+                format!("{}:{}", repository.name, repository.repository_id),
+                json!({
+                    "name": repository.name,
+                    "visibility": repository.visibility.label(),
+                    "installationId": Value::Null,
+                    "externalRepositoryId": repository.repository_id.to_string(),
+                    "csrfToken": Value::Null,
+                    "defaultBranch": repository.default_branch,
+                    "state": "added",
+                }),
+            );
+    }
     for repository in &page.repository_candidates {
         organizations
             .entry(repository.owner.clone())
             .or_default()
-            .push(json!({
-                "name": repository.name,
-                "visibility": repository.visibility.label(),
-                "installationId": repository.installation_id,
-                "externalRepositoryId": repository.external_repository_id,
-                "csrfToken": repository.csrf_token,
-                "defaultBranch": repository.default_branch,
-                "state": "available",
-            }));
+            .insert(
+                format!("{}:{}", repository.name, repository.external_repository_id),
+                json!({
+                    "name": repository.name,
+                    "visibility": repository.visibility.label(),
+                    "installationId": repository.installation_id,
+                    "externalRepositoryId": repository.external_repository_id,
+                    "csrfToken": repository.csrf_token,
+                    "defaultBranch": repository.default_branch,
+                    "state": "available",
+                }),
+            );
     }
     Value::Array(
         organizations
@@ -153,7 +183,7 @@ fn organization_catalog(page: &GitHubInstallationsPage) -> Value {
                     "id": name,
                     "name": name,
                     "initials": initials(&name),
-                    "repositories": repositories,
+                    "repositories": repositories.into_values().collect::<Vec<_>>(),
                 })
             })
             .collect(),

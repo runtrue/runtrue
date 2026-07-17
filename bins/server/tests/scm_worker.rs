@@ -10,7 +10,7 @@ use runtrue_control_plane::{
 };
 use runtrue_git::{GitLimits, GitRepository};
 use runtrue_model::ContentDigest;
-use runtrue_policy::{ApprovalDecision, ApprovalKind, Decision};
+use runtrue_policy::{ApprovalDecision, ApprovalKind, ApprovalStatus, Decision};
 use runtrue_scm::{
     ActorIdentity, CheckRunRequest, EventEnvelope, EventType, GitRevision, IssueCommentAction,
     IssueCommentEvent, ProviderKind, PullRequestAction, PullRequestEvent, RepositoryIdentity,
@@ -38,7 +38,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 use tempfile::TempDir;
@@ -69,6 +72,7 @@ struct UnavailableSourceFetcher;
 struct FixtureRepositoryActionResolver {
     requests: Mutex<Vec<(String, String, String)>>,
     image: String,
+    available: AtomicBool,
 }
 
 #[cfg(feature = "github-actions")]
@@ -144,6 +148,9 @@ impl RepositoryActionResolver for FixtureRepositoryActionResolver {
         installation_id: &str,
         reference: &str,
     ) -> Result<PreparedRepositoryAction, RepositoryActionResolveError> {
+        if !self.available.load(Ordering::SeqCst) {
+            return Err(RepositoryActionResolveError::Unavailable);
+        }
         self.requests.lock().unwrap().push((
             tenant_id.to_owned(),
             installation_id.to_owned(),
@@ -347,6 +354,14 @@ impl MirrorFixture {
     }
 
     fn repository_action_pull_request(reference: &str) -> Self {
+        Self::repository_action_pull_request_with_access(reference, "read")
+    }
+
+    fn privileged_repository_action_pull_request(reference: &str) -> Self {
+        Self::repository_action_pull_request_with_access(reference, "write")
+    }
+
+    fn repository_action_pull_request_with_access(reference: &str, contents: &str) -> Self {
         let root = tempfile::tempdir().expect("mirror root");
         secure_mode(root.path());
         let repository = root.path().join("octo").join("runtrue");
@@ -363,7 +378,7 @@ impl MirrorFixture {
         fs::write(
             repository.join(workflow_path),
             format!(
-                "name: Backport\non: [pull_request]\npermissions:\n  contents: read\njobs:\n  reconcile:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: {reference}\n        with:\n          config-path: .github/backport.yml\n"
+                "name: Backport\non: [pull_request]\npermissions:\n  contents: {contents}\njobs:\n  reconcile:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: {reference}\n        with:\n          config-path: .github/backport.yml\n"
             ),
         )
         .expect("workflow");
@@ -1599,6 +1614,7 @@ fn trusted_full_commit_repository_action_is_prepared_and_locked_generically() {
     let resolver = Arc::new(FixtureRepositoryActionResolver {
         requests: Mutex::new(Vec::new()),
         image: image.clone(),
+        available: AtomicBool::new(true),
     });
     let worker = state
         .scm_task_worker(config)
@@ -1627,6 +1643,201 @@ fn trusted_full_commit_repository_action_is_prepared_and_locked_generically() {
                 if entrypoint.is_none() && args.is_none()
         )
     }));
+}
+
+#[test]
+fn approved_repository_action_reuses_immutable_preparation_when_resolver_is_unavailable() {
+    let reference = format!("ci/backport@{}", "a".repeat(40));
+    let image = format!(
+        "containers.example/runtrue/action-cache@sha256:{}",
+        "b".repeat(64)
+    );
+    let fixture = MirrorFixture::privileged_repository_action_pull_request(&reference);
+    let (control, state, mut config) = setup(&fixture.root, "repository-action-continuation");
+    config.workflow_directory = ".github/workflows".to_owned();
+    enqueue(
+        &control,
+        "event-repository-action-approval",
+        &fixture.pull_event(),
+        NOW,
+    );
+    let resolver = Arc::new(FixtureRepositoryActionResolver {
+        requests: Mutex::new(Vec::new()),
+        image,
+        available: AtomicBool::new(true),
+    });
+    let worker = state
+        .scm_task_worker(config.clone())
+        .unwrap()
+        .with_repository_action_resolver(resolver.clone());
+
+    let first = worker.process_once_at(NOW).unwrap();
+    assert!(matches!(
+        first,
+        ScmWorkerTick::Completed { run_id: None, .. }
+    ));
+    assert_eq!(resolver.requests.lock().unwrap().len(), 1);
+    let mut shared_event = fixture.pull_event();
+    shared_event.event_id = "delivery-shared-approval".to_owned();
+    shared_event.raw_payload_digest = ContentDigest::sha256(b"shared approval event");
+    shared_event.normalized_digest = ContentDigest::sha256(
+        shared_event
+            .canonical_normalized_bytes()
+            .expect("canonical shared event"),
+    );
+    enqueue(
+        &control,
+        "event-repository-action-shared-approval",
+        &shared_event,
+        NOW + 1,
+    );
+    let mut shared_ticks = Vec::new();
+    let shared_completed = (1..20).any(|offset| {
+        let tick = worker.process_once_at(NOW + offset).unwrap();
+        let completed = matches!(
+            &tick,
+            ScmWorkerTick::Completed { task_id, run_id: None, .. }
+                if task_id == "event-repository-action-shared-approval"
+        );
+        shared_ticks.push(tick);
+        completed
+    });
+    assert!(
+        shared_completed,
+        "unexpected ticks: {shared_ticks:#?}; task: {:#?}",
+        control
+            .task("event-repository-action-shared-approval")
+            .unwrap()
+    );
+    let approvals = control
+        .list_approval_requests_page_for_tenant("tenant-1", Some("pending"), None, 10)
+        .unwrap();
+    assert_eq!(approvals.len(), 1);
+    let approval = &approvals[0];
+    assert!(!approval.rule.one_shot);
+    control
+        .decide_approval_idempotent(
+            "approve-repository-action",
+            &approval.id,
+            ApprovalDecision {
+                actor_id: "bootstrap".to_owned(),
+                decision: Decision::Approve,
+                reason: "reviewed exact repository action".to_owned(),
+                rule_id: approval.rule.id.clone(),
+                subject_digest: approval.subject_digest.clone(),
+                decided_unix_ms: NOW + 10,
+            },
+            NOW + 10,
+        )
+        .unwrap();
+    resolver.available.store(false, Ordering::SeqCst);
+
+    let mut run_ids = Vec::new();
+    for offset in 11..25 {
+        if let ScmWorkerTick::Completed {
+            run_id: Some(run_id),
+            ..
+        } = worker.process_once_at(NOW + offset).unwrap()
+        {
+            run_ids.push(run_id);
+            if run_ids.len() == 2 {
+                break;
+            }
+        }
+    }
+    assert_eq!(run_ids.len(), 2, "one decision must release both waiters");
+    assert_eq!(resolver.requests.lock().unwrap().len(), 2);
+    assert_eq!(
+        control.approval_request(&approval.id).unwrap().status,
+        ApprovalStatus::Approved,
+    );
+
+    resolver.available.store(true, Ordering::SeqCst);
+    let mut approved_event = fixture.pull_event();
+    approved_event.event_id = "delivery-approved-grant".to_owned();
+    approved_event.raw_payload_digest = ContentDigest::sha256(b"approved grant event");
+    approved_event.normalized_digest = ContentDigest::sha256(
+        approved_event
+            .canonical_normalized_bytes()
+            .expect("canonical approved event"),
+    );
+    enqueue(
+        &control,
+        "event-repository-action-approved-grant",
+        &approved_event,
+        NOW + 25,
+    );
+    let approved_grant_completed = (25..35).any(|offset| {
+        matches!(
+            worker.process_once_at(NOW + offset).unwrap(),
+            ScmWorkerTick::Completed { task_id, run_id: None, .. }
+                if task_id == "event-repository-action-approved-grant"
+        )
+    });
+    assert!(approved_grant_completed);
+    resolver.available.store(false, Ordering::SeqCst);
+    let third_run = (35..45)
+        .find_map(
+            |offset| match worker.process_once_at(NOW + offset).unwrap() {
+                ScmWorkerTick::Completed {
+                    run_id: Some(run_id),
+                    ..
+                } => Some(run_id),
+                _ => None,
+            },
+        )
+        .expect("an approved capability grant must release a new matching execution");
+    assert!(control.run(&third_run).is_ok());
+    assert_eq!(
+        control
+            .list_approval_requests_page_for_tenant("tenant-1", None, None, 10)
+            .unwrap()
+            .len(),
+        1,
+    );
+
+    let changed_resolver = Arc::new(FixtureRepositoryActionResolver {
+        requests: Mutex::new(Vec::new()),
+        image: format!(
+            "containers.example/runtrue/action-cache@sha256:{}",
+            "c".repeat(64)
+        ),
+        available: AtomicBool::new(true),
+    });
+    let changed_worker = state
+        .scm_task_worker(config)
+        .unwrap()
+        .with_repository_action_resolver(changed_resolver);
+    let mut changed_event = fixture.pull_event();
+    changed_event.event_id = "delivery-changed-capability".to_owned();
+    changed_event.raw_payload_digest = ContentDigest::sha256(b"changed capability event");
+    changed_event.normalized_digest = ContentDigest::sha256(
+        changed_event
+            .canonical_normalized_bytes()
+            .expect("canonical changed capability event"),
+    );
+    enqueue(
+        &control,
+        "event-repository-action-changed-capability",
+        &changed_event,
+        NOW + 45,
+    );
+    let changed_completed = (45..55).any(|offset| {
+        matches!(
+            changed_worker.process_once_at(NOW + offset).unwrap(),
+            ScmWorkerTick::Completed { task_id, run_id: None, .. }
+                if task_id == "event-repository-action-changed-capability"
+        )
+    });
+    assert!(changed_completed);
+    assert_eq!(
+        control
+            .list_approval_requests_page_for_tenant("tenant-1", Some("pending"), None, 10)
+            .unwrap()
+            .len(),
+        1,
+        "a changed action resolution must require a new capability approval",
+    );
 }
 
 #[test]

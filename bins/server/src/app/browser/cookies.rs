@@ -12,9 +12,12 @@ use axum::{
 use runtrue_auth::SessionRecord;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+const GITHUB_CREDENTIAL_SCOPE_VERSION: u8 = 1;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::app) struct GitHubCredentialCookiePayload {
+    scope_version: u8,
     pub(in crate::app) session_id: String,
     pub(in crate::app) tenant_id: String,
     pub(in crate::app) principal_id: String,
@@ -42,6 +45,7 @@ pub(in crate::app) fn append_github_credential_cookie(
     now: u64,
 ) -> Result<(), HumanOidcError> {
     let payload = GitHubCredentialCookiePayload {
+        scope_version: GITHUB_CREDENTIAL_SCOPE_VERSION,
         session_id: record.id.clone(),
         tenant_id: record.tenant_id.clone(),
         principal_id: record.principal_id.clone(),
@@ -68,7 +72,8 @@ pub(in crate::app) fn github_credential_cookie(
 ) -> Result<GitHubCredentialCookiePayload, HumanOidcError> {
     let payload =
         sealed_cookie::<GitHubCredentialCookiePayload>(headers, human, GITHUB_CREDENTIAL_COOKIE)?;
-    if payload.session_id != record.id
+    if payload.scope_version != GITHUB_CREDENTIAL_SCOPE_VERSION
+        || payload.session_id != record.id
         || payload.tenant_id != record.tenant_id
         || payload.principal_id != record.principal_id
         || payload.login.is_empty()

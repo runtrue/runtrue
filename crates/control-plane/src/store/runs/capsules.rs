@@ -75,6 +75,52 @@ pub(in crate::store) fn insert_capsule_approval_tx(
     Ok(())
 }
 
+pub(in crate::store) fn insert_or_reuse_scm_approval_tx(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    capsule_id: &str,
+    approval: &ApprovalRequest,
+    now_unix_ms: u64,
+) -> Result<ApprovalRequest, ControlPlaneError> {
+    if approval.kind == runtrue_policy::ApprovalKind::PrivilegedExecution && !approval.rule.one_shot
+    {
+        let mut statement = transaction.prepare(
+            "SELECT request_json FROM approval_requests
+             WHERE repository_id = ?1 AND subject_digest = ?2
+               AND status IN ('pending', 'approved') AND expires_unix_ms > ?3
+             ORDER BY created_unix_ms, id",
+        )?;
+        let encoded = statement
+            .query_map(
+                params![
+                    repository_id,
+                    approval.subject_digest.as_str(),
+                    to_i64(now_unix_ms)?,
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        for encoded in encoded {
+            let candidate: ApprovalRequest = serde_json::from_str(&encoded)?;
+            if candidate.kind == approval.kind
+                && candidate.subject_digest == approval.subject_digest
+                && candidate.risk_score == approval.risk_score
+                && candidate.rule == approval.rule
+                && matches!(
+                    candidate.status,
+                    runtrue_policy::ApprovalStatus::Pending
+                        | runtrue_policy::ApprovalStatus::Approved
+                )
+            {
+                return Ok(candidate);
+            }
+        }
+    }
+    insert_capsule_approval_tx(transaction, repository_id, capsule_id, approval)?;
+    Ok(approval.clone())
+}
+
 pub(in crate::store) fn insert_run_tx(
     transaction: &Transaction<'_>,
     request: &CreateRunRequest,

@@ -340,14 +340,23 @@ impl ControlPlane {
                 &transaction,
                 &pending.capsule_id,
                 &metadata.approval_subject_digest,
+                &metadata.approval_subject_digest,
                 runtrue_policy::ApprovalKind::WorkflowDefinition,
                 now_unix_ms,
             )?);
         }
         if supplied_capsule.approval.privileged_execution {
+            // Pending executions created before reusable grants were
+            // introduced remain exact, one-shot Capsule approvals. New
+            // executions always carry the repository capability identity.
+            let capability_digest = context
+                .privileged_capability_digest
+                .as_ref()
+                .unwrap_or(&metadata.approval_subject_digest);
             authorized_approvals.push(authorize_required_approval_tx(
                 &transaction,
                 &pending.capsule_id,
+                capability_digest,
                 &metadata.approval_subject_digest,
                 runtrue_policy::ApprovalKind::PrivilegedExecution,
                 now_unix_ms,

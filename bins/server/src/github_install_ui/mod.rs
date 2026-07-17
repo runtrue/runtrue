@@ -99,6 +99,11 @@ mod tests {
             payload["organizations"][0]["repositories"][0]["name"],
             "available"
         );
+        assert!(payload["organizations"][0]["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|repository| repository["name"] == "runtrue" && repository["state"] == "added"));
         assert_eq!(
             payload["github"]["installations"][0]["accountLogin"],
             "octo"

@@ -336,6 +336,22 @@ impl GitHubOauthAdapter for HardenedGitHubOauthClient {
                 break;
             }
         }
+        // Some GitHub Enterprise OAuth sessions return an empty /user/orgs
+        // response even though the same token can read organization repositories.
+        // In that case, build the picker from repository owners the token can
+        // actually access instead of presenting only the viewer's account.
+        if organizations.is_empty() {
+            let repositories = self.repository_catalog(
+                access_token,
+                |page| format!(
+                    "/user/repos?affiliation=organization_member&sort=full_name&direction=asc&per_page={GITHUB_CATALOG_PAGE_SIZE}&page={page}"
+                ),
+                None,
+            )?;
+            for repository in repositories {
+                organizations.insert(repository.owner, ());
+            }
+        }
         Ok(organizations.into_keys().collect())
     }
 

@@ -2,7 +2,7 @@ use super::inspection::table_exists;
 use crate::BackupError;
 use rusqlite::Connection;
 
-pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 29;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 33;
 
 pub(super) fn verify_schema(connection: &Connection) -> Result<(), BackupError> {
     let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -87,6 +87,7 @@ pub(super) fn verify_schema(connection: &Connection) -> Result<(), BackupError> 
         (25, "github_repository_catalog"),
         (25, "github_lifecycle_deliveries"),
         (26, "scm_webhook_events"),
+        (30, "repository_workflow_settings"),
     ] {
         if version >= introduced && !table_exists(connection, table)? {
             return Err(BackupError::InvalidDatabase(
@@ -107,6 +108,37 @@ pub(super) fn verify_schema(connection: &Connection) -> Result<(), BackupError> 
         if !credential_taint_column {
             return Err(BackupError::InvalidDatabase(
                 "credential-taint lease state is missing",
+            ));
+        }
+    }
+    if version >= 31 {
+        let workflow_directory_column: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('repository_workflow_settings')
+                WHERE name = 'workflow_directory'
+                  AND type = 'TEXT' AND \"notnull\" = 1
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !workflow_directory_column {
+            return Err(BackupError::InvalidDatabase(
+                "repository workflow-directory state is missing",
+            ));
+        }
+    }
+    if version >= 32 {
+        let reusable_approval_index: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'index' AND name = 'approval_requests_reusable_subject'
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !reusable_approval_index {
+            return Err(BackupError::InvalidDatabase(
+                "reusable capability-approval index is missing",
             ));
         }
     }
@@ -136,6 +168,20 @@ pub(super) fn verify_schema(connection: &Connection) -> Result<(), BackupError> 
 mod tests {
     use super::*;
     use runtrue_control_plane::ControlPlane;
+
+    #[test]
+    fn current_control_plane_schema_is_backup_compatible() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("current.sqlite3");
+        drop(ControlPlane::open(&path, "backup-current", 1).unwrap());
+
+        let connection = Connection::open(&path).unwrap();
+        verify_schema(&connection).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
 
     #[test]
     fn schema_twenty_five_backup_validation_requires_github_installation_lifecycle_tables() {

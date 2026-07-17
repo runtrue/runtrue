@@ -1,5 +1,12 @@
 # Single-node backup and restore
 
+> [!CAUTION]
+> Do not open or copy the live `control-plane.sqlite` database with `sqlite3`,
+> filesystem copy tools, or container-side ad hoc scripts. Use `runtrue-backup`
+> for a consistent online snapshot, then inspect the snapshot. Direct access to
+> a live SQLite database can interfere with journal lifecycle across a bind-mount
+> namespace and is not a supported diagnostic or backup path.
+
 This procedure applies to the SQLite plus local-filesystem deployment. The
 `runtrue-backup` archive is a private directory, not an encrypted container. Put
 it on encrypted storage and protect it as production control-plane data.

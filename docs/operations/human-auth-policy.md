@@ -32,14 +32,20 @@ Opening `/ui/github/installations` without a session redirects through
 `/auth/login` and returns at `/auth/callback`.
 
 OAuth state is a durable, expiring, one-use transaction and is also bound into
-an authenticated, encrypted callback cookie. The login requests `read:user`,
-`read:org`, and `repo` so the repository picker can show public and private
-repositories visible to the signed-in user. The provider token is retained
-only in an encrypted, HttpOnly cookie bound to the exact Runtrue session; it is
-never returned to frontend JavaScript or written to durable storage, and is
-cleared on logout. Server-side, bounded `/user/orgs` and `/user/repos` requests
-use it to build the picker catalog. Unknown GitHub users, login-name
-substitutions, changed tenant/provider bindings, callback replay,
+an authenticated, encrypted callback cookie. With a GitHub App client, user
+authorization authenticates the person but does not discover repositories for
+the picker. Repository discovery is install-first: GitHub owns the account and
+`All repositories` or `Only select repositories` grant, Runtrue reconciles the
+installation, and the picker lists exactly that granted catalog. The user then
+enables repositories individually; installing the App does not implicitly add
+every granted repository to Runtrue.
+
+The provider token is retained only in an encrypted, HttpOnly cookie bound to
+the exact Runtrue session. It is never returned to frontend JavaScript or
+written to durable storage, and is cleared on logout. It is used only for
+user-bound setup validation, never as a substitute for GitHub App installation
+authorization. Unknown GitHub users, login-name substitutions, changed
+tenant/provider bindings, callback replay,
 private-address provider endpoints, redirects, ambient proxies, and oversized
 responses are rejected. The stable numeric user allowlist is the authority; a
 matching login name alone grants nothing.

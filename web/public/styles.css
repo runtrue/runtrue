@@ -500,12 +500,19 @@ svg { display: block; }
 .approval-row h3 { margin: var(--space-1) 0; font-size: var(--text-base); }
 .approval-row p { margin: 0; color: var(--muted); font-size: var(--text-xs); }
 .approval-main { min-width: 0; }
+.approval-row-heading { display: flex; align-items: center; gap: var(--space-3); }
+.approval-repository { color: var(--muted); font-size: var(--text-xs); font-weight: 600; }
 .approval-signals { margin: var(--space-3) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); list-style: none; }
 .approval-signals li { padding: var(--space-1) var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg); color: var(--fg); font-size: var(--text-xs); }
 .risk-score { width: 60px; height: 60px; border: 1px solid var(--border); border-radius: var(--radius-md); display: grid; place-items: center; align-content: center; background: var(--bg); }
 .risk-score span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .risk-score strong { font-family: var(--font-mono); font-size: var(--text-lg); }
 .risk-score.high strong { color: var(--danger); }
+.approval-count-badge,
+.tab-count { min-width: 22px; min-height: 22px; padding: 2px var(--space-2); border-radius: var(--radius-pill); display: inline-grid; place-items: center; background: color-mix(in oklab, var(--warn), transparent 84%); color: color-mix(in oklab, var(--warn), var(--fg) 42%); font-size: 11px; font-weight: 700; white-space: nowrap; }
+.tab-count { min-width: 20px; min-height: 20px; margin-left: var(--space-1); padding-inline: 6px; }
+.muted-cell { color: var(--muted); font-size: var(--text-xs); }
+.repository-approval-list { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
 
 .integration-notice { margin-bottom: var(--space-5); padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); display: flex; align-items: flex-start; gap: var(--space-3); background: var(--surface); }
 .integration-notice svg { width: 20px; height: 20px; flex: 0 0 auto; color: var(--accent); }
@@ -568,6 +575,54 @@ svg { display: block; }
 /* Detail and decision dialogs */
 .detail-dialog { width: min(760px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 32px); padding: 0; border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: auto; background: var(--surface); color: var(--fg); box-shadow: var(--elev-raised); }
 .approval-dialog { width: min(980px, calc(100vw - 32px)); }
+.approval-dialog .detail-dialog-body { padding: 0; }
+.approval-dialog .detail-grid { margin: 0; }
+.approval-review { display: block; }
+.approval-review-lead { padding: var(--space-6); display: flex; align-items: center; justify-content: space-between; gap: var(--space-6); background: var(--bg); }
+.approval-review-lead h3 { margin: var(--space-3) 0 var(--space-1); font-size: var(--text-xl); }
+.approval-review-lead p,
+.approval-review-section > p { margin: 0; color: var(--muted); font-size: var(--text-sm); }
+.approval-review-section { padding: var(--space-6); border-top: 1px solid var(--border); }
+.approval-review-section > h3 { margin: 0 0 var(--space-2); font-size: var(--text-lg); }
+.approval-context-grid { margin-top: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; }
+.approval-context-grid > div { min-width: 0; min-height: 90px; padding: var(--space-4); display: grid; align-content: center; gap: var(--space-1); }
+.approval-context-grid > div:nth-child(odd) { border-right: 1px solid var(--border); }
+.approval-context-grid > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
+.approval-context-grid span,
+.approval-context-grid small { color: var(--muted); font-size: var(--text-xs); }
+.approval-context-grid strong { overflow-wrap: anywhere; font-size: var(--text-sm); }
+.approval-reason-list,
+.approval-access-list,
+.approval-job-list,
+.approval-decision-list { margin: var(--space-4) 0 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-md); list-style: none; overflow: hidden; }
+.approval-reason-list li,
+.approval-access-list li,
+.approval-decision-list li { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-5); }
+.approval-reason-list li:last-child,
+.approval-access-list li:last-child,
+.approval-decision-list li:last-child,
+.approval-job-list li:last-child { border-bottom: 0; }
+.approval-reason-list strong,
+.approval-access-list span,
+.approval-decision-list strong { font-size: var(--text-sm); }
+.approval-access-copy { min-width: 0; display: grid; gap: 3px; }
+.approval-access-copy span { font-weight: 600; }
+.approval-access-copy small { color: var(--muted); font-size: var(--text-xs); line-height: 1.45; overflow-wrap: anywhere; }
+.approval-access-list > li > strong { flex: 0 0 auto; }
+.approval-reason-list span,
+.approval-decision-list > li > span { max-width: 58%; color: var(--muted); font-size: var(--text-xs); text-align: right; }
+.approval-decision-list small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+.approval-job-list li { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: var(--space-3); }
+.approval-job-list strong,
+.approval-job-list small { display: block; }
+.approval-job-list strong { font-size: var(--text-sm); }
+.approval-job-list small { margin-top: 2px; color: var(--muted); font-size: 11px; }
+.approval-exact-plan { padding: var(--space-4) var(--space-6); border-top: 1px solid var(--border); background: var(--bg); }
+.approval-exact-plan summary { cursor: pointer; font-size: var(--text-sm); font-weight: 600; }
+.approval-exact-plan dl { margin: var(--space-4) 0 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3) var(--space-6); }
+.approval-exact-plan dt { color: var(--muted); font-size: var(--text-xs); }
+.approval-exact-plan dd { margin: 2px 0 0; font-size: var(--text-xs); overflow-wrap: anywhere; }
+.approval-exact-plan > p { margin: var(--space-4) 0 0; color: var(--muted); font-size: var(--text-xs); line-height: 1.5; }
 .detail-dialog::backdrop,
 .confirm-dialog::backdrop { background: color-mix(in oklab, var(--fg), transparent 68%); }
 .detail-dialog-header { position: sticky; top: 0; z-index: 3; padding: var(--space-5) var(--space-6); border-bottom: 1px solid var(--border); display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); background: var(--surface); }
@@ -878,6 +933,10 @@ svg { display: block; }
   .approval-row { grid-template-columns: 60px minmax(0, 1fr); }
   .approval-main { grid-column: 1 / -1; }
   .approval-row > .btn { width: 100%; }
+  .approval-context-grid { grid-template-columns: 1fr; }
+  .approval-context-grid > div:nth-child(odd) { border-right: 0; }
+  .approval-context-grid > div { border-bottom: 1px solid var(--border); }
+  .approval-context-grid > div:last-child { border-bottom: 0; }
   .repository-overview-grid { grid-template-columns: 1fr; }
   .workflow-browser { grid-template-columns: 1fr; }
   .workflow-list-panel { border-right: 0; border-bottom: 1px solid var(--border); }
@@ -960,8 +1019,18 @@ svg { display: block; }
   .token-value-row { align-items: stretch; flex-direction: column; }
   .repo-table th:nth-child(2),
   .repo-table td:nth-child(2),
-  .repo-table th:nth-child(3),
-  .repo-table td:nth-child(3) { display: none; }
+  .repo-table th:nth-child(4),
+  .repo-table td:nth-child(4) { display: none; }
+  .approval-review-lead { align-items: flex-start; flex-direction: column; }
+  .approval-review-lead .risk-score { align-self: flex-start; }
+  .approval-reason-list li,
+  .approval-decision-list li { flex-direction: column; gap: var(--space-2); }
+  .approval-reason-list span,
+  .approval-decision-list > li > span { max-width: none; text-align: left; }
+  .approval-exact-plan dl { grid-template-columns: 1fr; }
+  .approval-dialog .detail-dialog-footer { align-items: stretch; flex-direction: column; }
+  .approval-dialog .detail-dialog-footer > div { display: grid; grid-template-columns: 1fr 1fr; }
+  .approval-dialog #dismiss-record-detail { grid-column: 1 / -1; }
 
   .repo-dialog { width: 100vw; height: 100dvh; border: 0; border-radius: 0; }
   .dialog-shell { grid-template-rows: auto minmax(0, 1fr) auto; }

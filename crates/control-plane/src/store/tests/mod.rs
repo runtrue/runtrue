@@ -225,9 +225,16 @@ struct PendingScmFixture {
     context: ScmContinuationContext,
     run: CreateRunRequest,
     subject: ContentDigest,
+    privileged_subject: ContentDigest,
 }
 
 fn pending_scm_fixture() -> PendingScmFixture {
+    pending_scm_fixture_with_reusable_privileged_approval(false)
+}
+
+fn pending_scm_fixture_with_reusable_privileged_approval(
+    reusable_privileged: bool,
+) -> PendingScmFixture {
     let control = ControlPlane::open_in_memory("scm-continuation", NOW).unwrap();
     control.create_repository(&repository()).unwrap();
     control
@@ -261,6 +268,11 @@ fn pending_scm_fixture() -> PendingScmFixture {
         created_unix_ms: NOW,
     };
     let subject = ContentDigest::sha256(b"scm-full-approval-subject");
+    let privileged_subject = if reusable_privileged {
+        ContentDigest::sha256(b"scm-repository-privileged-capability")
+    } else {
+        subject.clone()
+    };
     let metadata = CapsuleApiMetadata {
         capsule_id: capsule.id.clone(),
         approval_subject_digest: subject.clone(),
@@ -286,6 +298,8 @@ fn pending_scm_fixture() -> PendingScmFixture {
         source_identity: source_identity.clone(),
         analysis_id: Some("scm-analysis".to_owned()),
         source_snapshot_id: None,
+        privileged_capability_digest: Some(privileged_subject.clone()),
+        resolved_repository_actions: serde_json::json!({}),
     };
     let run = CreateRunRequest {
         id: "scm-run".to_owned(),
@@ -314,8 +328,8 @@ fn pending_scm_fixture() -> PendingScmFixture {
         pending_approval(
             "scm-privileged-approval",
             ApprovalKind::PrivilegedExecution,
-            &subject,
-            true,
+            &privileged_subject,
+            !reusable_privileged,
         ),
     ];
     let prepared = PreparedScmExecution {
@@ -360,6 +374,7 @@ fn pending_scm_fixture() -> PendingScmFixture {
         context,
         run,
         subject,
+        privileged_subject,
     }
 }
 
@@ -1371,6 +1386,106 @@ fn scm_dual_gate_continuation_is_durable_race_safe_and_run_bound() {
 }
 
 #[test]
+fn reusable_scm_approval_binds_exact_run_subject_and_can_be_scheduled() {
+    let fixture = pending_scm_fixture_with_reusable_privileged_approval(true);
+    for (index, approval_id, subject) in [
+        (0_u64, "scm-workflow-approval", &fixture.subject),
+        (
+            1_u64,
+            "scm-privileged-approval",
+            &fixture.privileged_subject,
+        ),
+    ] {
+        fixture
+            .control
+            .decide_approval_idempotent(
+                &format!("reusable-scm-decision-{index}"),
+                approval_id,
+                ApprovalDecision {
+                    actor_id: "reviewer".to_owned(),
+                    decision: Decision::Approve,
+                    reason: "reviewed repository capability".to_owned(),
+                    rule_id: "approval-rule".to_owned(),
+                    subject_digest: subject.clone(),
+                    decided_unix_ms: NOW + 2 + index,
+                },
+                NOW + 2 + index,
+            )
+            .unwrap();
+    }
+
+    let task = fixture
+        .control
+        .claim_task_by_kind(
+            "reusable-continuation-worker",
+            "scm.approval.continue",
+            NOW + 4,
+            1_000,
+        )
+        .unwrap()
+        .unwrap();
+    let committed = fixture
+        .control
+        .complete_scm_continuation_with_run_idempotent(
+            &task.id,
+            "reusable-continuation-worker",
+            "scm-pending",
+            NOW + 5,
+            &fixture.capsule,
+            &fixture.key,
+            &fixture.metadata,
+            &fixture.context,
+            &fixture.run,
+        )
+        .unwrap();
+    assert!(matches!(committed, ScmContinuationCommit::Run(_)));
+
+    let authorized_subject: String = fixture
+        .control
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT subject_digest FROM run_approval_authorizations
+             WHERE run_id = 'scm-run' AND kind = 'privileged-execution'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(authorized_subject, fixture.subject.as_str());
+    assert_ne!(authorized_subject, fixture.privileged_subject.as_str());
+
+    // Reproduce the schema-32 row shape and prove the data migration repairs
+    // already-queued work, not only newly admitted runs.
+    let connection = fixture.control.connection().unwrap();
+    connection
+        .execute(
+            "UPDATE run_approval_authorizations SET subject_digest = ?1
+             WHERE run_id = 'scm-run' AND kind = 'privileged-execution'",
+            [fixture.privileged_subject.as_str()],
+        )
+        .unwrap();
+    connection.execute_batch(database::MIGRATION_33).unwrap();
+    let repaired_subject: String = connection
+        .query_row(
+            "SELECT subject_digest FROM run_approval_authorizations
+             WHERE run_id = 'scm-run' AND kind = 'privileged-execution'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(repaired_subject, fixture.subject.as_str());
+    drop(connection);
+
+    add_runner(&fixture.control);
+    let lease = fixture
+        .control
+        .offer_next_lease_for_runner("runner-1", NOW + 6)
+        .unwrap()
+        .expect("an exact-bound reusable approval must be schedulable");
+    assert_eq!(lease.job_id, "scm-job");
+}
+
+#[test]
 fn scm_denial_and_replanning_tamper_close_without_runs() {
     let denied = pending_scm_fixture();
     denied
@@ -1441,7 +1556,18 @@ fn scm_denial_and_replanning_tamper_close_without_runs() {
         ScmContinuationResolution::Ready(_)
     ));
     let mut tampered_context = stale.context.clone();
-    tampered_context.source_identity.policy_version_ids = vec!["policy-v2".to_owned()];
+    tampered_context.resolved_repository_actions = serde_json::json!({
+        "ci/backport@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+            "program": {
+                "kind": "component",
+                "reference": "wasm://registry.example/backport@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "scm_api_url": "https://api.example.invalid",
+                "signature_identity": "attacker@example.invalid",
+                "wit_world": "runtrue:action/run@1.0.0"
+            },
+            "inputs": {}
+        }
+    });
     assert!(matches!(
         stale
             .control
@@ -1840,6 +1966,45 @@ fn tenant_collection_queries_filter_in_sql_across_control_plane_resources() {
 }
 
 #[test]
+fn approval_request_pages_are_newest_first_with_stable_cursors() {
+    let control = ControlPlane::open_in_memory("installation", NOW).unwrap();
+    control.create_repository(&repository()).unwrap();
+    let (capsule, key) = signed_capsule();
+    control.store_signed_capsule(&capsule, &key).unwrap();
+    let rule = ApprovalRule {
+        id: "ordered-approvals".to_owned(),
+        required_approvals: 1,
+        eligible_approvers: BTreeSet::from(["reviewer".to_owned()]),
+        forbidden_approvers: BTreeSet::new(),
+        one_shot: false,
+    };
+    for (id, created_unix_ms) in [("approval-z-older", NOW), ("approval-a-newer", NOW + 1)] {
+        let request = ApprovalRequest::create(
+            id,
+            ApprovalKind::PrivilegedExecution,
+            ContentDigest::sha256(id.as_bytes()),
+            100,
+            created_unix_ms,
+            created_unix_ms + 100,
+            rule.clone(),
+        )
+        .unwrap();
+        control
+            .create_approval_request("repo-1", "capsule-1", &request)
+            .unwrap();
+    }
+
+    let first = control
+        .list_approval_requests_page_for_tenant("tenant-1", Some("pending"), None, 1)
+        .unwrap();
+    assert_eq!(first[0].id, "approval-a-newer");
+    let second = control
+        .list_approval_requests_page_for_tenant("tenant-1", Some("pending"), Some(&first[0].id), 1)
+        .unwrap();
+    assert_eq!(second[0].id, "approval-z-older");
+}
+
+#[test]
 fn repository_workflow_directory_is_tenant_scoped_and_canonical() {
     let control = ControlPlane::open_in_memory("repository-workflow-directory", NOW).unwrap();
     control.create_repository(&repository()).unwrap();
@@ -2069,6 +2234,32 @@ fn schema_one_is_upgraded_through_scm_check_schema_twenty_two() {
         )
         .unwrap();
     assert!(credential_taint_column);
+}
+
+#[test]
+fn file_control_plane_uses_a_non_detachable_rollback_journal() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("control-plane.sqlite");
+    let control = ControlPlane::open(&path, "journal-safety", NOW).unwrap();
+
+    let connection = control.connection().unwrap();
+    let journal_mode: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    assert_eq!(journal_mode, "truncate");
+    drop(connection);
+
+    control.create_repository(&repository()).unwrap();
+    let observer = Connection::open(&path).unwrap();
+    let visible: u64 = observer
+        .query_row(
+            "SELECT COUNT(*) FROM repositories WHERE id = 'repo-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(visible, 1);
+    assert!(!path.with_extension("sqlite-wal").exists());
 }
 
 #[test]

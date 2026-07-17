@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 use runtrue_model::ContentDigest;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -34,13 +35,15 @@ pub struct WorkflowFrontendOptions {
 ///
 /// The source frontend consumes the action metadata only after the resolver has
 /// bound it to the same source commit as the immutable executable program.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedRepositoryAction {
     pub program: ResolvedRepositoryProgram,
     pub inputs: BTreeMap<String, ResolvedActionInput>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ResolvedRepositoryProgram {
     Container {
         image: String,
@@ -68,7 +71,8 @@ impl ResolvedRepositoryAction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedActionInput {
     pub required: bool,
     pub default: Option<String>,

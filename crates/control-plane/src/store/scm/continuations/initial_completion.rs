@@ -3,8 +3,8 @@ use super::super::{
     append_audit_event_tx, approval_id_for_kind, bind_run_source_snapshot_tx, bounded_scm_json,
     create_run_request_hash, enqueue_initial_scm_check_task_tx,
     enqueue_proposed_workflow_check_task_tx, enqueue_scm_expiry_task_tx, hash_serializable,
-    idempotency_tx, insert_capsule_approval_tx, insert_capsule_metadata_tx,
-    insert_jobs_for_capsule_tx, insert_run_and_jobs_for_capsule_tx, insert_run_tx,
+    idempotency_tx, insert_capsule_metadata_tx, insert_jobs_for_capsule_tx,
+    insert_or_reuse_scm_approval_tx, insert_run_and_jobs_for_capsule_tx, insert_run_tx,
     insert_signed_capsule_tx, mark_task_completed_tx, params, require_same_idempotency,
     require_task_owner_tx, run_tx, scm_analysis_status_name, scm_execution_role_name, task_tx,
     to_i64, validate_create_run, validate_idempotency_key, validate_run_jobs,
@@ -349,13 +349,15 @@ impl ControlPlane {
         {
             insert_signed_capsule_tx(&transaction, &execution.capsule, signature_json)?;
             insert_capsule_metadata_tx(&transaction, &execution.metadata)?;
+            let mut effective_approvals = Vec::with_capacity(execution.approvals.len());
             for approval in &execution.approvals {
-                insert_capsule_approval_tx(
+                effective_approvals.push(insert_or_reuse_scm_approval_tx(
                     &transaction,
                     &execution.capsule.repository_id,
                     &execution.capsule.id,
                     approval,
-                )?;
+                    now_unix_ms,
+                )?);
             }
             if execution.approvals.is_empty() {
                 insert_run_tx(&transaction, &execution.run)?;
@@ -386,15 +388,14 @@ impl ControlPlane {
                             "gated SCM execution is missing its continuation context",
                         ))?;
                 let workflow_approval_id = approval_id_for_kind(
-                    &execution.approvals,
+                    &effective_approvals,
                     runtrue_policy::ApprovalKind::WorkflowDefinition,
                 );
                 let privileged_approval_id = approval_id_for_kind(
-                    &execution.approvals,
+                    &effective_approvals,
                     runtrue_policy::ApprovalKind::PrivilegedExecution,
                 );
-                let expires_unix_ms = execution
-                    .approvals
+                let expires_unix_ms = effective_approvals
                     .iter()
                     .map(|approval| approval.expires_unix_ms)
                     .min()
@@ -430,6 +431,19 @@ impl ControlPlane {
                     expires_unix_ms,
                 )?;
                 durable_pending_ids.push(context.pending_execution_id.clone());
+                if effective_approvals
+                    .iter()
+                    .all(|approval| approval.status == runtrue_policy::ApprovalStatus::Approved)
+                {
+                    super::enqueue_preapproved_scm_continuation_tx(
+                        &transaction,
+                        &context.pending_execution_id,
+                        workflow_approval_id
+                            .or(privileged_approval_id)
+                            .ok_or(ControlPlaneError::ApprovalRequired)?,
+                        now_unix_ms,
+                    )?;
+                }
             }
             // Keep this explicit assertion next to the insert boundary: no
             // gated capsule may accidentally take the immediate path.
