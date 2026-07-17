@@ -97,6 +97,103 @@ fn signed_concurrency_group_serializes_across_runs_and_restart() {
 }
 
 #[test]
+fn exhausted_concurrency_head_fails_and_releases_the_next_run() {
+    let control = ControlPlane::open_in_memory("exhausted-concurrency", NOW).unwrap();
+    control.create_repository(&repository()).unwrap();
+    add_runner(&control);
+    let mut decoded = execution_capsule();
+    decoded.jobs = vec![planned_job(
+        "deploy",
+        &[],
+        Trust::UntrustedOk,
+        OperatingSystem::Linux,
+        Some("production"),
+    )];
+    let capsule = store_test_capsule(&control, "capsule-exhausted", decoded.clone());
+    for (run, at) in [("run-a", NOW), ("run-b", NOW + 1)] {
+        control
+            .create_run_idempotent(
+                &format!("{run}-key"),
+                &run_for_capsule(run, &capsule, &decoded, at),
+            )
+            .unwrap();
+    }
+
+    for attempt in 0..MAX_RUNNER_JOB_REJECTIONS {
+        let at = NOW + 2 + attempt * 2;
+        let lease = control
+            .offer_next_lease_for_runner("runner-1", at)
+            .unwrap()
+            .expect("the concurrency head should be retried within its bound");
+        assert_eq!(lease.job_id, "run-a-deploy");
+        control
+            .reject_lease_with_code(
+                &lease.id,
+                "runner-1",
+                lease.fencing_generation,
+                lease.installation_fencing_epoch,
+                "executor_preflight_rejected",
+                at + 1,
+            )
+            .unwrap();
+    }
+
+    let next = control
+        .offer_next_lease_for_runner("runner-1", NOW + 20)
+        .unwrap()
+        .expect("terminal reconciliation must release the concurrency group");
+    assert_eq!(next.job_id, "run-b-deploy");
+    assert_eq!(
+        control.jobs_for_run("run-a").unwrap()[0].status,
+        JobState::BlockedPolicy
+    );
+    assert_eq!(control.run("run-a").unwrap().status, RunState::Failed);
+}
+
+#[test]
+fn one_exhausted_runner_does_not_fail_a_job_accepted_by_another_runner() {
+    let control = ControlPlane::open_in_memory("multi-runner-rejection", NOW).unwrap();
+    control.create_repository(&repository()).unwrap();
+    add_runner(&control);
+    add_runner_to_existing_pool(&control, "runner-2");
+    let decoded = execution_capsule();
+    let capsule = store_test_capsule(&control, "capsule-multi-runner", decoded.clone());
+    control
+        .create_run_idempotent(
+            "run-multi-key",
+            &run_for_capsule("run-multi", &capsule, &decoded, NOW),
+        )
+        .unwrap();
+
+    for attempt in 0..MAX_RUNNER_JOB_REJECTIONS {
+        let at = NOW + 1 + attempt * 2;
+        let lease = control
+            .offer_next_lease_for_runner("runner-1", at)
+            .unwrap()
+            .unwrap();
+        control
+            .reject_lease_with_code(
+                &lease.id,
+                "runner-1",
+                lease.fencing_generation,
+                lease.installation_fencing_epoch,
+                "executor_preflight_rejected",
+                at + 1,
+            )
+            .unwrap();
+    }
+    assert!(control
+        .offer_next_lease_for_runner("runner-1", NOW + 20)
+        .unwrap()
+        .is_none());
+    let second_runner = control
+        .offer_next_lease_for_runner("runner-2", NOW + 21)
+        .unwrap()
+        .expect("another structurally eligible runner must still receive the job");
+    assert_eq!(second_runner.job_id, "run-multi-build");
+}
+
+#[test]
 fn bounded_selector_rotates_past_incompatible_pages_and_uses_random_fences() {
     let control = ControlPlane::open_in_memory("scheduler-page", NOW).unwrap();
     control.create_repository(&repository()).unwrap();

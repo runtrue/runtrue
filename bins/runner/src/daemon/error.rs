@@ -116,3 +116,41 @@ pub enum RunnerError {
     #[error(transparent)]
     ImageAttestation(#[from] runtrue_attest::ImageAttestError),
 }
+
+impl RunnerError {
+    /// Return the stable control-plane rejection code for a failed executor
+    /// preflight. Assignment failures are deterministic for the offered plan
+    /// and must not be collapsed into the retryable generic code.
+    pub const fn preflight_rejection_code(&self) -> &'static str {
+        match self {
+            Self::MissingWasmComponent(_) => "wasm_component_assignment_missing",
+            Self::WasmManifestMismatch(_) | Self::UntrustedWasmComponentKey(_) => {
+                "wasm_component_assignment_invalid"
+            }
+            Self::MissingOciManifest { .. } => "oci_image_assignment_missing",
+            Self::OciManifestMismatch(_)
+            | Self::OciManifestExpired
+            | Self::UntrustedOciImageKey(_) => "oci_image_assignment_invalid",
+            _ => "executor_preflight_rejected",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunnerError;
+
+    #[test]
+    fn preflight_rejection_codes_preserve_permanent_assignment_failures() {
+        assert_eq!(
+            RunnerError::MissingWasmComponent("wasm://example.invalid/action@sha256:00".to_owned())
+                .preflight_rejection_code(),
+            "wasm_component_assignment_missing"
+        );
+        assert_eq!(
+            RunnerError::WasmConfiguration("temporary runtime failure".to_owned())
+                .preflight_rejection_code(),
+            "executor_preflight_rejected"
+        );
+    }
+}

@@ -3,6 +3,9 @@ use super::*;
 #[test]
 fn image_admission_rejection_is_retryable() {
     assert!(transient_runner_rejection("image_admission_pending"));
+    assert!(!transient_runner_rejection(
+        "wasm_component_assignment_missing"
+    ));
 
     let control = ControlPlane::open_in_memory("image-admission-retry", NOW).unwrap();
     bootstrap(&control);

@@ -481,12 +481,12 @@ where
             .executor
             .preflight_with_broker(&admitted, broker.clone())
         {
+            let rejection_code = error.preflight_rejection_code();
             eprintln!(
                 "runtrue-runner: executor preflight rejected job `{}`: {error}",
                 offer.job_id
             );
-            self.reject_offer(&offer, "executor_preflight_rejected")
-                .await?;
+            self.reject_offer(&offer, rejection_code).await?;
             return Ok(None);
         }
         if clock.now()? >= admitted.accept_by_unix_ms {

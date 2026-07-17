@@ -1,6 +1,86 @@
 use super::*;
 
 pub(in crate::store) const IMAGE_ADMISSION_RETRY_DELAY_MILLIS: u64 = 1_000;
+pub(in crate::store) const MAX_RUNNER_JOB_REJECTIONS: u64 = 3;
+
+fn runner_structurally_matches(
+    runner: &RunnerRecord,
+    pool_status: &str,
+    pool_region: Option<&str>,
+    requirements: &SchedulingRequirements,
+) -> Result<bool, ControlPlaneError> {
+    if parse_runner_pool_status(pool_status)? != RunnerPoolStatus::Active
+        || runner.status != RunnerStatus::Online
+        || pool_region.is_some_and(|region| runner.region.as_deref() != Some(region))
+    {
+        return Ok(false);
+    }
+    Ok(requirements.os == runner.os
+        && requirements.arch == runner.arch
+        && runner.isolation_backends.contains(&requirements.isolation)
+        && (requirements.allowed_pools.is_empty()
+            || requirements.allowed_pools.contains(&runner.pool_id))
+        && requirements.region.as_ref().is_none_or(|region| {
+            runner.region.as_ref() == Some(region) && pool_region.is_none_or(|pool| pool == region)
+        })
+        && requirements
+            .required_capabilities
+            .is_subset(&runner.verified_capabilities)
+        && u64::from(requirements.cpu) <= u64::from(runner.logical_cpus)
+        && requirements.memory_bytes <= runner.memory_bytes
+        && requirements.storage_bytes <= runner.storage_bytes)
+}
+
+fn all_eligible_runners_exhausted_tx(
+    transaction: &Transaction<'_>,
+    tenant_id: &str,
+    job_id: &str,
+    requirements: &SchedulingRequirements,
+) -> Result<bool, ControlPlaneError> {
+    let mut statement = transaction.prepare(
+        "SELECT r.id, r.runner_json, p.status, p.region
+         FROM runners r JOIN runner_pools p ON p.id = r.pool_id
+         WHERE p.tenant_id = ?1
+         ORDER BY r.id",
+    )?;
+    let candidates = statement
+        .query_map([tenant_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut eligible = Vec::new();
+    for (runner_id, runner_json, pool_status, pool_region) in candidates {
+        let runner: RunnerRecord = serde_json::from_str(&runner_json)?;
+        if runner_structurally_matches(&runner, &pool_status, pool_region.as_deref(), requirements)?
+        {
+            eligible.push(runner_id);
+        }
+    }
+    if eligible.is_empty() {
+        return Ok(false);
+    }
+    for runner_id in eligible {
+        let exhausted: bool = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM runner_job_rejections
+                 WHERE runner_id = ?1 AND job_id = ?2
+                   AND rejection_count >= ?3
+                   AND last_code != 'image_admission_pending'
+             )",
+            params![runner_id, job_id, to_i64(MAX_RUNNER_JOB_REJECTIONS)?],
+            |row| row.get(0),
+        )?;
+        if !exhausted {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 
 pub(in crate::store) fn runner_reserved_resources_tx(
     transaction: &Transaction<'_>,
@@ -631,9 +711,25 @@ impl ControlPlane {
             let image_admission_backoff = last_rejection_code == "image_admission_pending"
                 && now_unix_ms
                     < last_rejection_unix_ms.saturating_add(IMAGE_ADMISSION_RETRY_DELAY_MILLIS);
-            if image_admission_backoff
-                || (last_rejection_code != "image_admission_pending" && runner_rejections >= 3)
+            if image_admission_backoff {
+                continue;
+            }
+            if last_rejection_code != "image_admission_pending"
+                && runner_rejections >= MAX_RUNNER_JOB_REJECTIONS
             {
+                if all_eligible_runners_exhausted_tx(
+                    &transaction,
+                    &tenant_id,
+                    &job.id,
+                    &job.requirements,
+                )? {
+                    transaction.execute(
+                        "UPDATE jobs SET status = 'blocked_policy', completed_unix_ms = ?2
+                         WHERE id = ?1 AND status = 'queued'",
+                        params![job.id, to_i64(now_unix_ms)?],
+                    )?;
+                    conclude_run_if_terminal_tx(&transaction, &job.id, now_unix_ms)?;
+                }
                 continue;
             }
             if let Some(group) = &planned.concurrency {
