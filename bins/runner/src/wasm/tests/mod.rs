@@ -14,6 +14,33 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::{collections::BTreeMap, fs};
 use tempfile::TempDir;
 
+#[test]
+fn github_actions_frontend_receives_the_larger_fuel_budget() {
+    let fixture = Fixture::new();
+    let mut capsule = fixture.capsule();
+    assert_eq!(super::execution::fuel_multiplier_for_capsule(&capsule), 1);
+
+    capsule.context.workflow_frontend = Some(runtrue_workflow_ir::WorkflowFrontendProvenance {
+        frontend_id: super::execution::GITHUB_ACTIONS_FRONTEND_ID.to_owned(),
+        frontend_generation: 1,
+        input_digest: ContentDigest::sha256(b"github-workflow"),
+        native_digest: ContentDigest::sha256(b"native-workflow"),
+        report_digest: None,
+    });
+    assert_eq!(
+        super::execution::fuel_multiplier_for_capsule(&capsule),
+        super::execution::GITHUB_ACTIONS_FUEL_MULTIPLIER
+    );
+
+    capsule
+        .context
+        .workflow_frontend
+        .as_mut()
+        .unwrap()
+        .frontend_id = "runtrue.native".to_owned();
+    assert_eq!(super::execution::fuel_multiplier_for_capsule(&capsule), 1);
+}
+
 struct Fixture {
     _directory: TempDir,
     paths: WasmRuntimePaths,

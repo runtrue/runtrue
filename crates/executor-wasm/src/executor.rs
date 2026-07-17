@@ -191,6 +191,20 @@ impl WasmExecutor {
         request: &StepExecutionRequest,
         adapters: &CapabilityAdapters,
     ) -> Result<WasmExecutionOutput, WasmError> {
+        self.execute_request_with_adapters_and_fuel_multiplier(request, adapters, 1)
+    }
+
+    pub fn execute_request_with_adapters_and_fuel_multiplier(
+        &mut self,
+        request: &StepExecutionRequest,
+        adapters: &CapabilityAdapters,
+        fuel_multiplier: u64,
+    ) -> Result<WasmExecutionOutput, WasmError> {
+        if !(1..=4).contains(&fuel_multiplier) {
+            return Err(WasmError::InvalidRequest(
+                "Wasm fuel multiplier must be between one and four".to_owned(),
+            ));
+        }
         let total_started = Instant::now();
         self.validate_request(request, adapters)?;
         let (reference, inputs) = match &request.action {
@@ -205,6 +219,7 @@ impl WasmExecutor {
             return Ok(WasmExecutionOutput {
                 executor: interrupted_output(false, true, Duration::ZERO),
                 component_output: None,
+                runtime_diagnostic: None,
                 aot_cache_status: AotCacheStatus::Miss,
             });
         }
@@ -212,6 +227,7 @@ impl WasmExecutor {
             return Ok(WasmExecutionOutput {
                 executor: interrupted_output(true, false, Duration::ZERO),
                 component_output: None,
+                runtime_diagnostic: Some("component timed out".to_owned()),
                 aot_cache_status: AotCacheStatus::Miss,
             });
         }
@@ -224,6 +240,7 @@ impl WasmExecutor {
             return Ok(WasmExecutionOutput {
                 executor: interrupted_output(false, true, total_started.elapsed()),
                 component_output: None,
+                runtime_diagnostic: None,
                 aot_cache_status: cache_status,
             });
         }
@@ -231,6 +248,7 @@ impl WasmExecutor {
             return Ok(WasmExecutionOutput {
                 executor: interrupted_output(true, false, total_started.elapsed()),
                 component_output: None,
+                runtime_diagnostic: Some("component timed out".to_owned()),
                 aot_cache_status: cache_status,
             });
         }
@@ -280,7 +298,11 @@ impl WasmExecutor {
         );
         store.limiter(|state| &mut state.store_limits);
         store
-            .set_fuel(self.limits.fuel)
+            .set_fuel(
+                self.limits
+                    .fuel_for_timeout(timeout)
+                    .saturating_mul(fuel_multiplier),
+            )
             .map_err(|error| WasmError::RuntimeConfiguration(error.to_string()))?;
         store.set_epoch_deadline(1);
         store.epoch_deadline_trap();
@@ -298,6 +320,7 @@ impl WasmExecutor {
             return Ok(WasmExecutionOutput {
                 executor: interrupted_output(true, false, total_started.elapsed()),
                 component_output: None,
+                runtime_diagnostic: Some("component timed out".to_owned()),
                 aot_cache_status: cache_status,
             });
         }
@@ -311,7 +334,7 @@ impl WasmExecutor {
         let interruption = watchdog.finish()?;
         let elapsed = total_started.elapsed();
         let host_output = store.data().output();
-        let executor = classify_call(
+        let (executor, runtime_diagnostic) = classify_call(
             call_result,
             interruption,
             host_output.clone(),
@@ -324,6 +347,7 @@ impl WasmExecutor {
         Ok(WasmExecutionOutput {
             executor,
             component_output,
+            runtime_diagnostic,
             aot_cache_status: cache_status,
         })
     }
@@ -658,6 +682,20 @@ impl WasmExecutor {
             .map(into_executor_output)
             .map_err(map_execution_error)
     }
+
+    pub fn execute_with_adapters_and_diagnostic(
+        &mut self,
+        request: &StepExecutionRequest,
+        adapters: &CapabilityAdapters,
+        fuel_multiplier: u64,
+    ) -> Result<(ExecutorOutput, Option<String>), ExecutorError> {
+        self.execute_request_with_adapters_and_fuel_multiplier(request, adapters, fuel_multiplier)
+            .map(|output| {
+                let diagnostic = output.runtime_diagnostic.clone();
+                (into_executor_output(output), diagnostic)
+            })
+            .map_err(map_execution_error)
+    }
 }
 
 impl Executor for WasmExecutor {
@@ -693,23 +731,23 @@ fn classify_call(
     host: HostOutput,
     elapsed: Duration,
     max_log_bytes: usize,
-) -> ExecutorOutput {
+) -> (ExecutorOutput, Option<String>) {
     if interruption == Interruption::Timeout {
         let mut output = interrupted_output(true, false, elapsed);
         merge_host_output(&mut output, host);
-        return output;
+        return (output, Some("component timed out".to_owned()));
     }
     if interruption == Interruption::Canceled {
         let mut output = interrupted_output(false, true, elapsed);
         merge_host_output(&mut output, host);
-        return output;
+        return (output, None);
     }
     match result {
         Ok(()) => {
             let mut output = ExecutorOutput::success();
             output.duration_ms = duration_ms(elapsed);
             merge_host_output(&mut output, host);
-            output
+            (output, None)
         }
         Err(error) => {
             let out_of_fuel = error
@@ -724,7 +762,7 @@ fn classify_call(
                 "component trapped"
             };
             append_bounded_diagnostic(&mut output, diagnostic, max_log_bytes);
-            output
+            (output, Some(diagnostic.to_owned()))
         }
     }
 }

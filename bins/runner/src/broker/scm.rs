@@ -99,7 +99,14 @@ impl ScmRuntimeFiles {
             .iter()
             .any(|step| step.capabilities.network != NetworkPermission::Deny);
         let egress = (has_provider_grant || has_network_grant)
-            .then(|| ScmEgressBroker::start(workspace, Arc::new(allowed)))
+            .then(|| {
+                ScmEgressBroker::start(
+                    workspace,
+                    Arc::new(allowed),
+                    lease.lease_id.clone(),
+                    lease.job_id.clone(),
+                )
+            })
             .transpose()?;
         Ok(Some(Self { root, egress }))
     }
@@ -127,7 +134,12 @@ struct ScmEgressBroker {
 }
 
 impl ScmEgressBroker {
-    fn start(workspace: &Path, allowed: Arc<BTreeSet<(String, u16)>>) -> Result<Self, String> {
+    fn start(
+        workspace: &Path,
+        allowed: Arc<BTreeSet<(String, u16)>>,
+        lease_id: String,
+        job_id: String,
+    ) -> Result<Self, String> {
         let parent = workspace
             .parent()
             .ok_or_else(|| "SCM workspace has no private parent".to_owned())?;
@@ -156,15 +168,24 @@ impl ScmEgressBroker {
                         Ok((stream, _)) => {
                             if active.fetch_add(1, Ordering::AcqRel) >= MAX_PROXY_CONNECTIONS {
                                 active.fetch_sub(1, Ordering::AcqRel);
+                                eprintln!(
+                                    "runtrue-runner: SCM egress connection rejected for lease {lease_id} job {job_id}: concurrent connection limit reached"
+                                );
                                 continue;
                             }
                             let allowed = allowed.clone();
                             let active = Arc::clone(&active);
+                            let lease_id = lease_id.clone();
+                            let job_id = job_id.clone();
                             let _ = thread::Builder::new()
                                 .name("runtrue-scm-connect".to_owned())
                                 .spawn(move || {
                                     let _guard = ActiveConnection(active);
-                                    let _ = proxy_connect(stream, &allowed);
+                                    if let Err(error) = proxy_connect(stream, &allowed) {
+                                        eprintln!(
+                                            "runtrue-runner: SCM egress connection failed for lease {lease_id} job {job_id}: {error}"
+                                        );
+                                    }
                                 });
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -249,7 +270,10 @@ fn proxy_connect(
         header.push(byte[0]);
     }
     if !header.ends_with(b"\r\n\r\n") {
-        return Ok(());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "CONNECT request header was incomplete or oversized",
+        ));
     }
     let first = header
         .split(|byte| *byte == b'\n')
@@ -265,36 +289,64 @@ fn proxy_connect(
     let version = parts.next().unwrap_or_default();
     if method != "CONNECT" || version != "HTTP/1.1" || parts.next().is_some() {
         downstream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n")?;
-        return Ok(());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SCM egress request was not a valid HTTP/1.1 CONNECT",
+        ));
     }
     let Some((host, port)) = authority.rsplit_once(':') else {
         downstream.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")?;
-        return Ok(());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "SCM egress CONNECT authority omitted its port",
+        ));
     };
     let Ok(port) = port.parse::<u16>() else {
-        return Ok(());
+        downstream.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")?;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "SCM egress CONNECT authority used an invalid port",
+        ));
     };
     let host = host.to_ascii_lowercase();
     if !allowed.contains(&(host.clone(), port)) {
         downstream.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")?;
-        return Ok(());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("SCM egress destination {host}:{port} is not declared by the execution plan"),
+        ));
     }
     let addresses = (host.as_str(), port)
-        .to_socket_addrs()?
+        .to_socket_addrs()
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("resolve SCM egress destination {host}:{port}: {error}"),
+            )
+        })?
         .collect::<BTreeSet<_>>();
     if addresses.is_empty()
         || addresses.len() > 16
         || addresses.iter().any(|addr| !public_ip(addr.ip()))
     {
         downstream.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")?;
-        return Ok(());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("SCM egress destination {host}:{port} did not resolve exclusively to allowed public addresses"),
+        ));
     }
     let address = addresses
         .iter()
         .next()
         .copied()
         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
-    let mut upstream = TcpStream::connect_timeout(&address, Duration::from_secs(5))?;
+    let mut upstream =
+        TcpStream::connect_timeout(&address, Duration::from_secs(5)).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("connect to SCM egress destination {host}:{port} ({address}): {error}"),
+            )
+        })?;
     upstream.set_read_timeout(Some(PROXY_IO_TIMEOUT))?;
     upstream.set_write_timeout(Some(PROXY_IO_TIMEOUT))?;
     downstream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
@@ -302,8 +354,21 @@ fn proxy_connect(
     let mut downstream_read = downstream.try_clone()?;
     let mut upstream_write = upstream.try_clone()?;
     let forward = thread::spawn(move || std::io::copy(&mut downstream_read, &mut upstream_write));
-    let _ = std::io::copy(&mut upstream, &mut downstream);
-    let _ = forward.join();
+    std::io::copy(&mut upstream, &mut downstream).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("receive from SCM egress destination {host}:{port}: {error}"),
+        )
+    })?;
+    forward
+        .join()
+        .map_err(|_| std::io::Error::other("SCM egress forwarding thread panicked"))?
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("send to SCM egress destination {host}:{port}: {error}"),
+            )
+        })?;
     Ok(())
 }
 
@@ -689,6 +754,7 @@ impl StepStateObserver for ScmCredentialObserver {
 mod tests {
     use super::*;
     use crate::transport::TransportError;
+    use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -747,5 +813,24 @@ mod tests {
             taint.credential_taint(),
             CredentialTaint::CredentialReleased
         );
+    }
+
+    #[test]
+    fn scm_egress_rejection_returns_a_safe_diagnostic() {
+        let (mut client, broker) = UnixStream::pair().unwrap();
+        client
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+            .unwrap();
+
+        let error = proxy_connect(broker, &BTreeSet::new()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string(),
+            "SCM egress destination example.com:443 is not declared by the execution plan"
+        );
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
     }
 }

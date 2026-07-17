@@ -1,5 +1,7 @@
 use crate::{host::HostLimits, WasmError};
 use std::time::Duration;
+
+const FUEL_BUDGET_QUANTUM: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WasmLimits {
     pub max_component_bytes: usize,
@@ -17,6 +19,9 @@ pub struct WasmLimits {
     pub max_tables: usize,
     pub max_memories: usize,
     pub max_wasm_stack_bytes: usize,
+    /// Fuel granted for each started minute of the bounded step deadline.
+    /// Short steps retain one quantum; longer steps receive a proportional
+    /// budget while the wall-clock timeout remains authoritative.
     pub fuel: u64,
     pub max_timeout: Duration,
 }
@@ -83,5 +88,41 @@ impl WasmLimits {
             max_secret_bytes: self.max_secret_bytes,
             max_oidc_token_bytes: self.max_oidc_token_bytes,
         }
+    }
+
+    pub(crate) fn fuel_for_timeout(self, timeout: Duration) -> u64 {
+        let quantum_millis = FUEL_BUDGET_QUANTUM.as_millis();
+        let timeout_millis = timeout.as_millis();
+        let quanta =
+            timeout_millis.saturating_add(quantum_millis.saturating_sub(1)) / quantum_millis;
+        let quanta = u64::try_from(quanta.max(1)).unwrap_or(u64::MAX);
+        self.fuel.saturating_mul(quanta)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fuel_budget_scales_with_the_bounded_step_deadline() {
+        let limits = WasmLimits::default();
+        assert_eq!(limits.fuel_for_timeout(Duration::from_secs(1)), limits.fuel);
+        assert_eq!(
+            limits.fuel_for_timeout(Duration::from_secs(15 * 60)),
+            15 * limits.fuel
+        );
+    }
+
+    #[test]
+    fn fuel_budget_saturates_instead_of_wrapping() {
+        let limits = WasmLimits {
+            fuel: u64::MAX,
+            ..WasmLimits::default()
+        };
+        assert_eq!(
+            limits.fuel_for_timeout(Duration::from_secs(2 * 60)),
+            u64::MAX
+        );
     }
 }

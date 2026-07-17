@@ -199,6 +199,23 @@ pub(super) struct SharedWasmExecutor {
     inner: Arc<Mutex<WasmExecutor>>,
     adapters: CapabilityAdapters,
     contextual_inputs: BTreeMap<String, String>,
+    fuel_multiplier: u64,
+}
+
+pub(super) const GITHUB_ACTIONS_FRONTEND_ID: &str = "runtrue.github-actions";
+pub(super) const GITHUB_ACTIONS_FUEL_MULTIPLIER: u64 = 4;
+
+pub(super) fn fuel_multiplier_for_capsule(capsule: &ExecutionCapsule) -> u64 {
+    if capsule
+        .context
+        .workflow_frontend
+        .as_ref()
+        .is_some_and(|frontend| frontend.frontend_id == GITHUB_ACTIONS_FRONTEND_ID)
+    {
+        GITHUB_ACTIONS_FUEL_MULTIPLIER
+    } else {
+        1
+    }
 }
 
 impl SharedWasmExecutor {
@@ -207,6 +224,7 @@ impl SharedWasmExecutor {
             inner: Arc::new(Mutex::new(executor)),
             adapters: CapabilityAdapters::new(),
             contextual_inputs: BTreeMap::new(),
+            fuel_multiplier: 1,
         }
     }
 
@@ -215,10 +233,12 @@ impl SharedWasmExecutor {
             inner: self.inner.clone(),
             adapters,
             contextual_inputs: self.contextual_inputs.clone(),
+            fuel_multiplier: self.fuel_multiplier,
         }
     }
 
     fn with_capsule_context(mut self, capsule: &ExecutionCapsule) -> Result<Self, RunnerError> {
+        self.fuel_multiplier = fuel_multiplier_for_capsule(capsule);
         if let Some(event) = &capsule.context.normalized_event_json {
             self.contextual_inputs
                 .insert("__runtrue_event".to_owned(), event.clone());
@@ -275,10 +295,18 @@ impl Executor for SharedWasmExecutor {
         if let PreparedAction::Component { inputs, .. } = &mut request.action {
             inputs.extend(self.contextual_inputs.clone());
         }
-        self.inner
+        let (output, diagnostic) = self
+            .inner
             .lock()
             .map_err(|_| ExecutorError::Spawn("Wasm executor state is poisoned".to_owned()))?
-            .execute_with_adapters(&request, &self.adapters)
+            .execute_with_adapters_and_diagnostic(&request, &self.adapters, self.fuel_multiplier)?;
+        if let Some(diagnostic) = diagnostic {
+            eprintln!(
+                "runtrue-runner: WASM runtime failure for job {} step {} attempt {}: {diagnostic}",
+                request.job_id, request.step_id, request.job_attempt
+            );
+        }
+        Ok(output)
     }
 
     fn finish_job_attempt(

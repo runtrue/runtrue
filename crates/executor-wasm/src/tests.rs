@@ -381,6 +381,10 @@ fn infinite_loop_is_stopped_by_fuel() {
     assert_eq!(output.executor.exit_code, Some(1));
     assert!(!output.executor.timed_out);
     assert!(output.executor.stderr.contains("fuel exhausted"));
+    assert_eq!(
+        output.runtime_diagnostic.as_deref(),
+        Some("component fuel exhausted")
+    );
 }
 
 #[test]
@@ -398,6 +402,10 @@ fn infinite_loop_is_stopped_by_epoch_wall_timeout() {
     assert!(output.executor.timed_out);
     assert!(!output.executor.canceled);
     assert_eq!(output.executor.exit_code, None);
+    assert_eq!(
+        output.runtime_diagnostic.as_deref(),
+        Some("component timed out")
+    );
 }
 
 #[test]
@@ -744,6 +752,7 @@ fn executor_trait_retains_canonical_component_output() {
     let output = into_executor_output(WasmExecutionOutput {
         executor: ExecutorOutput::success(),
         component_output: Some(r#"{"answer":42}"#.to_owned()),
+        runtime_diagnostic: None,
         aot_cache_status: AotCacheStatus::Miss,
     });
     assert_eq!(
