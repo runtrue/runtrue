@@ -286,10 +286,12 @@ svg { display: block; }
 .identity-page { max-width: 1240px; display: grid; gap: var(--space-5); }
 .identity-page[hidden] { display: none; }
 .identity-page > .page-heading { margin-bottom: var(--space-2); }
+.identity-page > .page-heading h1 { margin-bottom: 0; }
 .identity-section-heading { align-items: center; margin-bottom: var(--space-5); }
 .identity-title-row { display: flex; align-items: center; gap: var(--space-3); }
 .identity-title-row h2 { margin-bottom: 0; }
 .identity-heading-actions { display: flex; align-items: center; gap: var(--space-3); }
+.identity-heading-actions > .btn { flex: 0 0 auto; white-space: nowrap; }
 .team-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-4); }
 .team-card { min-width: 0; padding: var(--space-5); border: 1px solid var(--border); border-radius: var(--radius-sm); display: grid; gap: var(--space-5); background: var(--bg); }
 .team-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }

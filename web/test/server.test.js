@@ -270,19 +270,24 @@ test("audit events expose search and structured filters", async () => {
   assert.match(script, /result === "all" \|\| event\.result === result/);
 });
 
-test("identity administration exposes team and user management controls", async () => {
-  const [html, script] = await Promise.all([
+test("identity administration exposes concise, responsive team and user management controls", async () => {
+  const [html, script, styles] = await Promise.all([
     readFile(new URL("../public/index.html", import.meta.url), "utf8"),
     readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
   ]);
 
   assert.match(html, /data-view="identity"/);
   assert.match(html, /Users &amp; teams/);
   assert.match(html, /id="open-create-user"/);
+  assert.doesNotMatch(html, /Manage directory users and organize policy access/);
+  assert.doesNotMatch(html, /id="identity-user-count"/);
   assert.match(html, /No UI access is granted/);
   assert.match(html, /id="team-member-picker"/);
   assert.match(script, /fetch\("\/api\/v1\/ui\/identity"/);
   assert.match(script, /identityMutation\("\/api\/v1\/ui\/users"/);
+  assert.match(script, /endsWith\("@github\.invalid"\)/);
+  assert.match(styles, /\.identity-heading-actions > \.btn \{[^}]*flex: 0 0 auto;[^}]*white-space: nowrap;/);
   assert.match(script, /function saveTeam\(event\)/);
   assert.match(script, /function saveUser\(event\)/);
 });

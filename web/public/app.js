@@ -65,6 +65,10 @@
     return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
   };
   const shortRef = (value) => String(value || "").replace(/^refs\/(heads|tags)\//, "");
+  const presentableEmail = (user) => {
+    const email = String(user?.primary_email || "").trim();
+    return email && !email.toLowerCase().endsWith("@github.invalid") ? email : "";
+  };
 
   function runEventLabel(run) {
     const source = run.source || {};
@@ -289,7 +293,6 @@
   function renderIdentity() {
     const identity = state.identity || { users: [], teams: [] };
     const teamById = new Map(identity.teams.map((team) => [team.id, team]));
-    byId("identity-user-count").textContent = `${identity.users.length} user${identity.users.length === 1 ? "" : "s"}`;
     const activeTeams = identity.teams.filter((team) => team.status === "active").length;
     byId("identity-team-count").textContent = `${activeTeams} active`;
     byId("team-list").innerHTML = identity.teams.map((team) => {
@@ -304,7 +307,9 @@
     byId("identity-users-body").innerHTML = users.map((user) => {
       const teams = user.team_ids.map((id) => teamById.get(id)).filter(Boolean);
       const lastSeen = user.last_seen_at ? escapeHtml(formatDate(user.last_seen_at)) : `<span class="muted-cell">Never</span>`;
-      return `<tr><td><strong>${escapeHtml(user.display_name)}</strong><small>${escapeHtml(user.primary_email)} · <span class="mono">${escapeHtml(user.id)}</span></small></td><td><span class="scope-list">${teams.map((team) => `<span class="scope-chip">${escapeHtml(team.name)}</span>`).join("") || `<span class="muted-cell">No teams</span>`}</span></td><td>${lastSeen}</td><td><span class="state-badge ${tone(user.status)}">${escapeHtml(titleCase(user.status))}</span></td><td><button class="text-button" type="button" data-edit-user="${escapeHtml(user.id)}">Edit</button></td></tr>`;
+      const email = presentableEmail(user);
+      const userMeta = email ? `${escapeHtml(email)} · ` : "";
+      return `<tr><td><strong>${escapeHtml(user.display_name)}</strong><small>${userMeta}<span class="mono">${escapeHtml(user.id)}</span></small></td><td><span class="scope-list">${teams.map((team) => `<span class="scope-chip">${escapeHtml(team.name)}</span>`).join("") || `<span class="muted-cell">No teams</span>`}</span></td><td>${lastSeen}</td><td><span class="state-badge ${tone(user.status)}">${escapeHtml(titleCase(user.status))}</span></td><td><button class="text-button" type="button" data-edit-user="${escapeHtml(user.id)}">Edit</button></td></tr>`;
     }).join("");
     byId("identity-users-empty").hidden = users.length > 0;
     byId("identity-users-body").closest("table").hidden = users.length === 0;
@@ -350,7 +355,7 @@
     byId("team-status").value = team.status;
     byId("team-status-wrap").hidden = false;
     byId("team-members-field").hidden = false;
-    byId("team-member-picker").innerHTML = (state.identity?.users || []).map((user) => `<label><input type="checkbox" value="${escapeHtml(user.id)}" ${team.member_ids.includes(user.id) ? "checked" : ""}><span><strong>${escapeHtml(user.display_name)}</strong><small>${escapeHtml(user.primary_email)}</small></span></label>`).join("") || `<p class="muted-copy">No users are available.</p>`;
+    byId("team-member-picker").innerHTML = (state.identity?.users || []).map((user) => `<label><input type="checkbox" value="${escapeHtml(user.id)}" ${team.member_ids.includes(user.id) ? "checked" : ""}><span><strong>${escapeHtml(user.display_name)}</strong><small>${escapeHtml(presentableEmail(user) || user.id)}</small></span></label>`).join("") || `<p class="muted-copy">No users are available.</p>`;
     byId("team-dialog").showModal();
   }
 
