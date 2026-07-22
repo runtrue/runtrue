@@ -14,13 +14,13 @@ pub(super) use runtrue_compiler::{
     CompileContext, Compiler, ReusableWorkflowSource, ReusableWorkflowSources,
 };
 pub(super) use runtrue_control_plane::{
-    ArtifactCatalogRecord, ControlPlane, CreateRunRequest, DurableTaskStatus, HumanIdentityRecord,
-    HumanUserRecord, NewJob, R9AuditMetadata, RepositoryRecord, RunnerDataCommit,
-    RunnerDataCommitKind, RunnerPoolRecord, RunnerPoolStatus, SignedCapsuleRecord,
-    SourceSnapshotRecord, SourceSnapshotState, TenantIdentityRecord, TenantMembershipRecord,
-    TenantOidcProviderConfiguration, WorkflowFrontendReportRecord,
+    ArtifactCatalogRecord, ControlPlane, CreateRunRequest, DurableEventRecord, DurableEventSource,
+    DurableTaskStatus, HumanIdentityRecord, HumanUserRecord, NewJob, R9AuditMetadata,
+    RepositoryRecord, RunnerDataCommit, RunnerDataCommitKind, RunnerPoolRecord, RunnerPoolStatus,
+    SignedCapsuleRecord, SourceSnapshotRecord, SourceSnapshotState, TenantIdentityRecord,
+    TenantMembershipRecord, TenantOidcProviderConfiguration, WorkflowFrontendReportRecord,
 };
-pub(super) use runtrue_lifecycle::JobState;
+pub(super) use runtrue_lifecycle::{JobState, RunState};
 pub(super) use runtrue_lock::LockFile;
 pub(super) use runtrue_model::ContentDigest;
 pub(super) use runtrue_policy::{
@@ -29,9 +29,10 @@ pub(super) use runtrue_policy::{
 };
 pub(super) use runtrue_scheduler::{RunnerRecord, RunnerStatus, SchedulingRequirements};
 pub(super) use runtrue_scm::{
-    GitHubAccount, GitHubAccountKind, GitHubAppPublicConfig, GitHubError,
-    GitHubInstallationProvider, GitHubInstallationRepository, GitHubInstallationSnapshot,
-    GitHubPermission, GitHubPermissionLevel, GitHubRepositorySelection, GitHubRepositoryVisibility,
+    ActorIdentity, EventEnvelope, EventType, GitHubAccount, GitHubAccountKind,
+    GitHubAppPublicConfig, GitHubError, GitHubInstallationProvider, GitHubInstallationRepository,
+    GitHubInstallationSnapshot, GitHubPermission, GitHubPermissionLevel, GitHubRepositorySelection,
+    GitHubRepositoryVisibility, GitRevision, ProviderKind, RepositoryIdentity,
 };
 pub(super) use runtrue_server::{
     router, AppState, HumanOidcAdapter, HumanOidcError, HumanOidcLimits, VerifiedHumanIdentity,

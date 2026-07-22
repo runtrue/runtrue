@@ -1097,6 +1097,217 @@ async fn browser_run_detail_requires_a_session_and_returns_tenant_scoped_jobs() 
 }
 
 #[tokio::test]
+async fn browser_retry_queues_a_new_verified_scm_event_idempotently() {
+    let (control, oidc, _, _, application) = github_human_application();
+    let now = unix_ms_now();
+    control
+        .create_repository(&tenant_repository(
+            "repo-browser-retry",
+            "tenant-browser",
+            "browser-retry",
+        ))
+        .unwrap();
+
+    let mut webhook = EventEnvelope {
+        version: 1,
+        provider: ProviderKind::GitHub,
+        installation_id: "9001".to_owned(),
+        repository: RepositoryIdentity {
+            external_id: "77".to_owned(),
+            owner: "octo".to_owned(),
+            name: "browser-retry".to_owned(),
+            full_name: "octo/browser-retry".to_owned(),
+            private: true,
+            default_branch: Some("main".to_owned()),
+        },
+        event_id: "delivery-browser-retry".to_owned(),
+        event_type: EventType::Push,
+        actor: ActorIdentity {
+            external_id: "7".to_owned(),
+            login: "builder".to_owned(),
+            is_bot: false,
+        },
+        source: GitRevision {
+            commit: "a".repeat(40),
+            ref_name: Some("refs/heads/main".to_owned()),
+            repository_full_name: Some("octo/browser-retry".to_owned()),
+        },
+        base: None,
+        ref_name: Some("refs/heads/main".to_owned()),
+        pull_request: None,
+        issue_comment: None,
+        check_run: None,
+        changed_paths: vec!["src/main.rs".to_owned()],
+        received_unix_ms: now.saturating_sub(1_000),
+        raw_payload_digest: ContentDigest::sha256(b"original webhook bytes"),
+        normalized_digest: ContentDigest::sha256([]),
+    };
+    webhook.normalized_digest =
+        ContentDigest::sha256(webhook.canonical_normalized_bytes().unwrap());
+    webhook.verify(Default::default()).unwrap();
+
+    let mut capsule = execution_capsule();
+    capsule.context.source_commit = webhook.source.commit.clone();
+    capsule.context.normalized_event_digest = webhook.normalized_digest.clone();
+    capsule.context.normalized_event_json = Some(serde_json::to_string(&webhook).unwrap());
+    let signing_key = CapsuleSigningKey::from_seed([43_u8; 32]);
+    let signature = signing_key.sign_capsule(&capsule).unwrap();
+    control
+        .store_signed_capsule(
+            &SignedCapsuleRecord {
+                id: "capsule-browser-retry".to_owned(),
+                repository_id: "repo-browser-retry".to_owned(),
+                digest: signature.capsule_digest.clone(),
+                canonical_capsule: capsule.canonical_bytes().unwrap(),
+                signature,
+                created_unix_ms: webhook.received_unix_ms,
+            },
+            &signing_key.verifying_key(),
+        )
+        .unwrap();
+
+    let provider_digest = ContentDigest::sha256(webhook.event_id.as_bytes());
+    let suffix = provider_digest.as_str().trim_start_matches("sha256:");
+    let original_payload =
+        runtrue_workflow_ir::canonicalize_value(serde_json::to_value(&webhook).unwrap());
+    let original_event = DurableEventRecord {
+        id: format!("event-scm-github-{suffix}"),
+        tenant_id: "tenant-browser".to_owned(),
+        source: DurableEventSource::Backend,
+        kind: "github.push.push".to_owned(),
+        handler_kind: "scm.event".to_owned(),
+        payload_digest: ContentDigest::sha256(serde_json::to_vec(&original_payload).unwrap()),
+        payload: original_payload,
+        idempotency_identity: webhook.event_id.clone(),
+        actor_identity: webhook.actor.login.clone(),
+        task_id: format!("scm-github-{suffix}"),
+        created_unix_ms: webhook.received_unix_ms,
+    };
+    control.record_event(&original_event).unwrap();
+    let original_task = control
+        .claim_task_by_kind("retry-fixture", "scm.event", now, 1_000)
+        .unwrap()
+        .unwrap();
+    control
+        .complete_task(&original_task.id, "retry-fixture", now + 1)
+        .unwrap();
+    store_tenant_run(
+        &control,
+        "repo-browser-retry",
+        "capsule-browser-retry",
+        "run-browser-retry",
+        "job-browser-retry",
+    );
+    control
+        .transition_run_state("run-browser-retry", RunState::Failed, now + 2)
+        .unwrap();
+
+    let anonymous = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/ui/runs/run-browser-retry/retry")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "csrf_token=anonymous&idempotency_key=retry-browser-1",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+    let (login_cookie, oidc_state, nonce) = begin_human_login(&application).await;
+    oidc.respond(&nonce, "subject-browser");
+    let login = finish_human_login(&application, &login_cookie, &oidc_state).await;
+    let cookies = browser_cookie_header(&login);
+    let dashboard = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/ui/github")
+                .header("cookie", &cookies)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dashboard.status(), StatusCode::OK);
+    let dashboard = json_body(dashboard).await;
+    let retry_run = dashboard["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|run| run["id"] == "run-browser-retry")
+        .unwrap();
+    assert_eq!(retry_run["canRetry"], true);
+    let session = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/session")
+                .header("cookie", &cookies)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let csrf = json_body(session).await["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let retry_body = format!("csrf_token={csrf}&idempotency_key=retry-browser-1");
+    let retry_request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/ui/runs/run-browser-retry/retry")
+            .header("cookie", &cookies)
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(retry_body.clone()))
+            .unwrap()
+    };
+
+    let queued = application.clone().oneshot(retry_request()).await.unwrap();
+    assert_eq!(queued.status(), StatusCode::ACCEPTED);
+    assert_eq!(queued.headers()["cache-control"], "no-store");
+    let queued = json_body(queued).await;
+    assert_eq!(queued["retryOf"], "run-browser-retry");
+    assert_eq!(queued["replayed"], false);
+    let retry_event_id = queued["eventId"].as_str().unwrap();
+    assert_ne!(retry_event_id, original_event.id);
+    let retry_event = control.event(retry_event_id).unwrap();
+    assert_eq!(retry_event.source, DurableEventSource::Frontend);
+    assert_eq!(retry_event.kind, "github.push.push.retry");
+    assert_eq!(retry_event.handler_kind, "scm.event");
+    assert_eq!(
+        control.task(&retry_event.task_id).unwrap().status,
+        DurableTaskStatus::Pending
+    );
+    let replayed_webhook: EventEnvelope = serde_json::from_value(retry_event.payload).unwrap();
+    replayed_webhook.verify(Default::default()).unwrap();
+    assert!(replayed_webhook.event_id.starts_with("retry-"));
+    assert_ne!(replayed_webhook.event_id, webhook.event_id);
+    assert_ne!(
+        replayed_webhook.normalized_digest,
+        webhook.normalized_digest
+    );
+    assert_eq!(replayed_webhook.source, webhook.source);
+    assert_eq!(
+        replayed_webhook.raw_payload_digest,
+        webhook.raw_payload_digest
+    );
+    assert!(replayed_webhook.received_unix_ms >= webhook.received_unix_ms);
+
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let duplicate = application.oneshot(retry_request()).await.unwrap();
+    assert_eq!(duplicate.status(), StatusCode::ACCEPTED);
+    let duplicate = json_body(duplicate).await;
+    assert_eq!(duplicate["eventId"], retry_event_id);
+    assert_eq!(duplicate["replayed"], true);
+}
+
+#[tokio::test]
 async fn github_webhook_rejects_bad_hmac_and_durably_deduplicates_valid_delivery() {
     let (control_plane, application) = application(Some(WEBHOOK_SECRET));
     control_plane

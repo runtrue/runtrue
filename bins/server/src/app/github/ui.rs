@@ -27,13 +27,16 @@ use axum::response::Response;
 use axum::Json;
 use runtrue_auth::AuthContext;
 use runtrue_control_plane::{
-    GitHubAccountKind, GitHubRepositorySelection, LinkSelectedGitHubRepository, RepositoryRecord,
+    ControlPlaneError, DurableEventRecord, DurableEventSource, GitHubAccountKind,
+    GitHubRepositorySelection, LinkSelectedGitHubRepository, RepositoryRecord,
     SecretMetadataReference,
 };
+use runtrue_model::ContentDigest;
 use runtrue_policy::{
     ApprovalDecision, ApprovalKind, ApprovalRequest, CedarAction, CedarResource, CedarResourceKind,
     Decision,
 };
+use runtrue_scm::{EventEnvelope, ProviderKind};
 use runtrue_secrets::SecretPlaintext;
 use runtrue_workflow_ir::ExecutionCapsule;
 use serde::Deserialize;
@@ -2007,6 +2010,224 @@ pub(in crate::app) async fn browser_run_detail(
     response
 }
 
+pub(in crate::app) async fn browser_retry_run(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(_) => return invalid_object_problem(&request_id, "invalid run retry form"),
+    };
+    let presented_csrf = match browser_csrf_input(&request_id, &headers, Ok(body.clone())) {
+        Ok(token) => token,
+        Err(response) => return *response,
+    };
+    let idempotency_key = match form_value(&body, "idempotency_key") {
+        Ok(Some(value)) if !value.is_empty() => value,
+        _ => return invalid_object_problem(&request_id, "invalid run retry idempotency key"),
+    };
+    let now = match now_unix_ms(&request_id) {
+        Ok(now) => now,
+        Err(response) => return response,
+    };
+    let (context, _, _) = match authenticated_browser_session(
+        &state,
+        &request_id,
+        &headers,
+        SCM_WRITE_SCOPE,
+        Some(&presented_csrf),
+        now,
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(response) => return *response,
+    };
+    let run = match state.store.run(&run_id).await {
+        Ok(run) => run,
+        Err(error) => return control_plane_problem(&request_id, error),
+    };
+    let repository = match state.store.repository(&run.repository_id).await {
+        Ok(repository) => repository,
+        Err(error) => return control_plane_problem(&request_id, error),
+    };
+    if repository.tenant_id != context.tenant_id {
+        return problem_response(
+            &request_id,
+            StatusCode::NOT_FOUND,
+            "Run not found",
+            "the requested run was not found",
+        );
+    }
+    if !run.remote || !run.status.is_terminal() {
+        return problem_response(
+            &request_id,
+            StatusCode::CONFLICT,
+            "Run cannot be retried",
+            "only completed remote runs can be retried",
+        );
+    }
+    let signed_capsule = match state.store.signed_capsule(&run.capsule_id).await {
+        Ok(capsule) => capsule,
+        Err(error) => return control_plane_problem(&request_id, error),
+    };
+    if signed_capsule.repository_id != repository.id {
+        return internal_problem(&request_id);
+    }
+    let capsule: ExecutionCapsule = match serde_json::from_slice(&signed_capsule.canonical_capsule)
+    {
+        Ok(capsule) => capsule,
+        Err(_) => return internal_problem(&request_id),
+    };
+    let Some(mut retry_envelope) = browser_scm_event(&capsule) else {
+        return problem_response(
+            &request_id,
+            StatusCode::CONFLICT,
+            "Run cannot be retried",
+            "only runs created from a verified GitHub webhook can be retried",
+        );
+    };
+    if retry_envelope.repository.owner != repository.owner
+        || retry_envelope.repository.name != repository.name
+        || retry_envelope.repository.full_name
+            != format!("{}/{}", repository.owner, repository.name)
+    {
+        return problem_response(
+            &request_id,
+            StatusCode::CONFLICT,
+            "Run cannot be retried",
+            "the original webhook repository binding does not match this run",
+        );
+    }
+    let original_event_id = durable_scm_event_id(&retry_envelope.event_id);
+    let original_event = match state.store.event(&original_event_id).await {
+        Ok(event) => event,
+        Err(ControlPlaneError::NotFound { .. }) => {
+            return problem_response(
+                &request_id,
+                StatusCode::CONFLICT,
+                "Run cannot be retried",
+                "the original verified webhook event is no longer available",
+            )
+        }
+        Err(error) => return control_plane_problem(&request_id, error),
+    };
+    let original_payload = match serde_json::to_value(&retry_envelope) {
+        Ok(payload) => runtrue_workflow_ir::canonicalize_value(payload),
+        Err(_) => return internal_problem(&request_id),
+    };
+    let original_payload_digest = match serde_json::to_vec(&original_payload) {
+        Ok(payload) => ContentDigest::sha256(payload),
+        Err(_) => return internal_problem(&request_id),
+    };
+    if original_event.tenant_id != context.tenant_id
+        || original_event.handler_kind != "scm.event"
+        || original_event.idempotency_identity != retry_envelope.event_id
+        || original_event.payload != original_payload
+        || original_event.payload_digest != original_payload_digest
+    {
+        return problem_response(
+            &request_id,
+            StatusCode::CONFLICT,
+            "Run cannot be retried",
+            "the original webhook event does not match the signed run context",
+        );
+    }
+    if let Err(response) = authorize_browser_resource(
+        &state,
+        &request_id,
+        &context,
+        CedarAction::ReplayEvent,
+        browser_event_resource(&context, &original_event.id, &repository.id),
+    )
+    .await
+    {
+        return *response;
+    }
+
+    let retry_identity = ContentDigest::sha256(
+        format!(
+            "runtrue.browser.run.retry.v1\0{}\0{}\0{}\0{}\0{}",
+            context.tenant_id, run.id, original_event.id, context.principal_id, idempotency_key,
+        )
+        .as_bytes(),
+    );
+    let retry_suffix = retry_identity.as_str().trim_start_matches("sha256:");
+    retry_envelope.event_id = format!("retry-{retry_suffix}");
+    retry_envelope.received_unix_ms = now;
+    retry_envelope.normalized_digest = match retry_envelope.canonical_normalized_bytes() {
+        Ok(bytes) => ContentDigest::sha256(bytes),
+        Err(_) => return internal_problem(&request_id),
+    };
+    if retry_envelope.verify(Default::default()).is_err() {
+        return internal_problem(&request_id);
+    }
+    let retry_payload = match serde_json::to_value(&retry_envelope) {
+        Ok(payload) => runtrue_workflow_ir::canonicalize_value(payload),
+        Err(_) => return internal_problem(&request_id),
+    };
+    let retry_payload_digest = match serde_json::to_vec(&retry_payload) {
+        Ok(payload) => ContentDigest::sha256(payload),
+        Err(_) => return internal_problem(&request_id),
+    };
+    let event_id = durable_scm_event_id(&retry_envelope.event_id);
+    let event_digest = ContentDigest::sha256(retry_envelope.event_id.as_bytes());
+    let task_id = format!(
+        "scm-github-{}",
+        event_digest.as_str().trim_start_matches("sha256:")
+    );
+    let retry_event = DurableEventRecord {
+        id: event_id,
+        tenant_id: context.tenant_id.clone(),
+        source: DurableEventSource::Frontend,
+        kind: format!("{}.retry", original_event.kind),
+        handler_kind: "scm.event".to_owned(),
+        payload: retry_payload,
+        payload_digest: retry_payload_digest,
+        idempotency_identity: retry_envelope.event_id.clone(),
+        actor_identity: context.principal_id.clone(),
+        task_id,
+        created_unix_ms: now,
+    };
+    let (queued, replayed) = match state.store.record_event(&retry_event).await {
+        Ok(result) => (result.value, result.replayed),
+        Err(ControlPlaneError::IdempotencyConflict) => {
+            let existing = match state.store.event(&retry_event.id).await {
+                Ok(existing) => existing,
+                Err(error) => return control_plane_problem(&request_id, error),
+            };
+            if !equivalent_browser_retry(&existing, &retry_event, &retry_envelope) {
+                return problem_response(
+                    &request_id,
+                    StatusCode::CONFLICT,
+                    "Run retry conflict",
+                    "the retry idempotency key was already used for different event data",
+                );
+            }
+            (existing, true)
+        }
+        Err(error) => return control_plane_problem(&request_id, error),
+    };
+    let mut response = (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "eventId": queued.id,
+            "taskId": queued.task_id,
+            "retryOf": run.id,
+            "replayed": replayed,
+        })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    protect_sensitive_response(&mut response);
+    response
+}
+
 async fn browser_dashboard_sections(
     state: &AppState,
     request_id: &RequestId,
@@ -2016,6 +2237,10 @@ async fn browser_dashboard_sections(
     let can_view_runs = authorize_browser_tenant(state, request_id, context, CedarAction::ViewRun)
         .await
         .is_ok();
+    let can_retry_runs =
+        authorize_browser_tenant(state, request_id, context, CedarAction::ReplayEvent)
+            .await
+            .is_ok();
     let can_view_approvals =
         authorize_browser_tenant(state, request_id, context, CedarAction::ApproveWorkflow)
             .await
@@ -2093,6 +2318,10 @@ async fn browser_dashboard_sections(
                     .get(&record.repository_id)
                     .map(String::as_str),
             );
+            let can_retry = can_retry_runs
+                && record.remote
+                && record.status.is_terminal()
+                && browser_scm_event(&capsule).is_some();
             browser_runs.push(json!({
                 "id": record.id,
                 "repositoryId": record.repository_id,
@@ -2109,6 +2338,7 @@ async fn browser_dashboard_sections(
                 "startedAt": record.started_unix_ms.map(timestamp).transpose().map_err(|()| internal_problem(request_id))?,
                 "completedAt": record.completed_unix_ms.map(timestamp).transpose().map_err(|()| internal_problem(request_id))?,
                 "cancelReason": record.cancel_reason,
+                "canRetry": can_retry,
                 "source": source,
             }));
         }
@@ -2483,6 +2713,83 @@ fn browser_run_source(capsule: &ExecutionCapsule, repository_url: Option<&str>) 
         "url": source_url,
         "jobCount": capsule.jobs.len(),
     })
+}
+
+fn browser_scm_event(capsule: &ExecutionCapsule) -> Option<EventEnvelope> {
+    let event =
+        serde_json::from_str::<EventEnvelope>(capsule.context.normalized_event_json.as_deref()?)
+            .ok()?;
+    if event.provider != ProviderKind::GitHub {
+        return None;
+    }
+    event.verify(Default::default()).ok()?;
+    if event.normalized_digest != capsule.context.normalized_event_digest {
+        return None;
+    }
+    Some(event)
+}
+
+fn durable_scm_event_id(provider_event_id: &str) -> String {
+    let digest = ContentDigest::sha256(provider_event_id.as_bytes());
+    format!(
+        "event-scm-github-{}",
+        digest.as_str().trim_start_matches("sha256:")
+    )
+}
+
+fn browser_event_resource(
+    context: &AuthContext,
+    event_id: &str,
+    repository_id: &str,
+) -> CedarResource {
+    CedarResource {
+        kind: CedarResourceKind::Event,
+        id: event_id.to_owned(),
+        tenant_id: context.tenant_id.clone(),
+        repository_id: Some(repository_id.to_owned()),
+        author_id: None,
+        risk_score: 0,
+        privileged: false,
+        untrusted: false,
+    }
+}
+
+fn equivalent_browser_retry(
+    existing: &DurableEventRecord,
+    requested: &DurableEventRecord,
+    requested_envelope: &EventEnvelope,
+) -> bool {
+    if existing.id != requested.id
+        || existing.tenant_id != requested.tenant_id
+        || existing.source != requested.source
+        || existing.kind != requested.kind
+        || existing.handler_kind != requested.handler_kind
+        || existing.idempotency_identity != requested.idempotency_identity
+        || existing.actor_identity != requested.actor_identity
+        || existing.task_id != requested.task_id
+    {
+        return false;
+    }
+    let Ok(existing_envelope) = serde_json::from_value::<EventEnvelope>(existing.payload.clone())
+    else {
+        return false;
+    };
+    if existing_envelope.verify(Default::default()).is_err() {
+        return false;
+    }
+    let mut expected = requested_envelope.clone();
+    expected.received_unix_ms = existing_envelope.received_unix_ms;
+    let Ok(normalized) = expected.canonical_normalized_bytes() else {
+        return false;
+    };
+    expected.normalized_digest = ContentDigest::sha256(normalized);
+    if existing_envelope != expected {
+        return false;
+    }
+    serde_json::to_vec(&runtrue_workflow_ir::canonicalize_value(
+        existing.payload.clone(),
+    ))
+    .is_ok_and(|payload| ContentDigest::sha256(payload) == existing.payload_digest)
 }
 
 pub(in crate::app) async fn start_github_installation_from_ui(

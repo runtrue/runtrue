@@ -542,8 +542,6 @@ svg { display: block; }
 .run-source-link:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .run-source-link svg { flex: 0 0 auto; color: var(--muted); }
 .run-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--space-1); white-space: nowrap; }
-.retry-placeholder { display: inline-flex; }
-.retry-placeholder .btn { min-height: 32px; padding: 4px var(--space-3); font-size: var(--text-xs); }
 .state-badge { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--muted); font-size: var(--text-xs); font-weight: 600; white-space: nowrap; }
 .state-badge::before { content: ""; width: 7px; height: 7px; border-radius: var(--radius-pill); background: currentColor; }
 .state-badge.success { color: var(--success); }

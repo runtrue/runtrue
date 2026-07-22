@@ -3,7 +3,7 @@ use crate::app::{
     begin_github_oauth_login, begin_human_oidc_login, browser_change_team_member,
     browser_create_team, browser_create_user, browser_decide_workflow_approval, browser_identity,
     browser_organization_settings, browser_policy_page, browser_policy_status,
-    browser_repository_settings, browser_run_detail, browser_secret_inventory,
+    browser_repository_settings, browser_retry_run, browser_run_detail, browser_secret_inventory,
     browser_session_page, browser_session_status, browser_update_team, browser_update_user,
     cancel_run, create_api_token, create_artifact_download_ticket, create_capsule,
     create_enrollment_token, create_fixed_update_claim, create_github_setup, create_policy_version,
@@ -331,6 +331,7 @@ pub fn router(state: AppState) -> Router {
                 get(browser_organization_settings),
             )
             .route("/api/v1/ui/runs/:run_id", get(browser_run_detail))
+            .route("/api/v1/ui/runs/:run_id/retry", post(browser_retry_run))
             .route(
                 "/api/v1/ui/repositories/:repository_id/settings",
                 get(browser_repository_settings),

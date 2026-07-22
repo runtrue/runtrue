@@ -27,6 +27,7 @@
     identityLoading: false,
     activeTeamId: null,
     activeUserId: null,
+    retryingRuns: new Set(),
     pendingScopedSecretDelete: null,
     settingScope: null,
     settingKind: null,
@@ -119,7 +120,10 @@
   }
 
   function runActionsMarkup(run) {
-    return `<div class="run-actions"><span class="retry-placeholder" title="Retry support is coming soon"><button class="btn btn-secondary btn-inline btn-compact" type="button" disabled aria-label="Retry ${escapeHtml(run.source?.workflowName || "workflow run")}">Retry</button></span><button class="text-button run-open-button" type="button" data-open-run="${escapeHtml(run.id)}">Details <span aria-hidden="true">→</span></button></div>`;
+    const queued = state.retryingRuns.has(run.id);
+    const unavailable = !run.canRetry || queued;
+    const title = queued ? "Retry queued" : run.canRetry ? "" : "Retry is available for completed GitHub event runs";
+    return `<div class="run-actions"><button class="btn btn-secondary btn-inline btn-compact" type="button" data-retry-run="${escapeHtml(run.id)}" ${unavailable ? "disabled" : ""} ${title ? `title="${escapeHtml(title)}"` : ""} aria-label="Retry ${escapeHtml(run.source?.workflowName || "workflow run")}">${queued ? "Queued" : "Retry"}</button><button class="text-button run-open-button" type="button" data-open-run="${escapeHtml(run.id)}">Details <span aria-hidden="true">→</span></button></div>`;
   }
 
   function initials(name) {
@@ -934,6 +938,11 @@
     byId("run-log-filter-wrap").hidden = options.length < 2;
     byId("run-logs-copy").textContent = `${detail.logs.length} ${detail.logs.length === 1 ? "entry" : "entries"}`;
     byId("run-logs-truncated").hidden = !detail.logsTruncated;
+    const retry = byId("retry-run");
+    const retryQueued = state.retryingRuns.has(run.id);
+    retry.disabled = !run.canRetry || retryQueued;
+    retry.textContent = retryQueued ? "Retry queued" : "Retry run";
+    retry.title = retryQueued ? "Retry queued" : run.canRetry ? "" : "Retry is available for completed GitHub event runs";
     renderRunLogs();
     byId("run-detail-loading").hidden = true;
     byId("run-detail-error").hidden = true;
@@ -962,6 +971,41 @@
       byId("run-detail-content").hidden = true;
       byId("run-detail-error-copy").textContent = error.message || "Could not load run.";
       byId("run-detail-error").hidden = false;
+    }
+  }
+
+  async function retryRun(id, button) {
+    const run = (state.data.runs || []).find((item) => item.id === id);
+    if (!run?.canRetry || state.retryingRuns.has(id)) return;
+    const originalText = button?.textContent || "Retry";
+    if (button) {
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.textContent = "Queuing…";
+    }
+    try {
+      const body = new URLSearchParams({
+        csrf_token: state.data.session.csrfToken,
+        idempotency_key: crypto.randomUUID(),
+      });
+      const response = await fetch(`/api/v1/ui/runs/${encodeURIComponent(id)}/retry`, { method: "POST", body, credentials: "same-origin", headers: { accept: "application/json" } });
+      if (!response.ok) {
+        const problem = await response.json().catch(() => ({}));
+        throw new Error(problem.detail || (response.status === 403 ? "You are not authorized to retry this run." : "The run could not be retried."));
+      }
+      state.retryingRuns.add(id);
+      renderRuns();
+      if (state.activeRepository) renderRepositoryRuns((state.data.runs || []).filter((item) => item.repositoryId === state.activeRepository.id));
+      if (state.activeRunId === id && state.activeRunDetails) renderRunDetail(run, state.activeRunDetails);
+      showToast("Retry queued from the original GitHub event. A new run will appear shortly.");
+    } catch (error) {
+      showToast(error.message || "The run could not be retried.");
+      if (button) {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    } finally {
+      if (button) button.removeAttribute("aria-busy");
     }
   }
 
@@ -1480,7 +1524,7 @@
     byId("identity-user-search").addEventListener("input", renderIdentity);
     document.querySelectorAll("[data-view-target]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.viewTarget)));
     byId("catalog-content").addEventListener("click", (event) => { const button = event.target.closest("[data-open-repository]"); if (button) openRepository(button.dataset.openRepository); });
-    document.addEventListener("click", (event) => { const run = event.target.closest("[data-open-run]"); const approval = event.target.closest("[data-open-approval]"); const token = event.target.closest("[data-open-token]"); const secret = event.target.closest("[data-edit-secret]"); const scopedSecret = event.target.closest("[data-edit-scoped-secret]"); const scopedDelete = event.target.closest("[data-delete-scoped-secret]"); const project = event.target.closest("[data-edit-secret-project]"); const deleteSetting = event.target.closest("[data-delete-setting]"); const variable = event.target.closest("[data-edit-variable]"); const team = event.target.closest("[data-edit-team]"); const user = event.target.closest("[data-edit-user]"); if (run) openRun(run.dataset.openRun); if (approval) openApproval(approval.dataset.openApproval); if (token) openToken(token.dataset.openToken); if (secret) openSetting(secret.dataset.settingScope || "repository", "secret", secret.dataset.editSecret); if (scopedSecret) openScopedSecret(scopedSecret.dataset.editScopedSecret, scopedSecret.dataset.secretScopeKind, scopedSecret.dataset.secretScopeId); if (scopedDelete) openScopedSecretDelete(scopedDelete.dataset.deleteScopedSecret, scopedDelete.dataset.secretScopeKind, scopedDelete.dataset.secretScopeId); if (project) openSecretProject(project.dataset.editSecretProject); if (deleteSetting) openDeleteSetting(deleteSetting.dataset.deleteSetting, deleteSetting.dataset.settingName, deleteSetting.dataset.settingScope || "repository"); if (variable) openSetting(variable.dataset.settingScope || "repository", "variable", variable.dataset.editVariable); if (team) openEditTeam(team.dataset.editTeam); if (user) openEditUser(user.dataset.editUser); });
+    document.addEventListener("click", (event) => { const run = event.target.closest("[data-open-run]"); const retry = event.target.closest("[data-retry-run]"); const approval = event.target.closest("[data-open-approval]"); const token = event.target.closest("[data-open-token]"); const secret = event.target.closest("[data-edit-secret]"); const scopedSecret = event.target.closest("[data-edit-scoped-secret]"); const scopedDelete = event.target.closest("[data-delete-scoped-secret]"); const project = event.target.closest("[data-edit-secret-project]"); const deleteSetting = event.target.closest("[data-delete-setting]"); const variable = event.target.closest("[data-edit-variable]"); const team = event.target.closest("[data-edit-team]"); const user = event.target.closest("[data-edit-user]"); if (run) openRun(run.dataset.openRun); if (retry) retryRun(retry.dataset.retryRun, retry); if (approval) openApproval(approval.dataset.openApproval); if (token) openToken(token.dataset.openToken); if (secret) openSetting(secret.dataset.settingScope || "repository", "secret", secret.dataset.editSecret); if (scopedSecret) openScopedSecret(scopedSecret.dataset.editScopedSecret, scopedSecret.dataset.secretScopeKind, scopedSecret.dataset.secretScopeId); if (scopedDelete) openScopedSecretDelete(scopedDelete.dataset.deleteScopedSecret, scopedDelete.dataset.secretScopeKind, scopedDelete.dataset.secretScopeId); if (project) openSecretProject(project.dataset.editSecretProject); if (deleteSetting) openDeleteSetting(deleteSetting.dataset.deleteSetting, deleteSetting.dataset.settingName, deleteSetting.dataset.settingScope || "repository"); if (variable) openSetting(variable.dataset.settingScope || "repository", "variable", variable.dataset.editVariable); if (team) openEditTeam(team.dataset.editTeam); if (user) openEditUser(user.dataset.editUser); });
     byId("back-to-repositories").addEventListener("click", () => switchView("repositories"));
     document.querySelectorAll("[data-repository-section]").forEach((button) => button.addEventListener("click", () => setRepositorySection(button.dataset.repositorySection)));
     byId("refresh-repository-runs").addEventListener("click", refreshRepositoryRuns);
@@ -1490,6 +1534,7 @@
     byId("org-search").addEventListener("input", renderOrganizations); byId("repo-search").addEventListener("input", renderRepositoryChoices);
     byId("run-log-filter").addEventListener("change", renderRunLogs);
     byId("retry-run-detail").addEventListener("click", () => { if (state.activeRunId) openRun(state.activeRunId); });
+    byId("retry-run").addEventListener("click", (event) => { if (state.activeRunId) retryRun(state.activeRunId, event.currentTarget); });
     const closeRunDetail = () => { state.activeRunId = null; state.activeRunDetails = null; byId("run-detail-dialog").close(); };
     byId("close-run-detail").addEventListener("click", closeRunDetail); byId("dismiss-run-detail").addEventListener("click", closeRunDetail);
     byId("run-detail-dialog").addEventListener("close", () => { state.activeRunId = null; state.activeRunDetails = null; });

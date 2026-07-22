@@ -147,7 +147,9 @@ test("browser script references existing unique controls", async () => {
   assert.match(script, /history\[replace \? "replaceState" : "pushState"\]/);
   assert.match(script, /function refreshRepositoryRuns\(\)/);
   assert.match(script, /"organization", "secrets", "github"/);
-  assert.match(script, /Retry support is coming soon/);
+  assert.match(script, /function retryRun\(id, button\)/);
+  assert.match(script, /\/api\/v1\/ui\/runs\/\$\{encodeURIComponent\(id\)\}\/retry/);
+  assert.doesNotMatch(script, /Retry support is coming soon/);
   assert.match(script, /\/api\/v1\/ui\/repositories\//);
   assert.match(script, /function loadRepositorySettings/);
   assert.match(script, /function loadOrganizationSettings/);
