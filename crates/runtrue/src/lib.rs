@@ -108,6 +108,16 @@ pub mod storage {
     };
 }
 
+/// Registry-scoped credentials and verified package pulling for container
+/// images, Wasm components, and named package protocols.
+pub mod package {
+    pub use runtrue_provider_contract::{
+        pull_package, CredentialRequirement, FetchedPackage, PackageFetchError, PackageFetcher,
+        PackageKind, PackagePullRequest, RegistryCredential, RegistryCredentialRef,
+        RegistryCredentialScope, RegistryCredentialSet,
+    };
+}
+
 /// One-shot sterile warm-pool lifecycle.
 pub mod pool {
     pub use runtrue_provider_contract::{
@@ -194,6 +204,8 @@ mod tests {
 
         assert_type::<program::ProgramPlatform>();
         assert_type::<program::ProgramSignatureIdentity>();
+        assert_type::<package::PackagePullRequest>();
+        assert_type::<package::RegistryCredentialSet>();
         assert_type::<capsule::DelegationValidationContext<'_, dyn seal::SealSignatureVerifier>>();
         assert_type::<capsule::NondeterminismContract>();
         assert_type::<capsule::NondeterministicInputClass>();
@@ -204,6 +216,7 @@ mod tests {
         assert_type::<session::ChildAdmissionRequest>();
         assert_type::<session::FinalizeAndPublishResult>();
         assert_trait::<dyn seal::SealSignatureVerifier>();
+        assert_trait::<dyn package::PackageFetcher>();
         assert_trait::<dyn session::SessionReservationLedgerStore<Error = ()>>();
         assert_trait::<dyn session::WorkspacePublicationLedgerStore<Error = ()>>();
         assert_trait::<dyn session::SessionLedgerCommitStore<Error = ()>>();

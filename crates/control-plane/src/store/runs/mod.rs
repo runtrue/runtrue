@@ -7,6 +7,7 @@ mod jobs;
 #[allow(clippy::module_inception)]
 mod runs;
 mod source_snapshots;
+mod workflow_frontend_reports;
 
 pub(in crate::store) use approvals::*;
 pub(in crate::store) use capsules::*;
@@ -14,3 +15,4 @@ pub(in crate::store) use checks::*;
 pub(in crate::store) use jobs::*;
 pub(in crate::store) use runs::*;
 pub(in crate::store) use source_snapshots::*;
+pub(in crate::store) use workflow_frontend_reports::*;

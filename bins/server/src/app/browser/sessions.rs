@@ -68,8 +68,9 @@ pub(in crate::app) async fn refresh_browser_session(
         Err(response) => return response,
     };
     let mut record = match state
-        .control_plane
-        .browser_session(&refresh.tenant_id, &refresh.session_id)
+        .store
+        .session(&refresh.tenant_id, &refresh.session_id)
+        .await
     {
         Ok(record) => record,
         Err(_) => return clear_browser_authentication(authentication_problem(&request_id)),
@@ -95,8 +96,9 @@ pub(in crate::app) async fn refresh_browser_session(
         Err(error) => {
             if record.revoked_unix_ms.is_some() {
                 match state
-                    .control_plane
-                    .persist_browser_session(&record, Some(generation), &audit)
+                    .store
+                    .persist_session(&record, Some(generation), &audit)
+                    .await
                 {
                     Ok(_) => {}
                     Err(ControlPlaneError::IdempotencyConflict) => {
@@ -107,6 +109,7 @@ pub(in crate::app) async fn refresh_browser_session(
                             now,
                             &audit,
                         )
+                        .await
                         .is_err()
                         {
                             return clear_browser_authentication(internal_problem(&request_id));
@@ -122,12 +125,14 @@ pub(in crate::app) async fn refresh_browser_session(
         }
     };
     match state
-        .control_plane
-        .persist_browser_session(&record, Some(generation), &audit)
+        .store
+        .persist_session(&record, Some(generation), &audit)
+        .await
     {
         Ok(_) => {}
         Err(ControlPlaneError::IdempotencyConflict) => {
             if revoke_refresh_family_after_conflict(&state, &refresh, &presented_csrf, now, &audit)
+                .await
                 .is_err()
             {
                 return clear_browser_authentication(internal_problem(&request_id));
@@ -180,7 +185,9 @@ pub(in crate::app) async fn logout_browser_session(
         SESSION_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return clear_browser_authentication(*response),
     };
@@ -192,8 +199,9 @@ pub(in crate::app) async fn logout_browser_session(
         occurred_unix_ms: now,
     };
     if state
-        .control_plane
-        .persist_browser_session(&record, Some(generation), &audit)
+        .store
+        .persist_session(&record, Some(generation), &audit)
+        .await
         .is_err()
     {
         return internal_problem(&request_id);
@@ -204,7 +212,7 @@ pub(in crate::app) async fn logout_browser_session(
     human.metrics.session_logged_out();
     response
 }
-pub(in crate::app) fn authenticated_browser_session(
+pub(in crate::app) async fn authenticated_browser_session(
     state: &AppState,
     request_id: &RequestId,
     headers: &HeaderMap,
@@ -224,8 +232,9 @@ pub(in crate::app) fn authenticated_browser_session(
         return Err(authentication_problem(request_id).into());
     }
     let record = state
-        .control_plane
-        .browser_session(&access.tenant_id, &access.session_id)
+        .store
+        .session(&access.tenant_id, &access.session_id)
+        .await
         .map_err(|_| authentication_problem(request_id))?;
     let context = record
         .authenticate_browser_request(
@@ -252,7 +261,7 @@ pub(in crate::app) fn authenticated_browser_session(
     Ok((context, record, csrf.token.clone()))
 }
 
-pub(in crate::app) fn revoke_refresh_family_after_conflict(
+pub(in crate::app) async fn revoke_refresh_family_after_conflict(
     state: &AppState,
     presented: &SessionCookiePayload,
     csrf_token: &str,
@@ -261,8 +270,9 @@ pub(in crate::app) fn revoke_refresh_family_after_conflict(
 ) -> Result<(), ControlPlaneError> {
     for _ in 0..3 {
         let mut latest = state
-            .control_plane
-            .browser_session(&presented.tenant_id, &presented.session_id)?;
+            .store
+            .session(&presented.tenant_id, &presented.session_id)
+            .await?;
         let generation = latest.access_generation;
         let mut replay_probe = latest.clone();
         let replay = replay_probe.rotate(
@@ -284,8 +294,9 @@ pub(in crate::app) fn revoke_refresh_family_after_conflict(
             latest.revoke(now);
         }
         match state
-            .control_plane
-            .persist_browser_session(&latest, Some(generation), audit)
+            .store
+            .persist_session(&latest, Some(generation), audit)
+            .await
         {
             Ok(_) => return Ok(()),
             Err(ControlPlaneError::IdempotencyConflict) => continue,

@@ -15,6 +15,7 @@ pub enum CedarAction {
     ViewRun,
     CreateRun,
     CancelRun,
+    ReplayEvent,
     ApproveWorkflow,
     ApprovePrivilegedRun,
     ReadSecretMetadata,
@@ -29,17 +30,21 @@ pub enum CedarAction {
     ManagePolicy,
     ReadAudit,
     ManageApiToken,
+    ManageUser,
+    ManageTeam,
+    ManageRepositoryAccess,
     MintOidcToken,
     BreakGlass,
 }
 
 impl CedarAction {
-    pub(super) const ALL: [Self; 21] = [
+    pub(super) const ALL: [Self; 25] = [
         Self::ViewRepository,
         Self::EditWorkflowSettings,
         Self::ViewRun,
         Self::CreateRun,
         Self::CancelRun,
+        Self::ReplayEvent,
         Self::ApproveWorkflow,
         Self::ApprovePrivilegedRun,
         Self::ReadSecretMetadata,
@@ -54,6 +59,9 @@ impl CedarAction {
         Self::ManagePolicy,
         Self::ReadAudit,
         Self::ManageApiToken,
+        Self::ManageUser,
+        Self::ManageTeam,
+        Self::ManageRepositoryAccess,
         Self::MintOidcToken,
         Self::BreakGlass,
     ];
@@ -66,6 +74,7 @@ impl CedarAction {
             Self::ViewRun => "ViewRun",
             Self::CreateRun => "CreateRun",
             Self::CancelRun => "CancelRun",
+            Self::ReplayEvent => "ReplayEvent",
             Self::ApproveWorkflow => "ApproveWorkflow",
             Self::ApprovePrivilegedRun => "ApprovePrivilegedRun",
             Self::ReadSecretMetadata => "ReadSecretMetadata",
@@ -80,6 +89,9 @@ impl CedarAction {
             Self::ManagePolicy => "ManagePolicy",
             Self::ReadAudit => "ReadAudit",
             Self::ManageApiToken => "ManageApiToken",
+            Self::ManageUser => "ManageUser",
+            Self::ManageTeam => "ManageTeam",
+            Self::ManageRepositoryAccess => "ManageRepositoryAccess",
             Self::MintOidcToken => "MintOidcToken",
             Self::BreakGlass => "BreakGlass",
         }
@@ -111,11 +123,14 @@ pub enum CedarResourceKind {
     Policy,
     AuditLog,
     ApiToken,
+    User,
+    Team,
     OidcGrant,
+    Event,
 }
 
 impl CedarResourceKind {
-    pub(super) const ALL: [Self; 16] = [
+    pub(super) const ALL: [Self; 19] = [
         Self::Tenant,
         Self::Repository,
         Self::Workflow,
@@ -131,7 +146,10 @@ impl CedarResourceKind {
         Self::Policy,
         Self::AuditLog,
         Self::ApiToken,
+        Self::User,
+        Self::Team,
         Self::OidcGrant,
+        Self::Event,
     ];
 
     #[must_use]
@@ -152,7 +170,10 @@ impl CedarResourceKind {
             Self::Policy => "Policy",
             Self::AuditLog => "AuditLog",
             Self::ApiToken => "ApiToken",
+            Self::User => "ManagedUser",
+            Self::Team => "ManagedTeam",
             Self::OidcGrant => "OidcGrant",
+            Self::Event => "Event",
         }
     }
 }

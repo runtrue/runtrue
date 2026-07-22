@@ -12,7 +12,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::Json;
 use runtrue_control_plane::{
-    CreateRunRequest as StoreCreateRunRequest, CredentialTaintState, NewJob,
+    ControlPlaneError, CreateRunRequest as StoreCreateRunRequest, CredentialTaintState, NewJob,
     NormalizedTriggerEventRecord, ReplayBundleRecord, RepositoryRecord, RunRecord,
 };
 use runtrue_model::ContentDigest;
@@ -73,21 +73,29 @@ pub(in crate::app) async fn list_runs(
             &principal,
             CedarAction::ViewRun,
             tenant_id,
-        ) {
+        )
+        .await
+        {
             return response;
         }
-        state.control_plane.list_runs_page_for_tenant(
-            tenant_id,
-            query.repository_id.as_deref(),
-            query.cursor.as_deref(),
-            limit,
-        )
+        state
+            .store
+            .list_runs_page_for_tenant(
+                tenant_id,
+                query.repository_id.as_deref(),
+                query.cursor.as_deref(),
+                limit,
+            )
+            .await
     } else {
-        state.control_plane.list_runs_page(
-            query.repository_id.as_deref(),
-            query.cursor.as_deref(),
-            limit,
-        )
+        state
+            .store
+            .list_runs_page(
+                query.repository_id.as_deref(),
+                query.cursor.as_deref(),
+                limit,
+            )
+            .await
     };
     let records = match records {
         Ok(records) => records,
@@ -136,11 +144,11 @@ pub(in crate::app) async fn create_run(
         Ok(key) => key,
         Err(response) => return response,
     };
-    let signed = match state.control_plane.signed_capsule(&capsule_id) {
+    let signed = match state.store.signed_capsule(&capsule_id).await {
         Ok(signed) => signed,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let repository = match state.control_plane.repository(&signed.repository_id) {
+    let repository = match state.store.repository(&signed.repository_id).await {
         Ok(repository) => repository,
         Err(_) => return internal_problem(&request_id),
     };
@@ -155,7 +163,9 @@ pub(in crate::app) async fn create_run(
             &repository.tenant_id,
         )
         .in_repository(&repository.id),
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let capsule: ExecutionCapsule = match serde_json::from_slice(&signed.canonical_capsule) {
@@ -227,20 +237,25 @@ pub(in crate::app) async fn create_run(
         jobs,
     };
     let result = match state
-        .control_plane
+        .store
         .create_run_idempotent(&idempotency_key, &request)
+        .await
     {
         Ok(result) => result,
         Err(error) => return control_plane_problem(&request_id, error),
     };
     if let Some(snapshot_id) = source_snapshot_id.as_deref() {
-        if let Err(error) = state.control_plane.bind_run_source_snapshot(
-            &repository.tenant_id,
-            &result.value.id,
-            snapshot_id,
-            &signed_capsule_digest,
-            now,
-        ) {
+        if let Err(error) = state
+            .store
+            .bind_run_source_snapshot(
+                &repository.tenant_id,
+                &result.value.id,
+                snapshot_id,
+                &signed_capsule_digest,
+                now,
+            )
+            .await
+        {
             return control_plane_problem(&request_id, error);
         }
     }
@@ -256,7 +271,7 @@ pub(in crate::app) async fn create_run(
         Ok(trigger) => trigger,
         Err(()) => return internal_problem(&request_id),
     };
-    if let Err(error) = state.control_plane.record_normalized_trigger(&trigger) {
+    if let Err(error) = state.store.record_normalized_trigger(&trigger).await {
         return control_plane_problem(&request_id, error);
     }
     match RunView::from_record(result.value) {
@@ -324,9 +339,9 @@ pub(in crate::app) async fn get_run(
     Extension(principal): Extension<RequestPrincipal>,
     Path(run_id): Path<String>,
 ) -> Response {
-    match state.control_plane.run(&run_id) {
+    match state.store.run(&run_id).await {
         Ok(record) => {
-            let repository = match state.control_plane.repository(&record.repository_id) {
+            let repository = match state.store.repository(&record.repository_id).await {
                 Ok(repository) => repository,
                 Err(_) => return internal_problem(&request_id),
             };
@@ -337,7 +352,9 @@ pub(in crate::app) async fn get_run(
                 CedarAction::ViewRun,
                 ServerResource::new(CedarResourceKind::Run, &record.id, &repository.tenant_id)
                     .in_repository(&repository.id),
-            ) {
+            )
+            .await
+            {
                 return response;
             }
             match RunView::from_record(record) {
@@ -363,11 +380,11 @@ pub(in crate::app) async fn get_run_logs(
     Path(run_id): Path<String>,
     Query(query): Query<RunLogQuery>,
 ) -> Response {
-    let run = match state.control_plane.run(&run_id) {
+    let run = match state.store.run(&run_id).await {
         Ok(run) => run,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let repository = match state.control_plane.repository(&run.repository_id) {
+    let repository = match state.store.repository(&run.repository_id).await {
         Ok(repository) => repository,
         Err(_) => return internal_problem(&request_id),
     };
@@ -378,12 +395,15 @@ pub(in crate::app) async fn get_run_logs(
         CedarAction::ViewRun,
         ServerResource::new(CedarResourceKind::Run, &run.id, &repository.tenant_id)
             .in_repository(&repository.id),
-    ) {
+    )
+    .await
+    {
         return response;
     }
     match state
-        .control_plane
+        .store
         .runner_logs_for_run(&run_id, query.limit.unwrap_or(1_000))
+        .await
     {
         Ok(frames) => {
             let mut response = Json(frames).into_response();
@@ -411,11 +431,11 @@ pub(in crate::app) async fn cancel_run(
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let existing = match state.control_plane.run(&run_id) {
+    let existing = match state.store.run(&run_id).await {
         Ok(run) => run,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let repository = match state.control_plane.repository(&existing.repository_id) {
+    let repository = match state.store.repository(&existing.repository_id).await {
         Ok(repository) => repository,
         Err(_) => return internal_problem(&request_id),
     };
@@ -426,7 +446,9 @@ pub(in crate::app) async fn cancel_run(
         CedarAction::CancelRun,
         ServerResource::new(CedarResourceKind::Run, &existing.id, &repository.tenant_id)
             .in_repository(&repository.id),
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let body = match optional_json::<CancelRunBody>(&request_id, body) {
@@ -445,8 +467,9 @@ pub(in crate::app) async fn cancel_run(
         Err(response) => return response,
     };
     match state
-        .control_plane
+        .store
         .cancel_run_idempotent(&idempotency_key, &run_id, &reason, now)
+        .await
     {
         Ok(result) => match RunView::from_record(result.value) {
             Ok(run) => {
@@ -493,11 +516,11 @@ pub(in crate::app) async fn create_replay_bundle(
         Ok(key) => key,
         Err(response) => return response,
     };
-    let run = match state.control_plane.run(&run_id) {
+    let run = match state.store.run(&run_id).await {
         Ok(run) => run,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let repository = match state.control_plane.repository(&run.repository_id) {
+    let repository = match state.store.repository(&run.repository_id).await {
         Ok(repository) => repository,
         Err(_) => return internal_problem(&request_id),
     };
@@ -508,10 +531,12 @@ pub(in crate::app) async fn create_replay_bundle(
         CedarAction::ViewRun,
         ServerResource::new(CedarResourceKind::Run, &run.id, &repository.tenant_id)
             .in_repository(&repository.id),
-    ) {
+    )
+    .await
+    {
         return response;
     }
-    match state.control_plane.run_credential_taint(&run.id) {
+    match state.store.runner_run_credential_taint(&run.id).await {
         Ok(CredentialTaintState::None) => {}
         Ok(CredentialTaintState::CredentialReleased) => {
             return problem_response(
@@ -531,11 +556,11 @@ pub(in crate::app) async fn create_replay_bundle(
         }
         Err(error) => return control_plane_problem(&request_id, error),
     }
-    let signed = match state.control_plane.signed_capsule(&run.capsule_id) {
+    let signed = match state.store.signed_capsule(&run.capsule_id).await {
         Ok(capsule) => capsule,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let metadata = match state.control_plane.capsule_api_metadata(&run.capsule_id) {
+    let metadata = match state.store.capsule_api_metadata(&run.capsule_id).await {
         Ok(metadata) => metadata,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -543,9 +568,32 @@ pub(in crate::app) async fn create_replay_bundle(
         Ok(capsule) => capsule,
         Err(_) => return internal_problem(&request_id),
     };
-    let envelope = match ReplayBundle::new(capsule, metadata.approval_subject_digest, None)
-        .and_then(ReplayBundle::seal)
-    {
+    let workflow_frontend_report_digest = capsule
+        .context
+        .workflow_frontend
+        .as_ref()
+        .and_then(|provenance| provenance.report_digest.clone());
+    let bundle = match ReplayBundle::new(capsule, metadata.approval_subject_digest, None) {
+        Ok(bundle) => bundle,
+        Err(_) => return internal_problem(&request_id),
+    };
+    let bundle = match state.store.workflow_frontend_report(&run.capsule_id).await {
+        Ok(record) => {
+            let Some(digest) = workflow_frontend_report_digest else {
+                return internal_problem(&request_id);
+            };
+            bundle.with_workflow_frontend_report(
+                runtrue_workflow_ir::WorkflowFrontendReportArtifact {
+                    media_type: record.media_type,
+                    digest,
+                    bytes: record.bytes,
+                },
+            )
+        }
+        Err(ControlPlaneError::NotFound { .. }) => bundle,
+        Err(_) => return internal_problem(&request_id),
+    };
+    let envelope = match bundle.seal() {
         Ok(envelope) => envelope,
         Err(_) => return internal_problem(&request_id),
     };
@@ -570,8 +618,9 @@ pub(in crate::app) async fn create_replay_bundle(
         expires_unix_ms: now.saturating_add(24 * 60 * 60 * 1000),
     };
     match state
-        .control_plane
+        .store
         .store_replay_bundle_idempotent(&idempotency_key, &record)
+        .await
     {
         Ok(result) => match replay_bundle_view(result.value) {
             Ok(view) => {
@@ -594,11 +643,11 @@ pub(in crate::app) async fn get_replay_bundle(
     Extension(principal): Extension<RequestPrincipal>,
     Path(run_id): Path<String>,
 ) -> Response {
-    let run = match state.control_plane.run(&run_id) {
+    let run = match state.store.run(&run_id).await {
         Ok(run) => run,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let repository = match state.control_plane.repository(&run.repository_id) {
+    let repository = match state.store.repository(&run.repository_id).await {
         Ok(repository) => repository,
         Err(_) => return internal_problem(&request_id),
     };
@@ -609,10 +658,12 @@ pub(in crate::app) async fn get_replay_bundle(
         CedarAction::ViewRun,
         ServerResource::new(CedarResourceKind::Run, &run.id, &repository.tenant_id)
             .in_repository(&repository.id),
-    ) {
+    )
+    .await
+    {
         return response;
     }
-    match state.control_plane.replay_bundle_for_run(&run_id) {
+    match state.store.replay_bundle_for_run(&run_id).await {
         Ok(record) => {
             let mut response = record.canonical_bundle.into_response();
             response.headers_mut().insert(

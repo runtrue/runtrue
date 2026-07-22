@@ -89,14 +89,14 @@ impl<'a> ServerResource<'a> {
 }
 
 #[allow(clippy::result_large_err)]
-pub(in crate::app) fn authorize_resource(
+pub(in crate::app) async fn authorize_resource(
     state: &AppState,
     request_id: &RequestId,
     principal: &RequestPrincipal,
     action: CedarAction,
     resource: ServerResource<'_>,
 ) -> Result<(), Response> {
-    let active = match state.control_plane.active_policy_state(resource.tenant_id) {
+    let active = match state.store.active_state(resource.tenant_id).await {
         Ok(active) => active,
         Err(ControlPlaneError::NotFound { kind: "tenant", id }) if id == resource.tenant_id => {
             ActivePolicyBundleState::new(resource.tenant_id).map_err(|_| {
@@ -199,7 +199,7 @@ pub(in crate::app) fn authorize_resource(
 }
 
 #[allow(clippy::result_large_err)]
-pub(in crate::app) fn authorize_tenant_collection(
+pub(in crate::app) async fn authorize_tenant_collection(
     state: &AppState,
     request_id: &RequestId,
     principal: &RequestPrincipal,
@@ -213,6 +213,7 @@ pub(in crate::app) fn authorize_tenant_collection(
         action,
         ServerResource::new(CedarResourceKind::Tenant, tenant_id, tenant_id),
     )
+    .await
 }
 
 pub(in crate::app) fn api_token_tenant(principal: &RequestPrincipal) -> Option<&str> {
@@ -295,7 +296,7 @@ pub(in crate::app) struct GitHubSetupRequest<'a> {
 }
 
 #[allow(clippy::result_large_err)]
-pub(in crate::app) fn start_github_setup_service(
+pub(in crate::app) async fn start_github_setup_service(
     state: &AppState,
     request_id: &RequestId,
     request: GitHubSetupRequest<'_>,
@@ -353,8 +354,9 @@ pub(in crate::app) fn start_github_setup_service(
         .expected_request_digest()
         .map_err(|_| internal_problem(request_id))?;
     let result = state
-        .control_plane
+        .store
         .create_github_setup_transaction(&request)
+        .await
         .map_err(|error| control_plane_problem(request_id, error))?;
     if !matches!(
         result.value.status,

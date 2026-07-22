@@ -21,6 +21,7 @@ pub(in crate::store) fn parse_runner_pool_status(
 
 pub(in crate::store) fn runner_status_name(status: RunnerStatus) -> &'static str {
     match status {
+        RunnerStatus::Probationary => "probationary",
         RunnerStatus::Online => "online",
         RunnerStatus::Draining => "draining",
         RunnerStatus::Quarantined => "quarantined",
@@ -33,6 +34,7 @@ pub(in crate::store) fn parse_runner_status(
     value: &str,
 ) -> Result<RunnerStatus, ControlPlaneError> {
     match value {
+        "probationary" => Ok(RunnerStatus::Probationary),
         "online" => Ok(RunnerStatus::Online),
         "draining" => Ok(RunnerStatus::Draining),
         "quarantined" => Ok(RunnerStatus::Quarantined),
@@ -63,6 +65,14 @@ pub(in crate::store) fn validate_runner_record(
     if runner.logical_cpus == 0
         || runner.memory_bytes == 0
         || runner.storage_bytes == 0
+        || runner.max_concurrent_wasm_jobs == 0
+        || runner.max_concurrent_wasm_jobs > 64
+        || (runner.max_concurrent_wasm_jobs > 1
+            && !runner
+                .isolation_backends
+                .contains(&runtrue_workflow_ir::Isolation::Wasm))
+        || runner.active_wasm_jobs > runner.active_jobs
+        || runner.active_wasm_jobs > runner.max_concurrent_wasm_jobs
         || runner.isolation_backends.is_empty()
     {
         return Err(ControlPlaneError::InvalidInput("invalid runner inventory"));
@@ -335,10 +345,16 @@ impl ControlPlane {
         &self,
         runner_id: &str,
         locality: &BTreeSet<ContentDigest>,
+        package_tiers: &BTreeMap<ContentDigest, runtrue_scheduler::PackagePreparationTier>,
         now_unix_ms: u64,
     ) -> Result<PersistedRunner, ControlPlaneError> {
         validate_text("runner id", runner_id)?;
-        if locality.len() > 10_000 {
+        if locality.len() > 10_000
+            || package_tiers.len() > 10_000
+            || package_tiers
+                .keys()
+                .any(|digest| !locality.contains(digest))
+        {
             return Err(ControlPlaneError::InvalidInput(
                 "runner locality exceeds its item bound",
             ));
@@ -368,6 +384,7 @@ impl ControlPlane {
             ));
         }
         persisted.runner.locality = locality.clone();
+        persisted.runner.package_tiers = package_tiers.clone();
         persisted.updated_unix_ms = now_unix_ms;
         transaction.execute(
             "UPDATE runners SET runner_json = ?2, updated_unix_ms = ?3 WHERE id = ?1",
@@ -483,7 +500,7 @@ impl ControlPlane {
                     ))
                 }
                 RunnerStatus::Offline => persisted.runner.status = RunnerStatus::Online,
-                RunnerStatus::Online | RunnerStatus::Draining => {}
+                RunnerStatus::Probationary | RunnerStatus::Online | RunnerStatus::Draining => {}
             }
             persisted.runner.last_heartbeat_unix_ms = now_unix_ms;
         } else if persisted.runner.status == RunnerStatus::Online {
@@ -500,6 +517,14 @@ impl ControlPlane {
                 to_i64(now_unix_ms)?,
             ],
         )?;
+        if connected && persisted.runner.status == RunnerStatus::Online {
+            transaction.execute(
+                "UPDATE runner_fleet_requests
+                 SET state = 'online', updated_unix_ms = ?2
+                 WHERE runner_id = ?1 AND state = 'enrolled'",
+                params![runner_id, to_i64(now_unix_ms)?],
+            )?;
+        }
         transaction.commit()?;
         Ok(persisted)
     }

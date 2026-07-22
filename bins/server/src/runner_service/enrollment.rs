@@ -4,6 +4,7 @@ use super::{
     validate_inventory, AuthenticatedIdentity, RunnerControlService, MAX_CONTROL_MESSAGE_BYTES,
     MAX_STREAM_MESSAGE_BYTES,
 };
+use prost::Message as _;
 use rand_core::{OsRng, RngCore as _};
 use runtrue_model::ContentDigest;
 use runtrue_protocol::{
@@ -22,10 +23,33 @@ impl RunnerControlService {
             self.inner.certificate_authority.as_ref().ok_or_else(|| {
                 Status::failed_precondition("runner enrollment is not configured")
             })?;
-        if request.attestation.is_some() {
-            return Err(Status::invalid_argument(
-                "runner attestation is not supported by this installation",
-            ));
+        let mut replay_request = request.clone();
+        replay_request.enrollment_token.clear();
+        let request_digest = ContentDigest::sha256(replay_request.encode_to_vec());
+        let token = zeroize::Zeroizing::new(request.enrollment_token.clone());
+        if let Some(replay) = self
+            .inner
+            .control_plane
+            .replay_pool_enrollment(&token, &request_digest)
+            .await
+            .map_err(enrollment_status)?
+        {
+            self.inner
+                .protocol_metrics
+                .record_selection(replay.selected_protocol_version);
+            return Ok(v1::EnrollResponse {
+                runner_id: replay.runner_id,
+                certificate_chain_pem: replay.certificate_chain_pem,
+                certificate_expires_at: Some(proto_timestamp(replay.certificate_expires_unix_ms)),
+                runner_pool_id: replay.pool_id,
+                protocol_min: self.inner.config.protocol_minimum,
+                protocol_max: PROTOCOL_MAX,
+                authoritative_posture_digest: Some(
+                    v1::Digest::try_from(&replay.authoritative_posture_digest)
+                        .map_err(|_| Status::internal("authoritative runner posture is invalid"))?,
+                ),
+                selected_protocol_version: replay.selected_protocol_version,
+            });
         }
         let mut inventory = request
             .inventory
@@ -40,20 +64,135 @@ impl RunnerControlService {
         // the durable selected-generation inventory. Domain validation and the
         // posture binding therefore never depend on scattered version checks.
         inventory.protocol_version = selected_protocol;
-        let token = zeroize::Zeroizing::new(request.enrollment_token);
         let now = now_unix_ms()?;
         let token_record = self
             .inner
             .control_plane
-            .inspect_enrollment_token(&token, now)
+            .inspect_pool_enrollment_token(&token, now)
+            .await
             .map_err(enrollment_status)?;
+        let launch_claim = self
+            .inner
+            .control_plane
+            .launch_claim_for_enrollment_token(&token_record.id)
+            .await
+            .map_err(enrollment_status)?;
+        let software_update_claim = self
+            .inner
+            .control_plane
+            .software_update_claim_for_enrollment_token(&token_record.id)
+            .await
+            .map_err(enrollment_status)?;
+        if software_update_claim.as_ref().is_some_and(|claim| {
+            claim.mode == runtrue_control_plane::RunnerReplacementMode::FixedHost
+        }) {
+            let update = software_update_claim.as_ref().expect("checked");
+            let attestation = request.attestation.as_ref().ok_or_else(|| {
+                Status::permission_denied("fixed-host updater identity proof is required")
+            })?;
+            if attestation.kind != "runtrue.update.fixed-host"
+                || launch_identity_proof_digest(attestation) != update.identity_proof_digest
+            {
+                return Err(Status::permission_denied(
+                    "fixed-host updater identity proof does not match its claim",
+                ));
+            }
+        } else {
+            match (&launch_claim, request.attestation.as_ref()) {
+                (Some(claim), Some(attestation)) => {
+                    let expected_kind = format!("runtrue.launch.{}", claim.provider);
+                    if attestation.kind != expected_kind
+                        || launch_identity_proof_digest(attestation) != claim.identity_proof_digest
+                    {
+                        return Err(Status::permission_denied(
+                            "runner launch identity proof does not match its claim",
+                        ));
+                    }
+                    let image_digest = inventory
+                        .runner_image_digest
+                        .as_ref()
+                        .ok_or_else(|| {
+                            Status::permission_denied(
+                                "autoscaled runner is missing its immutable template digest",
+                            )
+                        })
+                        .and_then(|digest| {
+                            ContentDigest::try_from(digest).map_err(|_| {
+                                Status::permission_denied(
+                                    "autoscaled runner template digest is malformed",
+                                )
+                            })
+                        })?;
+                    if image_digest != claim.runner_template_digest {
+                        return Err(Status::permission_denied(
+                            "autoscaled runner does not match its exact template",
+                        ));
+                    }
+                }
+                (Some(_), None) => {
+                    return Err(Status::permission_denied(
+                        "runner launch identity proof is required",
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(Status::invalid_argument(
+                        "runner attestation is not supported for manual enrollment",
+                    ));
+                }
+                (None, None) => {}
+            }
+        }
+        if let Some(update) = &software_update_claim {
+            let autoscaled_binding_valid = match update.mode {
+                runtrue_control_plane::RunnerReplacementMode::Autoscaled => {
+                    launch_claim.as_ref().is_some_and(|launch| {
+                        update.fleet_request_id.as_deref() == Some(&launch.fleet_request_id)
+                            && update.identity_proof_digest == launch.identity_proof_digest
+                            && update.runner_template_digest == launch.runner_template_digest
+                    })
+                }
+                runtrue_control_plane::RunnerReplacementMode::FixedHost => {
+                    launch_claim.is_none()
+                        && update.runner_slot_id.is_some()
+                        && update.updater_identity_digest.is_some()
+                }
+            };
+            if !autoscaled_binding_valid
+                || selected_protocol < update.protocol_min
+                || selected_protocol > update.protocol_max
+                || update.canceled_unix_ms.is_some()
+                || update.consumed_unix_ms.is_some()
+                || now >= update.expires_unix_ms
+            {
+                return Err(Status::permission_denied(
+                    "software update claim is expired, stale, or inconsistently bound",
+                ));
+            }
+            let binary = inventory
+                .runner_binary_digest
+                .as_ref()
+                .and_then(|value| ContentDigest::try_from(value).ok());
+            let image = inventory
+                .runner_image_digest
+                .as_ref()
+                .and_then(|value| ContentDigest::try_from(value).ok());
+            if binary.as_ref() != Some(&update.installed_digest)
+                && image.as_ref() != Some(&update.installed_digest)
+            {
+                return Err(Status::permission_denied(
+                    "replacement inventory does not match the signed installed component digest",
+                ));
+            }
+        }
         let pool = self
             .inner
             .control_plane
-            .runner_pool(&token_record.pool_id)
-            .map_err(enrollment_status)?;
+            .runner_pool_configuration(&token_record.pool_id)
+            .await
+            .map_err(enrollment_status)?
+            .pool;
         let runner_id = random_runner_id()?;
-        let runner = enrolled_runner_record(
+        let mut runner = enrolled_runner_record(
             &runner_id,
             &pool.tenant_id,
             &token_record.pool_id,
@@ -61,6 +200,9 @@ impl RunnerControlService {
             request.ephemeral,
             now,
         )?;
+        if software_update_claim.is_some() {
+            runner.status = runtrue_scheduler::RunnerStatus::Probationary;
+        }
         let inventory_digest = validate_inventory(&runner, &inventory, selected_protocol)?;
         let issued = authority
             .issue(
@@ -70,30 +212,36 @@ impl RunnerControlService {
                 now,
             )
             .map_err(certificate_status)?;
-        self.inner
-            .control_plane
-            .complete_runner_enrollment(&token, &runner, &issued.record, &inventory_digest, now)
-            .map_err(enrollment_status)?;
-        let authoritative_posture = self
+        let completed = self
             .inner
             .control_plane
-            .validate_runner_inventory_binding(&runner_id, &inventory_digest)
+            .complete_pool_enrollment(
+                &token,
+                &request_digest,
+                &runner,
+                &issued.record,
+                &issued.certificate_chain_pem,
+                &inventory_digest,
+                selected_protocol,
+                now,
+            )
+            .await
             .map_err(enrollment_status)?;
         self.inner
             .protocol_metrics
-            .record_selection(selected_protocol);
+            .record_selection(completed.selected_protocol_version);
         Ok(v1::EnrollResponse {
-            runner_id,
-            certificate_chain_pem: issued.certificate_chain_pem,
-            certificate_expires_at: Some(proto_timestamp(issued.record.not_after_unix_ms)),
-            runner_pool_id: token_record.pool_id,
+            runner_id: completed.runner_id,
+            certificate_chain_pem: completed.certificate_chain_pem,
+            certificate_expires_at: Some(proto_timestamp(completed.certificate_expires_unix_ms)),
+            runner_pool_id: completed.pool_id,
             protocol_min: self.inner.config.protocol_minimum,
             protocol_max: PROTOCOL_MAX,
             authoritative_posture_digest: Some(
-                v1::Digest::try_from(&authoritative_posture)
+                v1::Digest::try_from(&completed.authoritative_posture_digest)
                     .map_err(|_| Status::internal("authoritative runner posture is invalid"))?,
             ),
-            selected_protocol_version: selected_protocol,
+            selected_protocol_version: completed.selected_protocol_version,
         })
     }
 
@@ -183,7 +331,8 @@ impl RunnerControlService {
         let durable_certificate = self
             .inner
             .control_plane
-            .runner_certificate(fingerprint)
+            .pool_runner_certificate(fingerprint)
+            .await
             .map_err(control_plane_status)?;
         if durable_certificate.runner_id != request.runner_id {
             return Err(Status::permission_denied(
@@ -193,7 +342,8 @@ impl RunnerControlService {
         if let Some(existing) = self
             .inner
             .control_plane
-            .runner_certificate_rotation(fingerprint)
+            .pool_runner_certificate_rotation(fingerprint)
+            .await
             .map_err(control_plane_status)?
         {
             if existing.runner_id != request.runner_id || existing.csr_digest != csr_digest {
@@ -206,7 +356,8 @@ impl RunnerControlService {
         let durable = self
             .inner
             .control_plane
-            .authenticate_runner_certificate(fingerprint, now)
+            .authenticate_pool_runner_certificate(fingerprint, now)
+            .await
             .map_err(control_plane_status)?;
         if durable.runner.runner.id != request.runner_id {
             return Err(Status::permission_denied(
@@ -224,7 +375,7 @@ impl RunnerControlService {
         let persisted = self
             .inner
             .control_plane
-            .rotate_runner_certificate_idempotent(
+            .rotate_pool_runner_certificate(
                 fingerprint,
                 &request.runner_id,
                 &csr_digest,
@@ -233,9 +384,30 @@ impl RunnerControlService {
                 now,
                 duration_millis(self.inner.config.certificate_overlap)?,
             )
+            .await
             .map_err(control_plane_status)?;
         rotation_response(&persisted.value)
     }
+}
+
+pub(crate) fn launch_identity_proof_digest(evidence: &v1::AttestationEvidence) -> ContentDigest {
+    fn append_field(encoded: &mut Vec<u8>, bytes: &[u8]) {
+        encoded.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        encoded.extend_from_slice(bytes);
+    }
+
+    let mut encoded = b"runtrue.runner.launch-identity-proof.v1\0".to_vec();
+    append_field(&mut encoded, evidence.kind.as_bytes());
+    append_field(&mut encoded, &evidence.evidence);
+    append_field(&mut encoded, &evidence.endorsement);
+    if let Some(nonce) = evidence.nonce.as_ref() {
+        append_field(&mut encoded, nonce.algorithm.as_bytes());
+        append_field(&mut encoded, &nonce.value);
+    } else {
+        append_field(&mut encoded, &[]);
+        append_field(&mut encoded, &[]);
+    }
+    ContentDigest::sha256(encoded)
 }
 
 /// Enrollment-only façade for the TLS-server-auth listener. Every method

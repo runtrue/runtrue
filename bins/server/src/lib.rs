@@ -1,6 +1,8 @@
 //! Authenticated HTTP façade for the durable Runtrue control plane.
 
 mod app;
+mod database_runtime;
+mod database_url_file;
 mod github_install_ui;
 mod human_oidc;
 mod repository_action_builder;
@@ -8,11 +10,17 @@ mod runner_broker;
 mod runner_certificates;
 mod runner_service;
 mod scm_worker;
+mod secret_resolution;
+mod workflow_frontends;
 
 pub use app::{
     router, AppState, BootstrapAuth, GitHubInstallationMetricsSnapshot, GitHubLifecycleWorkerError,
     GitHubOauthQuickstartConfig, ServerBuildError,
 };
+pub use database_runtime::{
+    postgres_server_runtime_inventory, postgres_server_runtime_ready, PostgresServerRuntimeGap,
+};
+pub use database_url_file::{read_database_url_file, DatabaseUrlFileError, MAX_DATABASE_URL_BYTES};
 pub use github_install_ui::{
     github_installations_payload, ComponentHealth, GitHubAccountKind, GitHubAppHealth,
     GitHubInstallAction, GitHubInstallationState, GitHubInstallationView, GitHubInstallationsPage,

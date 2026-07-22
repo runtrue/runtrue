@@ -1,6 +1,7 @@
 use runtrue_control_plane::{
     ControlPlane, DurableTask, DurableTaskStatus, RepositoryRecord, ScmCheckPublicationState,
     ScmCheckPublishTask, ScmInstallationRecord, ScmRepositoryLinkRecord, ScmSourceFetchState,
+    SCM_EVENT_RECOVERY_WINDOW_MS,
 };
 #[cfg(feature = "github-actions")]
 use runtrue_control_plane::{
@@ -8,12 +9,15 @@ use runtrue_control_plane::{
     GitHubRepositorySelection as ControlPlaneGitHubRepositorySelection,
     ReconcileGitHubInstallation, TenantIdentityRecord,
 };
+#[cfg(feature = "github-actions")]
+use runtrue_gha_import::GithubActionsFrontend;
 use runtrue_git::{GitLimits, GitRepository};
 use runtrue_model::ContentDigest;
+#[cfg(feature = "github-actions")]
 use runtrue_policy::{ApprovalDecision, ApprovalKind, ApprovalStatus, Decision};
 use runtrue_scm::{
-    ActorIdentity, CheckRunRequest, EventEnvelope, EventType, GitRevision, IssueCommentAction,
-    IssueCommentEvent, ProviderKind, PullRequestAction, PullRequestEvent, RepositoryIdentity,
+    ActorIdentity, CheckRunRequest, EventEnvelope, EventType, GitRevision, ProviderKind,
+    PullRequestAction, PullRequestEvent, RepositoryIdentity,
 };
 #[cfg(feature = "github-actions")]
 use runtrue_scm::{
@@ -22,15 +26,21 @@ use runtrue_scm::{
     GitHubPermissionLevel, GitHubProviderEndpoints, GitHubRepositorySelection,
     GitHubRepositoryVisibility,
 };
+#[cfg(feature = "github-actions")]
+use runtrue_scm::{IssueCommentAction, IssueCommentEvent};
 use runtrue_server::{
-    AppState, FetchedScmRepository, GitHubCheckPublisher, PreparedRepositoryAction,
-    PublishedScmCheck, RepositoryActionResolveError, RepositoryActionResolver,
-    ScmCheckPublishError, ScmSourceFetchError, ScmSourceFetchRequest, ScmSourceFetcher,
-    ScmWorkerConfig, ScmWorkerTick,
+    AppState, FetchedScmRepository, GitHubCheckPublisher, PublishedScmCheck, ScmCheckPublishError,
+    ScmSourceFetchError, ScmSourceFetchRequest, ScmSourceFetcher, ScmWorkerConfig, ScmWorkerTick,
 };
 #[cfg(feature = "github-actions")]
 use runtrue_server::{
-    GitHubRepositoryActionResolver, RepositoryActionBuildRequest, RepositoryActionBuilder,
+    GitHubRepositoryActionResolver, PreparedRepositoryAction, RepositoryActionBuildRequest,
+    RepositoryActionBuilder, RepositoryActionResolveError, RepositoryActionResolver,
+};
+#[cfg(feature = "github-actions")]
+use runtrue_workflow_frontend::{
+    ResolvedProgram, ResolvedProgramRef, ResolvedSourceAction, SourceActionResolutionRequest,
+    WorkflowSourceFrontend,
 };
 use runtrue_workflow_ir::{ExecutionCapsule, Isolation};
 use std::{
@@ -69,10 +79,19 @@ struct FixtureSourceFetcher {
 struct UnavailableSourceFetcher;
 
 #[derive(Debug)]
+#[cfg(feature = "github-actions")]
 struct FixtureRepositoryActionResolver {
     requests: Mutex<Vec<(String, String, String)>>,
     image: String,
     available: AtomicBool,
+}
+
+#[cfg(feature = "github-actions")]
+#[derive(Debug)]
+struct RecoveringRepositoryActionResolver {
+    available: AtomicBool,
+    requests: Mutex<Vec<String>>,
+    image: String,
 }
 
 #[cfg(feature = "github-actions")]
@@ -141,13 +160,16 @@ impl RepositoryActionBuilder for FixtureRepositoryActionBuilder {
     }
 }
 
+#[cfg(feature = "github-actions")]
 impl RepositoryActionResolver for FixtureRepositoryActionResolver {
     fn resolve(
         &self,
         tenant_id: &str,
         installation_id: &str,
-        reference: &str,
+        request: &SourceActionResolutionRequest,
+        _frontend: &dyn WorkflowSourceFrontend,
     ) -> Result<PreparedRepositoryAction, RepositoryActionResolveError> {
+        let reference = request.source_reference();
         if !self.available.load(Ordering::SeqCst) {
             return Err(RepositoryActionResolveError::Unavailable);
         }
@@ -158,13 +180,34 @@ impl RepositoryActionResolver for FixtureRepositoryActionResolver {
         ));
         Ok(PreparedRepositoryAction {
             reference: reference.to_owned(),
-            program: runtrue_workflow_frontend::ResolvedRepositoryProgram::Container {
-                image: self.image.clone(),
-                entrypoint: None,
-                args: None,
-            },
+            action: ResolvedSourceAction::new(
+                ResolvedProgram::container(self.image.clone(), None, None).unwrap(),
+            ),
             metadata_digest: ContentDigest::sha256(b"exact action.yml"),
-            inputs: std::collections::BTreeMap::new(),
+        })
+    }
+}
+
+#[cfg(feature = "github-actions")]
+impl RepositoryActionResolver for RecoveringRepositoryActionResolver {
+    fn resolve(
+        &self,
+        _tenant_id: &str,
+        _installation_id: &str,
+        request: &SourceActionResolutionRequest,
+        _frontend: &dyn WorkflowSourceFrontend,
+    ) -> Result<PreparedRepositoryAction, RepositoryActionResolveError> {
+        let reference = request.source_reference().to_owned();
+        self.requests.lock().unwrap().push(reference.clone());
+        if !self.available.load(Ordering::Relaxed) {
+            return Err(RepositoryActionResolveError::Unavailable);
+        }
+        Ok(PreparedRepositoryAction {
+            reference,
+            action: ResolvedSourceAction::new(
+                ResolvedProgram::container(self.image.clone(), None, None).unwrap(),
+            ),
+            metadata_digest: ContentDigest::sha256(b"recovered exact action.yml"),
         })
     }
 }
@@ -315,6 +358,7 @@ impl MirrorFixture {
         }
     }
 
+    #[cfg(feature = "github-actions")]
     fn github_actions_pull_request() -> Self {
         let root = tempfile::tempdir().expect("mirror root");
         secure_mode(root.path());
@@ -353,6 +397,7 @@ impl MirrorFixture {
         }
     }
 
+    #[cfg(feature = "github-actions")]
     fn repository_action_pull_request(reference: &str) -> Self {
         Self::repository_action_pull_request_with_access(reference, "read")
     }
@@ -435,6 +480,7 @@ impl MirrorFixture {
         }
     }
 
+    #[cfg(feature = "github-actions")]
     fn interaction() -> (Self, String) {
         let root = tempfile::tempdir().expect("mirror root");
         secure_mode(root.path());
@@ -804,6 +850,7 @@ fn authenticated_github_fetch_builds_and_atomically_binds_exact_source_snapshot(
     );
 }
 
+#[cfg(feature = "github-actions")]
 #[test]
 fn issue_comment_gate_reuses_the_trusted_default_revision_through_continuation() {
     let (fixture, workflow_path) = MirrorFixture::interaction();
@@ -1235,6 +1282,7 @@ fn pull_request_executes_base_workflow_while_testing_proposed_code() {
     assert_eq!(capsule.jobs[0].runner.isolation, Isolation::Microvm);
 }
 
+#[cfg(feature = "github-actions")]
 #[test]
 fn standard_github_actions_workflow_is_discovered_planned_and_replanned_after_approval() {
     let fixture = MirrorFixture::github_actions_pull_request();
@@ -1485,34 +1533,54 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
     });
     let resolver = GitHubRepositoryActionResolver::new(
         Arc::clone(&control),
-        fetcher,
-        installation_provider,
+        fetcher.clone(),
+        installation_provider.clone(),
         GitHubProviderEndpoints::new("https://github.example.test", "https://github.example.test/api/v3")
             .unwrap(),
         builder.clone(),
     );
+    let request = SourceActionResolutionRequest::new(
+        reference.clone(),
+        "ci/backport",
+        commit.clone(),
+        "",
+        vec![
+            "runtrue-action.yml".to_owned(),
+            "action.yml".to_owned(),
+            "action.yaml".to_owned(),
+        ],
+    )
+    .unwrap();
 
     let prepared = resolver
-        .resolve("tenant-1", &consumer_installation.id, &reference)
+        .resolve(
+            "tenant-1",
+            &consumer_installation.id,
+            &request,
+            &GithubActionsFrontend,
+        )
         .unwrap();
     assert_eq!(prepared.reference, reference);
-    let runtrue_workflow_frontend::ResolvedRepositoryProgram::Container {
+    let ResolvedProgramRef::Container {
         image: prepared_image,
         entrypoint,
-        args,
-    } = &prepared.program
+        arguments,
+    } = prepared.action.program()
     else {
         panic!("expected a container action");
     };
-    assert_eq!(prepared_image, &image);
+    assert_eq!(prepared_image, image);
     assert_eq!(prepared.metadata_digest, ContentDigest::sha256(metadata));
     assert_eq!(
-        prepared.inputs["config-path"].default.as_deref(),
+        prepared
+            .action
+            .input("config-path")
+            .and_then(|input| input.default_value()),
         Some(".github/backport.yml")
     );
-    assert_eq!(entrypoint.as_deref(), Some("/bin/backport"));
+    assert_eq!(entrypoint, Some("/bin/backport"));
     assert_eq!(
-        args.as_deref(),
+        arguments,
         Some(
             [
                 "--config".to_owned(),
@@ -1552,22 +1620,39 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
     );
     fs::write(root.path().join("runtrue-action.yml"), &runtrue_metadata)
         .expect("Runtrue action metadata");
-    git(root.path(), &["add", "runtrue-action.yml"]);
+    git(root.path(), &["add", "-A"]);
     git(
         root.path(),
         &["commit", "--quiet", "-m", "component action"],
     );
     let component_commit = output(root.path(), &["rev-parse", "HEAD"]);
     let component_reference = format!("ci/backport@{component_commit}");
+    let component_request = SourceActionResolutionRequest::new(
+        component_reference.clone(),
+        "ci/backport",
+        component_commit,
+        "",
+        vec![
+            "runtrue-action.yml".to_owned(),
+            "action.yml".to_owned(),
+            "action.yaml".to_owned(),
+        ],
+    )
+    .unwrap();
     let prepared_component = resolver
-        .resolve("tenant-1", &consumer_installation.id, &component_reference)
+        .resolve(
+            "tenant-1",
+            &consumer_installation.id,
+            &component_request,
+            &GithubActionsFrontend,
+        )
         .unwrap();
-    let runtrue_workflow_frontend::ResolvedRepositoryProgram::Component {
+    let ResolvedProgramRef::Component {
         reference: resolved_component,
-        scm_api_url,
+        api_url,
         signature_identity,
-        wit_world,
-    } = prepared_component.program
+        interface,
+    } = prepared_component.action.program()
     else {
         panic!("expected a component action");
     };
@@ -1575,26 +1660,70 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
         resolved_component,
         format!("wasm://ghcr.io/runtrue/backport@sha256:{component_digest}")
     );
-    assert_eq!(scm_api_url, "https://github.example.test/api/v3");
+    assert_eq!(api_url, "https://github.example.test/api/v3");
     assert_eq!(signature_identity, "release@runtrue.dev");
-    assert_eq!(wit_world, "runtrue:action/run@1.0.0");
+    assert_eq!(interface, "runtrue:action/run@1.0.0");
     assert_eq!(
         prepared_component.metadata_digest,
         ContentDigest::sha256(runtrue_metadata.as_bytes())
     );
     assert_eq!(builder.requests.lock().unwrap().len(), 1);
 
+    let component_only_resolver = GitHubRepositoryActionResolver::without_builder(
+        Arc::clone(&control),
+        fetcher,
+        installation_provider,
+        GitHubProviderEndpoints::new("https://github.example.test", "https://github.example.test/api/v3")
+            .unwrap(),
+    );
+    assert!(component_only_resolver
+        .resolve(
+            "tenant-1",
+            &consumer_installation.id,
+            &component_request,
+            &GithubActionsFrontend,
+        )
+        .is_ok());
     assert!(matches!(
-        resolver.resolve("tenant-other", &consumer_installation.id, &reference),
-        Err(RepositoryActionResolveError::Unauthorized)
-    ));
-    assert!(matches!(
-        resolver.resolve("tenant-1", &consumer_installation.id, "ci/backport@main"),
+        component_only_resolver.resolve(
+            "tenant-1",
+            &consumer_installation.id,
+            &request,
+            &GithubActionsFrontend,
+        ),
         Err(RepositoryActionResolveError::Rejected)
     ));
-    assert_eq!(fetch_requests.lock().unwrap().len(), 2);
+
+    assert!(matches!(
+        resolver.resolve(
+            "tenant-other",
+            &consumer_installation.id,
+            &request,
+            &GithubActionsFrontend,
+        ),
+        Err(RepositoryActionResolveError::Unauthorized)
+    ));
+    let invalid_request = SourceActionResolutionRequest::new(
+        "ci/backport@main",
+        "ci/backport",
+        "main",
+        "",
+        vec!["action.yml".to_owned()],
+    )
+    .unwrap();
+    assert!(matches!(
+        resolver.resolve(
+            "tenant-1",
+            &consumer_installation.id,
+            &invalid_request,
+            &GithubActionsFrontend,
+        ),
+        Err(RepositoryActionResolveError::Rejected)
+    ));
+    assert_eq!(fetch_requests.lock().unwrap().len(), 4);
 }
 
+#[cfg(feature = "github-actions")]
 #[test]
 fn trusted_full_commit_repository_action_is_prepared_and_locked_generically() {
     let reference = format!("ci/backport@{}", "a".repeat(40));
@@ -1645,7 +1774,69 @@ fn trusted_full_commit_repository_action_is_prepared_and_locked_generically() {
     }));
 }
 
+#[cfg(feature = "github-actions")]
 #[test]
+fn merged_pull_request_recovers_after_repository_action_service_outage() {
+    let reference = format!("ci/backport@{}", "a".repeat(40));
+    let fixture = MirrorFixture::repository_action_pull_request(&reference);
+    let (control, state, mut config) = setup(&fixture.root, "backport-recovery-worker");
+    config.workflow_directory = ".github/workflows".to_owned();
+    config.max_attempts = 1;
+    let mut event = fixture.pull_event();
+    event.event_type = EventType::PullRequest {
+        action: PullRequestAction::Closed,
+    };
+    event.pull_request.as_mut().unwrap().merged = true;
+    event.normalized_digest = ContentDigest::sha256(event.canonical_normalized_bytes().unwrap());
+    enqueue(&control, "event-backport-recovery", &event, NOW);
+    let resolver = Arc::new(RecoveringRepositoryActionResolver {
+        available: AtomicBool::new(false),
+        requests: Mutex::new(Vec::new()),
+        image: format!(
+            "containers.example/runtrue/action-cache@sha256:{}",
+            "b".repeat(64)
+        ),
+    });
+    let worker = state
+        .scm_task_worker(config)
+        .unwrap()
+        .with_repository_action_resolver(resolver.clone());
+
+    let retry_at = match worker.process_once_at(NOW).unwrap() {
+        ScmWorkerTick::Retried {
+            attempt,
+            retry_at_unix_ms,
+            ..
+        } => {
+            assert_eq!(attempt, 1);
+            retry_at_unix_ms
+        }
+        other => panic!("expected recoverable outage, got {other:?}"),
+    };
+    let retained = control.task("event-backport-recovery").unwrap();
+    assert_eq!(retained.status, DurableTaskStatus::Pending);
+    assert_eq!(retained.payload, serde_json::to_value(&event).unwrap());
+
+    resolver.available.store(true, Ordering::Relaxed);
+    let run_id = completed_run(worker.process_once_at(retry_at).unwrap(), false);
+    assert!(matches!(
+        worker.process_once_at(retry_at + 1).unwrap(),
+        ScmWorkerTick::Idle
+    ));
+    assert_eq!(
+        control
+            .list_runs_page(Some("repo-1"), None, 100)
+            .unwrap()
+            .iter()
+            .filter(|run| run.id == run_id)
+            .count(),
+        1
+    );
+    assert_eq!(resolver.requests.lock().unwrap().len(), 2);
+}
+
+#[test]
+#[cfg(feature = "github-actions")]
 fn approved_repository_action_reuses_immutable_preparation_when_resolver_is_unavailable() {
     let reference = format!("ci/backport@{}", "a".repeat(40));
     let image = format!(
@@ -1905,7 +2096,7 @@ fn invalid_proposed_workflow_does_not_block_base_capsule() {
 }
 
 #[test]
-fn missing_mirror_retries_then_records_bounded_terminal_failure() {
+fn missing_mirror_remains_recoverable_until_the_one_day_deadline() {
     let root = tempfile::tempdir().unwrap();
     secure_mode(root.path());
     let (control_plane, state, config) = setup(root.path(), "worker-missing");
@@ -1926,7 +2117,13 @@ fn missing_mirror_retries_then_records_bounded_terminal_failure() {
     };
     assert!(matches!(
         worker.process_once_at(retry_at).unwrap(),
-        ScmWorkerTick::Failed { attempts: 2, .. }
+        ScmWorkerTick::Retried { attempt: 2, .. }
+    ));
+    assert!(matches!(
+        worker
+            .process_once_at(NOW + SCM_EVENT_RECOVERY_WINDOW_MS)
+            .unwrap(),
+        ScmWorkerTick::Idle
     ));
     let task = control_plane.task("event-missing").unwrap();
     assert_eq!(task.status, DurableTaskStatus::Failed);

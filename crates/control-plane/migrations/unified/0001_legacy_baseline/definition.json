@@ -1,0 +1,16 @@
+{
+  "sequence": 1,
+  "migration_id": "legacy-baseline-v1",
+  "logical_schema_generation": 1,
+  "purpose": "Bridge a verified backend-specific legacy lineage into the unified Runtrue migration ledger.",
+  "preconditions": [
+    "recognized-legacy-lineage",
+    "verified-legacy-history",
+    "verified-legacy-schema-shape"
+  ],
+  "postconditions": [
+    "unified-ledger-contract-v1",
+    "installation-identity-bound",
+    "legacy-lineage-retired"
+  ]
+}

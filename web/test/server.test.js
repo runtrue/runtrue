@@ -20,7 +20,7 @@ test("serves the full backend-supported POC surface with a strict CSP", async (t
   const frontendPort = await listen(frontend);
   t.after(() => Promise.all([close(frontend), close(backend)]));
 
-  const response = await fetch(`http://127.0.0.1:${frontendPort}/ui/github/installations`);
+  const response = await fetch(`http://127.0.0.1:${frontendPort}/`);
   const html = await response.text();
 
   assert.equal(response.status, 200);
@@ -33,12 +33,16 @@ test("serves the full backend-supported POC surface with a strict CSP", async (t
   assert.match(html, /data-view="approvals"/);
   assert.match(html, /data-view="repository"/);
   assert.match(html, /data-view="organization"/);
+  assert.match(html, /data-view="secrets"/);
   assert.match(html, /data-view="runners"/);
   assert.match(html, /data-view="api-tokens"/);
   assert.match(html, /data-view="audit"/);
   assert.match(html, /id="boot-shell"[^>]*aria-busy="true"/);
   assert.match(html, /id="login-shell"[^>]*hidden/);
   assert.match(html, /id="run-detail-dialog"/);
+  assert.match(html, /id="refresh-repository-runs"/);
+  assert.match(html, /id="run-source-card"/);
+  assert.match(html, /id="retry-run"[^>]*disabled/);
   assert.match(html, /id="run-job-list"/);
   assert.match(html, /id="run-log-view"/);
   assert.match(html, /data-repository-section="secrets"/);
@@ -47,6 +51,7 @@ test("serves the full backend-supported POC surface with a strict CSP", async (t
   assert.match(html, /id="organization-secrets-body"/);
   assert.match(html, /id="organization-variables-body"/);
   assert.match(html, /id="uninstall-repository-dialog"/);
+  assert.match(html, /class="github-danger-zone"/);
   assert.match(html, /id="repository-setting-dialog"/);
   assert.match(html, /id="repository-workflow-directory"/);
   assert.match(html, /id="repository-workflow-directory-form"/);
@@ -54,12 +59,22 @@ test("serves the full backend-supported POC surface with a strict CSP", async (t
   assert.match(html, /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml">/);
   assert.match(html, /id="user-initials"/);
   assert.match(html, /id="delete-setting-dialog"/);
+  assert.match(html, /id="secret-project-dialog"/);
+  assert.match(html, /id="scoped-secret-dialog"/);
   assert.doesNotMatch(html, /id="tenant-name"/);
   assert.doesNotMatch(html, /class="settings-security-note"/);
   assert.doesNotMatch(html, /run_01/);
   assert.doesNotMatch(html, /apr_207/);
   assert.doesNotMatch(html, /<script(?! src=)/);
   assert.doesNotMatch(html, /<style/);
+
+  const repositoryRouteResponse = await fetch(`http://127.0.0.1:${frontendPort}/repositories/runtrue/runtrue-app-smoke/runs`);
+  assert.equal(repositoryRouteResponse.status, 200);
+  assert.match(await repositoryRouteResponse.text(), /data-view="repository"/);
+
+  const legacyRouteResponse = await fetch(`http://127.0.0.1:${frontendPort}/ui/github/installations/repositories/runtrue/runtrue-app-smoke/runs`, { redirect: "manual" });
+  assert.equal(legacyRouteResponse.status, 308);
+  assert.equal(legacyRouteResponse.headers.get("location"), "/repositories/runtrue/runtrue-app-smoke/runs");
 
   const inlineIcons = [...html.matchAll(/<svg\b[^>]*>/g)].map((match) => match[0]);
   assert.ok(inlineIcons.length > 0, "the interface should include inline icons");
@@ -91,7 +106,7 @@ test("proxies backend cookies, redirects, and request bodies", async (t) => {
     request.setEncoding("utf8");
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
-      response.writeHead(303, { location: "/ui/github/installations?github=linked", "set-cookie": ["runtrue_access=sealed; HttpOnly; Path=/", "runtrue_csrf=sealed; HttpOnly; Path=/"] });
+      response.writeHead(303, { location: "/?github=linked", "set-cookie": ["runtrue_access=sealed; HttpOnly; Path=/", "runtrue_csrf=sealed; HttpOnly; Path=/"] });
       response.end(`${request.method}:${request.url}:${body}`);
     });
   });
@@ -108,7 +123,7 @@ test("proxies backend cookies, redirects, and request bodies", async (t) => {
   });
 
   assert.equal(response.status, 303);
-  assert.equal(response.headers.get("location"), "/ui/github/installations?github=linked");
+  assert.equal(response.headers.get("location"), "/?github=linked");
   assert.deepEqual(response.headers.getSetCookie(), ["runtrue_access=sealed; HttpOnly; Path=/", "runtrue_csrf=sealed; HttpOnly; Path=/"]);
   assert.equal(await response.text(), "POST:/ui/github/repositories/link:csrf_token=proof");
 });
@@ -125,6 +140,14 @@ test("browser script references existing unique controls", async () => {
   for (const id of new Set(referenced)) assert.ok(ids.includes(id), `missing #${id}`);
   assert.match(script, /\/api\/v1\/ui\/runs\//);
   assert.match(script, /function renderRunLogs\(\)/);
+  assert.match(script, /function runTriggerMarkup\(run\)/);
+  assert.match(script, /function runSourceCardMarkup\(run\)/);
+  assert.match(script, /function repositoryRoute\(repository = state\.activeRepository, section = state\.repositorySection\)/);
+  assert.match(script, /function restoreRoute\(\)/);
+  assert.match(script, /history\[replace \? "replaceState" : "pushState"\]/);
+  assert.match(script, /function refreshRepositoryRuns\(\)/);
+  assert.match(script, /"organization", "secrets", "github"/);
+  assert.match(script, /Retry support is coming soon/);
   assert.match(script, /\/api\/v1\/ui\/repositories\//);
   assert.match(script, /function loadRepositorySettings/);
   assert.match(script, /function loadOrganizationSettings/);
@@ -133,6 +156,8 @@ test("browser script references existing unique controls", async () => {
   assert.match(script, /repository\.repositoryUrl/);
   assert.match(script, /function definitionLinkCard/);
   assert.match(script, /\/workflow-directory/);
+  assert.match(script, /class="state-badge \$\{tone\(repository\.state\)\}"/);
+  assert.doesNotMatch(script, /class="status-badge">\$\{escapeHtml\(repository\.state\)\}/);
   assert.doesNotMatch(script, /session\.avatarUrl/);
   assert.match(script, /function deleteRepositorySetting/);
   assert.match(script, /data-delete-setting/);
@@ -143,6 +168,19 @@ test("browser script references existing unique controls", async () => {
   assert.match(script, /\/api\/v1\/ui\/organization\/settings/);
   assert.doesNotMatch(script, /encrypted at rest and only exposed/);
   assert.match(script, /You cannot view this value after saving/);
+  assert.match(script, /function loadSecretInventory/);
+  assert.match(script, /function saveSecretProject/);
+  assert.match(script, /function saveScopedSecret/);
+  assert.match(script, /\/api\/v1\/ui\/secret-projects/);
+  assert.match(script, /\/api\/v1\/ui\/secrets/);
+  assert.doesNotMatch(script, /secret\.value/);
+});
+
+test("run source links keep their label and external icon together", async () => {
+  const styles = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+
+  assert.match(styles, /\.run-source-link \{[^}]*display: inline-flex;/);
+  assert.match(styles, /\.run-source-workflow \{[^}]*border-left:/);
 });
 
 test("login uses a compact centered card", async () => {
@@ -230,4 +268,21 @@ test("audit events expose search and structured filters", async () => {
   assert.match(script, /function configureAuditFilters\(\)/);
   assert.match(script, /action === "all" \|\| event\.action === action/);
   assert.match(script, /result === "all" \|\| event\.result === result/);
+});
+
+test("identity administration exposes team and user management controls", async () => {
+  const [html, script] = await Promise.all([
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(html, /data-view="identity"/);
+  assert.match(html, /Users &amp; teams/);
+  assert.match(html, /id="open-create-user"/);
+  assert.match(html, /No UI access is granted/);
+  assert.match(html, /id="team-member-picker"/);
+  assert.match(script, /fetch\("\/api\/v1\/ui\/identity"/);
+  assert.match(script, /identityMutation\("\/api\/v1\/ui\/users"/);
+  assert.match(script, /function saveTeam\(event\)/);
+  assert.match(script, /function saveUser\(event\)/);
 });

@@ -20,6 +20,8 @@ pub(super) struct Config {
     pub(super) runner_id: Option<String>,
     pub(super) credential_directory: PathBuf,
     pub(super) enrollment_token_file: Option<PathBuf>,
+    pub(super) launch_claim_file: Option<PathBuf>,
+    pub(super) update_claim_file: Option<PathBuf>,
     pub(super) ca_certificate: Option<PathBuf>,
     pub(super) client_certificate: Option<PathBuf>,
     pub(super) client_private_key: Option<PathBuf>,
@@ -32,6 +34,7 @@ pub(super) struct Config {
     pub(super) trusted_native: bool,
     pub(super) oci: Option<OciRuntimePaths>,
     pub(super) wasm: Option<WasmRuntimePaths>,
+    pub(super) wasm_max_concurrent_jobs: u32,
     pub(super) firecracker: Option<FirecrackerRuntimePaths>,
     pub(super) region: Option<String>,
     pub(super) ephemeral: bool,
@@ -56,6 +59,12 @@ impl Config {
         let enrollment_token_file = args
             .enrollment_token_file
             .or_else(|| env::var_os("RUNTRUE_RUNNER_ENROLLMENT_TOKEN_FILE").map(PathBuf::from));
+        let launch_claim_file = args
+            .launch_claim_file
+            .or_else(|| env::var_os("RUNTRUE_RUNNER_LAUNCH_CLAIM_FILE").map(PathBuf::from));
+        let update_claim_file = args
+            .update_claim_file
+            .or_else(|| env::var_os("RUNTRUE_RUNNER_UPDATE_CLAIM_FILE").map(PathBuf::from));
         let state_directory = args
             .state_directory
             .or_else(|| env::var_os("RUNTRUE_RUNNER_STATE_DIRECTORY").map(PathBuf::from))
@@ -139,6 +148,17 @@ impl Config {
             configured_path(args.wasm_aot_cache, "RUNTRUE_RUNNER_WASM_AOT_CACHE"),
             configured_path(args.wasm_runtime_key, "RUNTRUE_RUNNER_WASM_RUNTIME_KEY"),
         ])?;
+        let wasm_max_concurrent_jobs = configured_u32(
+            args.wasm_max_concurrent_jobs,
+            "RUNTRUE_RUNNER_WASM_MAX_CONCURRENT_JOBS",
+        )?
+        .unwrap_or(1);
+        if wasm_max_concurrent_jobs == 0
+            || wasm_max_concurrent_jobs > runtrue_runner_core::MAX_CONCURRENT_WASM_JOBS
+            || (wasm.is_none() && wasm_max_concurrent_jobs != 1)
+        {
+            return Err(StartupError::InvalidWasmConcurrency);
+        }
         let firecracker = complete_firecracker_configuration([
             configured_path(
                 args.firecracker_state_directory,
@@ -185,7 +205,7 @@ impl Config {
         let ephemeral =
             args.ephemeral || environment_flag("RUNTRUE_RUNNER_EPHEMERAL")?.unwrap_or(false);
         let command = args.command.unwrap_or(Command::Daemon);
-        if ephemeral && !matches!(command, Command::Enroll) {
+        if ephemeral && !matches!(command, Command::Enroll | Command::EnrollIfNeeded) {
             return Err(StartupError::EphemeralRequiresEnrollment);
         }
         Ok(Self {
@@ -194,6 +214,8 @@ impl Config {
             runner_id,
             credential_directory,
             enrollment_token_file,
+            launch_claim_file,
+            update_claim_file,
             ca_certificate,
             client_certificate,
             client_private_key,
@@ -206,6 +228,7 @@ impl Config {
             trusted_native,
             oci,
             wasm,
+            wasm_max_concurrent_jobs,
             firecracker,
             region,
             ephemeral,
@@ -216,6 +239,25 @@ impl Config {
 
 fn configured_path(value: Option<PathBuf>, environment: &'static str) -> Option<PathBuf> {
     value.or_else(|| env::var_os(environment).map(PathBuf::from))
+}
+
+fn configured_u32(
+    value: Option<u32>,
+    environment: &'static str,
+) -> Result<Option<u32>, StartupError> {
+    match value {
+        Some(value) => Ok(Some(value)),
+        None => match env::var(environment) {
+            Ok(value) => value
+                .parse()
+                .map(Some)
+                .map_err(|_| StartupError::InvalidUnsignedInteger { name: environment }),
+            Err(env::VarError::NotPresent) => Ok(None),
+            Err(env::VarError::NotUnicode(_)) => {
+                Err(StartupError::InvalidUnsignedInteger { name: environment })
+            }
+        },
+    }
 }
 
 fn environment_flag(name: &'static str) -> Result<Option<bool>, StartupError> {

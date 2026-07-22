@@ -20,6 +20,7 @@ cargo check --workspace --all-targets --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 tests/check_brand.sh
+tests/conformance/verify_workflow_frontend.sh
 python3 tests/conformance/check_schema.py
 python3 tests/conformance/check_openapi_routes.py
 python3 tests/conformance/check_migrations.py
@@ -28,6 +29,11 @@ deploy/tests/validate.sh
 npm --prefix web test
 (cd components/github-signer && go test ./...)
 ```
+
+An update to the GitHub Actions frontend revision must include the external
+repository's locked formatting, test, and strict Clippy results for that exact
+commit. The core workflow-frontend gate validates the pin and integration but
+does not substitute for tests in the external repository.
 
 Container or build-input changes must retain immutable base-image references,
 run without ambient credentials, and pass the image builds in CI. Changes to

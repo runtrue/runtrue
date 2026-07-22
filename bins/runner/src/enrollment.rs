@@ -8,11 +8,35 @@ use crate::{
 };
 use rcgen::{CertificateParams, DistinguishedName, KeyPair, PKCS_ED25519};
 use runtrue_protocol::{resolve_selected_protocol_version, v1, PROTOCOL_MAX, PROTOCOL_MIN};
+use serde::Deserialize;
 use std::path::Path;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
 const MAX_CSR_BYTES: usize = 16 * 1024;
+const MAX_LAUNCH_CLAIM_BYTES: u64 = 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunnerLaunchClaimFile {
+    version: u32,
+    enrollment_token: String,
+    provider: String,
+    provider_instance_id: String,
+    evidence_hex: String,
+    endorsement_hex: String,
+    nonce_digest: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunnerUpdateClaimFile {
+    version: u32,
+    enrollment_token: String,
+    evidence_hex: String,
+    endorsement_hex: String,
+    nonce_digest: String,
+}
 
 pub(crate) struct GeneratedCertificateRequest {
     pub private_key_pem: Zeroizing<String>,
@@ -52,6 +76,25 @@ pub async fn enroll_runner(
     credentials: &RunnerCredentialStore,
     ephemeral: bool,
 ) -> Result<LoadedRunnerCredentials, EnrollmentError> {
+    enroll_runner_with_attestation(
+        endpoint,
+        enrollment_token,
+        inventory,
+        credentials,
+        ephemeral,
+        None,
+    )
+    .await
+}
+
+async fn enroll_runner_with_attestation(
+    endpoint: &EnrollmentEndpointSecurity,
+    enrollment_token: &str,
+    inventory: v1::RunnerInventory,
+    credentials: &RunnerCredentialStore,
+    ephemeral: bool,
+    attestation: Option<v1::AttestationEvidence>,
+) -> Result<LoadedRunnerCredentials, EnrollmentError> {
     endpoint.validate_configuration()?;
     if enrollment_token.is_empty() || enrollment_token.len() > 4096 {
         return Err(EnrollmentError::InvalidEnrollmentToken);
@@ -67,7 +110,7 @@ pub async fn enroll_runner(
             enrollment_token: enrollment_token.to_owned(),
             certificate_signing_request: generated.csr_der,
             inventory: Some(inventory),
-            attestation: None,
+            attestation,
             protocol_min: PROTOCOL_MIN,
             protocol_max: PROTOCOL_MAX,
             ephemeral,
@@ -94,6 +137,107 @@ pub async fn enroll_runner(
             selected_protocol_version,
         })
         .map_err(EnrollmentError::from)
+}
+
+pub async fn enroll_runner_from_launch_claim_file(
+    endpoint: &EnrollmentEndpointSecurity,
+    launch_claim_file: &Path,
+    inventory: v1::RunnerInventory,
+    credentials: &RunnerCredentialStore,
+    ephemeral: bool,
+) -> Result<LoadedRunnerCredentials, EnrollmentError> {
+    let bytes = Zeroizing::new(read_bounded_private_file(
+        launch_claim_file,
+        MAX_LAUNCH_CLAIM_BYTES,
+    )?);
+    let claim: RunnerLaunchClaimFile =
+        serde_json::from_slice(&bytes).map_err(|_| EnrollmentError::InvalidLaunchClaim)?;
+    if claim.version != 1
+        || claim.provider.is_empty()
+        || claim.provider.len() > 128
+        || claim.provider_instance_id.is_empty()
+        || claim.provider_instance_id.len() > 1024
+        || !claim
+            .provider
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(EnrollmentError::InvalidLaunchClaim);
+    }
+    let evidence =
+        hex::decode(&claim.evidence_hex).map_err(|_| EnrollmentError::InvalidLaunchClaim)?;
+    let endorsement =
+        hex::decode(&claim.endorsement_hex).map_err(|_| EnrollmentError::InvalidLaunchClaim)?;
+    if evidence.is_empty()
+        || evidence.len() > MAX_LAUNCH_CLAIM_BYTES as usize
+        || endorsement.len() > MAX_LAUNCH_CLAIM_BYTES as usize
+    {
+        return Err(EnrollmentError::InvalidLaunchClaim);
+    }
+    let nonce = runtrue_model::ContentDigest::parse(&claim.nonce_digest)
+        .map_err(|_| EnrollmentError::InvalidLaunchClaim)?;
+    let nonce = v1::Digest::try_from(&nonce).map_err(|_| EnrollmentError::InvalidLaunchClaim)?;
+    let enrollment_token = Zeroizing::new(claim.enrollment_token);
+    enroll_runner_with_attestation(
+        endpoint,
+        &enrollment_token,
+        inventory,
+        credentials,
+        ephemeral,
+        Some(v1::AttestationEvidence {
+            kind: format!("runtrue.launch.{}", claim.provider),
+            evidence,
+            endorsement,
+            nonce: Some(nonce),
+        }),
+    )
+    .await
+}
+
+pub async fn enroll_runner_from_update_claim_file(
+    endpoint: &EnrollmentEndpointSecurity,
+    update_claim_file: &Path,
+    inventory: v1::RunnerInventory,
+    credentials: &RunnerCredentialStore,
+    ephemeral: bool,
+) -> Result<LoadedRunnerCredentials, EnrollmentError> {
+    let bytes = Zeroizing::new(read_bounded_private_file(
+        update_claim_file,
+        MAX_LAUNCH_CLAIM_BYTES,
+    )?);
+    let claim: RunnerUpdateClaimFile =
+        serde_json::from_slice(&bytes).map_err(|_| EnrollmentError::InvalidUpdateClaim)?;
+    if claim.version != 1 {
+        return Err(EnrollmentError::InvalidUpdateClaim);
+    }
+    let evidence =
+        hex::decode(&claim.evidence_hex).map_err(|_| EnrollmentError::InvalidUpdateClaim)?;
+    let endorsement =
+        hex::decode(&claim.endorsement_hex).map_err(|_| EnrollmentError::InvalidUpdateClaim)?;
+    if evidence.is_empty()
+        || evidence.len() > MAX_LAUNCH_CLAIM_BYTES as usize
+        || endorsement.len() > MAX_LAUNCH_CLAIM_BYTES as usize
+    {
+        return Err(EnrollmentError::InvalidUpdateClaim);
+    }
+    let nonce = runtrue_model::ContentDigest::parse(&claim.nonce_digest)
+        .map_err(|_| EnrollmentError::InvalidUpdateClaim)?;
+    let nonce = v1::Digest::try_from(&nonce).map_err(|_| EnrollmentError::InvalidUpdateClaim)?;
+    let enrollment_token = Zeroizing::new(claim.enrollment_token);
+    enroll_runner_with_attestation(
+        endpoint,
+        &enrollment_token,
+        inventory,
+        credentials,
+        ephemeral,
+        Some(v1::AttestationEvidence {
+            kind: "runtrue.update.fixed-host".to_owned(),
+            evidence,
+            endorsement,
+            nonce: Some(nonce),
+        }),
+    )
+    .await
 }
 
 pub async fn enroll_runner_from_token_file(
@@ -170,6 +314,10 @@ fn timestamp_millis(timestamp: Option<&prost_types::Timestamp>) -> Result<u64, E
 pub enum EnrollmentError {
     #[error("runner enrollment token is empty or exceeds its bound")]
     InvalidEnrollmentToken,
+    #[error("runner launch claim is malformed, unsafe, or exceeds its bound")]
+    InvalidLaunchClaim,
+    #[error("runner update claim is malformed, unsafe, or exceeds its bound")]
+    InvalidUpdateClaim,
     #[error("could not generate an Ed25519 runner certificate request")]
     CertificateRequestGeneration,
     #[error("runner enrollment inventory must use the generation-one compatibility envelope")]

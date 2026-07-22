@@ -454,27 +454,33 @@ impl ControlPlane {
             .and_then(|job| job.steps.iter().find(|step| step.id == request.step_id))
             .ok_or(ControlPlaneError::RunnerBrokerCapabilityDenied)?;
         let metadata = secret_metadata_tx(&transaction, &request.secret_metadata_id)?;
-        let declared = step.capabilities.secrets.iter().any(|secret| {
+        let declared = step.capabilities.secrets.iter().find(|secret| {
             secret.metadata_id == metadata.id
                 && secret.name == metadata.name
                 && secret.purpose.as_deref().unwrap_or_default() == request.purpose
         });
-        let repository_scope = format!("repository:{}", subject.repository_id);
-        let tenant_scope = format!("tenant:{}", subject.tenant_id);
-        if !declared
+        let binding = declared.and_then(|secret| secret.resolution.as_ref());
+        if declared.is_none()
+            || binding.is_none_or(|binding| binding.scope != metadata.scope)
             || metadata.tenant_id != subject.tenant_id
-            || !matches!(metadata.scope.as_str(), scope if scope == repository_scope || scope == tenant_scope)
             || metadata.provider != "built-in"
             || metadata.provider_reference.is_some()
             || metadata.status != "active"
         {
             return Err(ControlPlaneError::RunnerBrokerCapabilityDenied);
         }
-        let secret_version = metadata.current_version.ok_or_else(|| {
-            ControlPlaneError::CorruptState(
-                "active built-in secret metadata has no current version".to_owned(),
-            )
-        })?;
+        let secret_version = binding
+            .and_then(|binding| binding.metadata_version)
+            .filter(|version| {
+                metadata
+                    .current_version
+                    .is_some_and(|current| *version <= current)
+            })
+            .ok_or_else(|| {
+                ControlPlaneError::CorruptState(
+                    "signed built-in secret binding has no eligible exact version".to_owned(),
+                )
+            })?;
         let identity = SecretIdentity::new(
             metadata.tenant_id.clone(),
             metadata.scope.clone(),

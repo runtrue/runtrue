@@ -33,7 +33,7 @@ pub(in crate::app) async fn put_variable(
         Ok(key) => key,
         Err(response) => return response,
     };
-    let tenant = match scope_tenant(&state, &scope) {
+    let tenant = match scope_tenant(&state, &scope).await {
         Ok(tenant) => tenant,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -44,21 +44,20 @@ pub(in crate::app) async fn put_variable(
         &principal,
         CedarAction::WriteVariable,
         scoped_resource(CedarResourceKind::Variable, &resource_id, &tenant, &scope),
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let now = match now_unix_ms(&request_id) {
         Ok(now) => now,
         Err(response) => return response,
     };
-    match state.control_plane.put_variable_idempotent(
-        &idempotency_key,
-        &tenant,
-        &scope,
-        &name,
-        body.value,
-        now,
-    ) {
+    match state
+        .store
+        .put_variable(&idempotency_key, &tenant, &scope, &name, body.value, now)
+        .await
+    {
         Ok(result) => {
             let mut response = Json(result.value).into_response();
             response.headers_mut().insert(
@@ -77,7 +76,7 @@ pub(in crate::app) async fn get_variable(
     Extension(principal): Extension<RequestPrincipal>,
     Path((scope, name)): Path<(String, String)>,
 ) -> Response {
-    let tenant = match scope_tenant(&state, &scope) {
+    let tenant = match scope_tenant(&state, &scope).await {
         Ok(tenant) => tenant,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -88,10 +87,12 @@ pub(in crate::app) async fn get_variable(
         &principal,
         CedarAction::ReadVariable,
         scoped_resource(CedarResourceKind::Variable, &resource_id, &tenant, &scope),
-    ) {
+    )
+    .await
+    {
         return response;
     }
-    match state.control_plane.variable(&tenant, &scope, &name) {
+    match state.store.variable_record(&tenant, &scope, &name).await {
         Ok(variable) => Json(variable).into_response(),
         Err(error) => control_plane_problem(&request_id, error),
     }
@@ -103,7 +104,7 @@ pub(in crate::app) async fn delete_variable(
     Extension(principal): Extension<RequestPrincipal>,
     Path((scope, name)): Path<(String, String)>,
 ) -> Response {
-    let tenant = match scope_tenant(&state, &scope) {
+    let tenant = match scope_tenant(&state, &scope).await {
         Ok(tenant) => tenant,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -114,10 +115,16 @@ pub(in crate::app) async fn delete_variable(
         &principal,
         CedarAction::WriteVariable,
         scoped_resource(CedarResourceKind::Variable, &resource_id, &tenant, &scope),
-    ) {
+    )
+    .await
+    {
         return response;
     }
-    match state.control_plane.delete_variable(&tenant, &scope, &name) {
+    match state
+        .store
+        .delete_variable_record(&tenant, &scope, &name)
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => control_plane_problem(&request_id, error),
     }

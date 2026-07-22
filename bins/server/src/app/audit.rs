@@ -44,19 +44,20 @@ pub(in crate::app) async fn list_audit_events(
             &principal,
             CedarAction::ReadAudit,
             tenant_id,
-        ) {
+        )
+        .await
+        {
             return response;
         }
-        state.control_plane.audit_events_page_for_tenant(
-            tenant_id,
-            query.action.as_deref(),
-            cursor,
-            limit,
-        )
+        state
+            .store
+            .events_page_for_tenant(tenant_id, query.action.as_deref(), cursor, limit)
+            .await
     } else {
         state
-            .control_plane
-            .audit_events_page(query.action.as_deref(), cursor, limit)
+            .store
+            .events_page(query.action.as_deref(), cursor, limit)
+            .await
     };
     match events {
         Ok(items) => {

@@ -76,6 +76,58 @@ pub struct HumanUserRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct TeamRecord {
+    pub id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub description: String,
+    pub status: String,
+    pub created_unix_ms: u64,
+    pub updated_unix_ms: u64,
+    pub version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamMembershipRecord {
+    pub tenant_id: String,
+    pub team_id: String,
+    pub user_id: String,
+    pub role: String,
+    pub created_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryAccessSubject {
+    User(String),
+    Team(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryAccessGrantRecord {
+    pub id: String,
+    pub tenant_id: String,
+    pub repository_id: String,
+    pub subject: RepositoryAccessSubject,
+    pub permission: String,
+    pub created_unix_ms: u64,
+    pub updated_unix_ms: u64,
+    pub version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveRepositoryAccess {
+    pub repository_id: String,
+    pub permission: String,
+    pub direct: bool,
+    pub team_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HumanIdentityRecord {
     pub id: String,
     pub tenant_id: String,

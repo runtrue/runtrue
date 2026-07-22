@@ -1,0 +1,15 @@
+{
+  "sequence": 6,
+  "migration_id": "scm-event-recovery-v1",
+  "logical_schema_generation": 6,
+  "purpose": "Keep transiently blocked SCM events recoverable for a bounded 24-hour window and revive matching events failed by the previous bounded-attempt behavior.",
+  "preconditions": [
+    "durable-event-replay-v1-applied",
+    "durable-tasks-present"
+  ],
+  "postconditions": [
+    "recoverable-scm-events-have-an-explicit-deadline",
+    "permanent-task-failures-remain-terminal",
+    "legacy-transient-scm-failures-are-bounded-for-recovery"
+  ]
+}

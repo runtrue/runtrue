@@ -1,7 +1,7 @@
 use crate::{QueuedJob, RunnerRecord, RunnerStatus, SchedulingRequirements};
 use runtrue_model::ContentDigest;
 use runtrue_workflow_ir::{Architecture, Isolation, OperatingSystem};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn runner(id: &str) -> RunnerRecord {
     RunnerRecord {
@@ -16,15 +16,18 @@ pub(super) fn runner(id: &str) -> RunnerRecord {
         logical_cpus: 8,
         memory_bytes: 16 * 1024 * 1024,
         storage_bytes: 100 * 1024 * 1024,
+        max_concurrent_wasm_jobs: 1,
         region: Some("us-east".to_owned()),
         verified_capabilities: ["kvm".to_owned()].into_iter().collect(),
         self_reported_capabilities: ["gpu".to_owned()].into_iter().collect(),
         status: RunnerStatus::Online,
         active_jobs: 0,
+        active_wasm_jobs: 0,
         used_cpus: 0,
         used_memory_bytes: 0,
         used_storage_bytes: 0,
         locality: BTreeSet::new(),
+        package_tiers: BTreeMap::new(),
         last_heartbeat_unix_ms: 0,
     }
 }

@@ -2,8 +2,8 @@
 
 ## Goal and ownership
 
-Split `crates/gha-import/src/lib.rs`. This lane exclusively owns
-`crates/gha-import/**`. Start after lane 07.
+Split `frontends/github-actions/src/lib.rs`. This lane exclusively owns
+`frontends/github-actions/**`. Start after lane 07.
 
 ## Target layout
 

@@ -1,0 +1,15 @@
+{
+  "sequence": 5,
+  "migration_id": "durable-event-replay-v1",
+  "logical_schema_generation": 5,
+  "purpose": "Persist immutable frontend and backend events with an atomic initial dispatch and idempotent, durable replay attempts.",
+  "preconditions": [
+    "legacy-baseline-v1-applied",
+    "durable-task-schema-present"
+  ],
+  "postconditions": [
+    "accepted-events-are-immutable-and-durable",
+    "initial-event-dispatch-is-atomic",
+    "failed-events-can-be-replayed-idempotently"
+  ]
+}

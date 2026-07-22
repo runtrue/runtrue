@@ -36,6 +36,20 @@ signature identity, media type, platform, and compatibility metadata before the
 Capsule is sealed. Changing any execution-affecting Program material creates a
 different Program identity.
 
+Package retrieval is an operational Provider concern and is not part of the
+Program or Capsule identity. The core package-pull contract accepts only an
+exact digest-pinned reference and expected payload digest, selects credentials
+by exact registry authority and optionally by package kind, and re-verifies the
+returned reference, media type, byte bound, and payload digest. Container
+images and WebAssembly Components use this same contract; named package kinds
+allow future package protocols without treating them as OCI or Wasm.
+
+Registry credentials are runtime-only values. They are never serialized into a
+Program, Capsule, Seal, Evidence event, or portable error. A package-specific
+credential overrides a registry-wide credential, registry matching never uses
+suffix or wildcard rules, and a pull marked as requiring authentication fails
+before contacting its fetch provider when no matching credential is present.
+
 ### 2. Execution semantics
 
 An **Execution** is one bounded attempt to run one Program under one immutable

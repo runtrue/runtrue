@@ -7,7 +7,7 @@ use super::{
 };
 use runtrue_artifacts::ArtifactClassification;
 use runtrue_control_plane::{
-    ArtifactCatalogRecord, ControlPlane, ControlPlaneError, CredentialTaintState,
+    ArtifactCatalogRecord, ControlPlaneError, ControlPlaneStore, CredentialTaintState,
 };
 use runtrue_lifecycle::JobState;
 use runtrue_model::ContentDigest;
@@ -38,11 +38,13 @@ impl RunnerControlService {
             request.fencing_generation,
             false,
         )?;
-        let lease = self.bound_lease(
-            &authenticated.runner_id,
-            &request.lease_id,
-            request.fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &authenticated.runner_id,
+                &request.lease_id,
+                request.fencing_generation,
+            )
+            .await?;
         if lease.state != LeaseState::Offered || now_unix_ms()? >= lease.accept_by_unix_ms {
             return Err(Status::failed_precondition(
                 "execution capsule is available only for a current offer",
@@ -63,6 +65,7 @@ impl RunnerControlService {
             .inner
             .control_plane
             .signed_capsule_for_lease(&lease.id)
+            .await
             .map_err(control_plane_status)?;
         validate_capsule_binding(&lease, &capsule)?;
         fetch_capsule_response(capsule)
@@ -87,11 +90,13 @@ impl RunnerControlService {
         let now = now_unix_ms()?;
         validate_observed_timestamp(request.completed_at.as_ref(), now)?;
         let session = self.authenticated_session(authenticated)?;
-        let lease = self.bound_lease(
-            &authenticated.runner_id,
-            &request.lease_id,
-            request.fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &authenticated.runner_id,
+                &request.lease_id,
+                request.fencing_generation,
+            )
+            .await?;
         if request.installation_fencing_epoch != lease.installation_fencing_epoch {
             return Err(Status::failed_precondition(
                 "completion installation epoch is stale",
@@ -129,7 +134,8 @@ impl RunnerControlService {
             let persisted_log_frames = self
                 .inner
                 .control_plane
-                .runner_log_frame_count_for_lease(&lease.id)
+                .runner_log_frame_count(&lease.id)
+                .await
                 .map_err(control_plane_status)?;
             if persisted_log_frames < u64::from(request.expected_log_frames) {
                 return Err(Status::failed_precondition(
@@ -148,6 +154,7 @@ impl RunnerControlService {
             .inner
             .control_plane
             .signed_capsule_for_lease(&lease.id)
+            .await
             .map_err(control_plane_status)?;
         validate_capsule_binding(&lease, &signed)?;
         let capsule: ExecutionCapsule = serde_json::from_slice(&signed.canonical_capsule)
@@ -166,12 +173,12 @@ impl RunnerControlService {
             // The completion is already authenticated and fenced to this exact
             // active lease, so accept either arrival order without requiring the
             // runner to race a control-stream update against this request.
-            ensure_job_finalizing(&self.inner.control_plane, &lease.job_id, now)?;
+            ensure_job_finalizing(self.inner.control_plane.as_ref(), &lease.job_id, now).await?;
         }
         let completed = self
             .inner
             .control_plane
-            .complete_lease_with_objects(
+            .complete_runner_lease(
                 &lease.id,
                 &authenticated.runner_id,
                 lease.fencing_generation,
@@ -185,8 +192,10 @@ impl RunnerControlService {
                 &required_artifacts,
                 now,
             )
+            .await
             .map_err(control_plane_status)?;
-        self.catalog_completed_artifacts(&request.artifact_ids, request.final_job_attempt)?;
+        self.catalog_completed_artifacts(&request.artifact_ids, request.final_job_attempt)
+            .await?;
         if self
             .authenticated_session(authenticated)
             .is_ok_and(|current| Arc::ptr_eq(&current, &session))
@@ -217,7 +226,7 @@ impl RunnerControlService {
         })
     }
 
-    pub(super) fn catalog_completed_artifacts(
+    pub(super) async fn catalog_completed_artifacts(
         &self,
         artifact_ids: &[String],
         job_attempt: u32,
@@ -270,6 +279,7 @@ impl RunnerControlService {
                     state: state.to_owned(),
                     created_unix_ms: record.committed_at_unix_seconds.saturating_mul(1_000),
                 })
+                .await
                 .map_err(control_plane_status)?;
         }
         Ok(())
@@ -380,12 +390,15 @@ pub(super) fn parse_completion_state(value: &str) -> Result<JobState, Status> {
     }
 }
 
-pub(super) fn ensure_job_finalizing(
-    control_plane: &ControlPlane,
+pub(super) async fn ensure_job_finalizing(
+    control_plane: &dyn ControlPlaneStore,
     job_id: &str,
     now_unix_ms: u64,
 ) -> Result<(), Status> {
-    match control_plane.transition_job_state(job_id, JobState::Finalizing, now_unix_ms) {
+    match control_plane
+        .transition_job_state(job_id, JobState::Finalizing, now_unix_ms)
+        .await
+    {
         Ok(_) => Ok(()),
         Err(ControlPlaneError::InvalidTransition {
             entity: "job",

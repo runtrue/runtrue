@@ -70,21 +70,25 @@ pub(in crate::app) async fn list_approvals(
             &principal,
             CedarAction::ApproveWorkflow,
             tenant_id,
-        ) {
+        )
+        .await
+        {
             return response;
         }
-        state.control_plane.list_approval_requests_page_for_tenant(
-            tenant_id,
-            query.status.as_deref(),
-            query.cursor.as_deref(),
-            limit,
-        )
+        state
+            .store
+            .list_approval_requests_page_for_tenant(
+                tenant_id,
+                query.status.as_deref(),
+                query.cursor.as_deref(),
+                limit,
+            )
+            .await
     } else {
-        state.control_plane.list_approval_requests_page(
-            query.status.as_deref(),
-            query.cursor.as_deref(),
-            limit,
-        )
+        state
+            .store
+            .list_approval_requests_page(query.status.as_deref(), query.cursor.as_deref(), limit)
+            .await
     };
     let records = match records {
         Ok(records) => records,
@@ -110,9 +114,9 @@ pub(in crate::app) async fn get_approval(
     Extension(principal): Extension<RequestPrincipal>,
     Path(approval_id): Path<String>,
 ) -> Response {
-    match state.control_plane.approval_request(&approval_id) {
+    match state.store.approval_request(&approval_id).await {
         Ok(record) => {
-            let tenant = match state.control_plane.approval_request_tenant(&approval_id) {
+            let tenant = match state.store.approval_request_tenant(&approval_id).await {
                 Ok(tenant) => tenant,
                 Err(_) => return internal_problem(&request_id),
             };
@@ -127,7 +131,9 @@ pub(in crate::app) async fn get_approval(
                         record.kind != ApprovalKind::WorkflowDefinition,
                         false,
                     ),
-            ) {
+            )
+            .await
+            {
                 return response;
             }
             match ApprovalView::from_record(record) {
@@ -156,11 +162,11 @@ pub(in crate::app) async fn decide_approval(
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let approval = match state.control_plane.approval_request(&approval_id) {
+    let approval = match state.store.approval_request(&approval_id).await {
         Ok(approval) => approval,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let tenant = match state.control_plane.approval_request_tenant(&approval_id) {
+    let tenant = match state.store.approval_request_tenant(&approval_id).await {
         Ok(tenant) => tenant,
         Err(_) => return internal_problem(&request_id),
     };
@@ -174,7 +180,9 @@ pub(in crate::app) async fn decide_approval(
             approval.kind != ApprovalKind::WorkflowDefinition,
             false,
         ),
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let body: ApprovalDecisionBody = match required_json(&request_id, body) {
@@ -208,12 +216,11 @@ pub(in crate::app) async fn decide_approval(
         subject_digest,
         decided_unix_ms: now,
     };
-    match state.control_plane.decide_approval_idempotent(
-        &idempotency_key,
-        &approval_id,
-        decision,
-        now,
-    ) {
+    match state
+        .store
+        .decide_approval_idempotent(&idempotency_key, &approval_id, decision, now)
+        .await
+    {
         Ok(result) => match ApprovalView::from_record(result.value) {
             Ok(approval) => {
                 let mut response = (StatusCode::CREATED, Json(approval)).into_response();

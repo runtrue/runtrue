@@ -25,6 +25,14 @@ kept in redacting, zeroizing wrappers, masked from host logs, and rejected if a
 component attempts to publish them as structured output. No command or native
 fallback exists.
 
+The remote runner may execute multiple Wasm jobs in one process. Wasmtime
+Engines, admitted Components, and authenticated AOT state are shared; every
+job invocation receives a fresh Store, WASI context, capability handles, fuel
+budget, deadline, and output budget. `WasmLimits::max_instances` remains a
+per-Store component limit and is not the runner concurrency setting. Configure
+runner concurrency with `RUNTRUE_RUNNER_WASM_MAX_CONCURRENT_JOBS` (1 through
+64); non-Wasm backends remain exclusive within the runner process.
+
 The executor runs only the current host's baseline target: Linux or macOS on
 `x86_64` or `aarch64`. Cross-target execution and Windows are rejected. This
 keeps native AOT bytes bound to the machine-code target and lets the cache
@@ -35,16 +43,21 @@ The AOT key binds the component and WIT digests, WASI and Wasmtime versions, tar
 triple, CPU feature floor, compiler settings, mitigation profile, and
 Wasmtime's engine compatibility hash. Cache metadata and serialized component
 artifacts are HMAC-authenticated, size-bounded, and checked as component AOT
-objects before Wasmtime's safe source-loading/cache path is used. Cold source
-compilation uses a separate engine with Wasmtime's internal cache disabled;
-the cache-enabled engine is used only after Runtrue authenticates an AOT entry,
-and its serialized result must exactly equal that authenticated entry before
-guest initialization. Corrupt entries are quarantined and rebuilt as misses.
+objects before admission into an immutable in-memory AOT tier. Cold source
+compilation uses a separate engine with Wasmtime's internal cache disabled.
+The cache-enabled engine deserializes only an artifact bound to the complete
+engine compatibility key. This unsafe Wasmtime boundary is isolated behind a
+private admitted-artifact type whose bytes cannot be mutated after admission.
+Corrupt entries are quarantined and rebuilt as misses.
 The cache authentication key and capability-handle key are installation
 secrets and are zeroized on drop.
 
 Remote runners call `preflight_components` before advertising Wasm. This
-verifies and compiles every registered signed component. Normal cold-cache
+verifies and compiles every registered signed component. The bounded package
+cache retains up to 64 compiled components by default. Its separate immutable
+AOT tier lets component evictions demote to warmish while the artifact remains
+inside that tier's limits, which default to 1,024 entries and 512 MiB.
+Both limits are configurable through `WasmPackageCacheConfig`. Normal cold-cache
 publication does not create an integrity event; corrupt or unauthenticated AOT
 state is quarantined and recorded so a runner can fail that startup instead of
 silently advertising from repaired state. Atomic cache publication and rooted
@@ -61,3 +74,32 @@ executor while a step runs: no filesystem API can preserve write integrity
 against an unrelated same-UID process that can concurrently mutate the same
 directory. macOS execution remains available with custom capability adapters,
 but the concrete rooted filesystem adapter is intentionally not exported there.
+
+## Performance measurements
+
+The executor emits backend-neutral phase measurements for request validation,
+package verification, warm and warmish in-memory lookup, authenticated AOT
+inspection, compilation/deserialization, cache publication, invocation
+preparation, instantiation, guest execution, and output finalization. It distinguishes a
+source compile, authenticated disk AOT hit, immutable in-memory AOT hit,
+memory-resident component, and quarantined cache miss.
+
+Run the reproducible no-op benchmark in release mode once for each preparation
+state:
+
+```text
+cargo run --release -p runtrue-executor-wasm --example runtime_benchmark -- \
+  --state cold --iterations 30 --warmup 3 --output cold.json
+cargo run --release -p runtrue-executor-wasm --example runtime_benchmark -- \
+  --state aot --iterations 30 --warmup 3 --output aot.json
+cargo run --release -p runtrue-executor-wasm --example runtime_benchmark -- \
+  --state warmish --iterations 1000 --warmup 100 --output warmish.json
+cargo run --release -p runtrue-executor-wasm --example runtime_benchmark -- \
+  --state hot --iterations 1000 --warmup 100 --output hot.json
+```
+
+Set `RUNTRUE_HARNESS_COMMIT` at compile time to bind a report to a source
+revision. Each JSON report retains raw samples and nearest-rank p50/p90/p95/p99
+summaries using the shared `runtrue-runtime-metrics` schema. Cold and AOT
+iterations use independent temporary cache roots and verify the observed state
+before accepting a sample.

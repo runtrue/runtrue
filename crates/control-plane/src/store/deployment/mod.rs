@@ -4,9 +4,9 @@ mod requests;
 mod signing_results;
 
 use super::*;
-pub(super) use environments::*;
-pub(super) use providers::*;
-pub(super) use requests::*;
+pub(crate) use environments::*;
+pub(crate) use providers::*;
+pub(crate) use requests::*;
 pub(super) use signing_results::*;
 impl ControlPlane {
     pub fn put_tenant_provider_configuration(

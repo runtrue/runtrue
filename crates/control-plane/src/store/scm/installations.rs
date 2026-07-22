@@ -703,6 +703,35 @@ pub(in crate::store) fn insert_github_installation_profile_tx(
 }
 
 impl ControlPlane {
+    /// Stable GitHub account identity associated with a linked repository.
+    /// This is presentation-adapter metadata; secret resolution itself remains
+    /// provider-neutral and accepts the returned SCM account id as input.
+    pub fn github_account_id_for_repository(
+        &self,
+        tenant_id: &str,
+        repository_id: &str,
+    ) -> Result<String, ControlPlaneError> {
+        validate_text("GitHub account tenant", tenant_id)?;
+        validate_text("GitHub account repository", repository_id)?;
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT p.account_external_id
+                 FROM scm_repository_links l
+                 JOIN scm_installations i
+                   ON i.id = l.installation_id AND i.tenant_id = l.tenant_id
+                 JOIN github_installation_profiles p
+                   ON p.installation_id = i.id AND p.tenant_id = i.tenant_id
+                 WHERE l.tenant_id = ?1 AND l.repository_id = ?2
+                   AND l.status = 'active' AND i.provider = 'github'
+                   AND i.status = 'active'",
+                params![tenant_id, repository_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| not_found("GitHub repository account", repository_id))
+    }
+
     pub fn reconcile_github_installation(
         &self,
         request: &ReconcileGitHubInstallation,

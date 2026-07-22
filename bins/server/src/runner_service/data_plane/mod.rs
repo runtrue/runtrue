@@ -17,13 +17,9 @@ use runtrue_artifacts::{ArtifactHandle, ArtifactLimits, ArtifactStore};
 use runtrue_attest::CapsuleSigningKey;
 use runtrue_cache::{CacheKeyMaterial, CacheLimits, CacheStore, PromotionEvidence, TrustDomain};
 use runtrue_control_plane::{
-    CacheTrustGenerationRecord, ControlPlane, IssueRunnerSourceTicket, RunnerSourceDownload,
+    CacheTrustGenerationRecord, ControlPlaneStore, IssueRunnerSourceTicket, RunnerSourceDownload,
 };
 use runtrue_model::ContentDigest;
-use runtrue_output_lifecycle::{
-    execute_artifact_promotion, ArtifactScannerClient, GcSummary, LifecycleLimits,
-    OutputLifecycleWorker,
-};
 use runtrue_protocol::v2;
 use runtrue_scheduler::LeaseState;
 use runtrue_storage::{CasLimits, FsCas, PathSnapshot, VerifiedBlobReader};
@@ -127,15 +123,16 @@ impl RunnerDataPlane {
     /// for a bounded durable-task worker: it revalidates filesystem metadata,
     /// immutable bytes, source/target identities, evidence, and target CAS
     /// before atomically completing the SQLite journal.
-    pub fn execute_cache_promotion(
+    pub async fn execute_cache_promotion(
         &self,
-        control_plane: &ControlPlane,
+        control_plane: &dyn ControlPlaneStore,
         tenant_id: &str,
         promotion_id: &str,
         now_unix_ms: u64,
     ) -> Result<ContentDigest, RunnerServiceError> {
         let journal = control_plane
             .cache_promotion(tenant_id, promotion_id)
+            .await
             .map_err(|error| RunnerServiceError::DataPlane(error.to_string()))?;
         let completed_result =
             if journal.state == runtrue_control_plane::CachePromotionState::Completed {
@@ -165,6 +162,7 @@ impl RunnerDataPlane {
         }
         let source_record = control_plane
             .cache_trust_generation(tenant_id, &journal.source_cache_entry_id)
+            .await
             .map_err(|error| RunnerServiceError::DataPlane(error.to_string()))?;
         let material: CacheKeyMaterial = serde_json::from_value(source_record.key_material.clone())
             .map_err(|error| RunnerServiceError::DataPlane(error.to_string()))?;
@@ -316,56 +314,9 @@ impl RunnerDataPlane {
                 },
                 now_unix_ms,
             )
+            .await
             .map_err(|error| RunnerServiceError::DataPlane(error.to_string()))?;
         Ok(promoted_id)
-    }
-
-    /// Production adapter for one bounded scanner claim. The concrete scanner
-    /// remains an isolated service client and receives no data-plane or runner
-    /// credentials.
-    pub fn scan_artifact_once(
-        &self,
-        control_plane: &ControlPlane,
-        worker_id: &str,
-        scanner: &dyn ArtifactScannerClient,
-        limits: LifecycleLimits,
-        now_unix_ms: u64,
-    ) -> Result<bool, RunnerServiceError> {
-        OutputLifecycleWorker::new(control_plane, &self.artifacts, limits)
-            .and_then(|worker| worker.scan_once(worker_id, scanner, now_unix_ms))
-            .map_err(|error| RunnerServiceError::DataPlane(error.to_string()))
-    }
-
-    /// Production adapter for one restart-safe, installation-fenced GC cycle.
-    pub fn collect_outputs_once(
-        &self,
-        control_plane: &ControlPlane,
-        worker_id: &str,
-        lease_token: &str,
-        limits: LifecycleLimits,
-        now_unix_ms: u64,
-    ) -> Result<GcSummary, RunnerServiceError> {
-        OutputLifecycleWorker::new(control_plane, &self.artifacts, limits)
-            .and_then(|worker| worker.gc_once(worker_id, lease_token, now_unix_ms))
-            .map_err(|error| RunnerServiceError::DataPlane(error.to_string()))
-    }
-
-    /// Execute or reconcile one evidence-bound immutable artifact promotion.
-    pub fn promote_artifact_once(
-        &self,
-        control_plane: &ControlPlane,
-        tenant_id: &str,
-        promotion_id: &str,
-        now_unix_ms: u64,
-    ) -> Result<ContentDigest, RunnerServiceError> {
-        execute_artifact_promotion(
-            control_plane,
-            &self.artifacts,
-            tenant_id,
-            promotion_id,
-            now_unix_ms,
-        )
-        .map_err(|error| RunnerServiceError::DataPlane(error.to_string()))
     }
 
     pub(crate) fn load_artifact(
@@ -408,7 +359,7 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
         &self,
         request: Request<v2::SourceTicketRequest>,
     ) -> Result<Response<v2::SourceTicketResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         let request = request.into_inner();
         validate_identifier_status("execution lease id", &request.execution_lease_id)?;
         validate_identifier_status("job id", &request.job_id)?;
@@ -423,11 +374,13 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
             request.fencing_generation,
             true,
         )?;
-        let lease = self.bound_lease(
-            &authenticated.runner_id,
-            &request.execution_lease_id,
-            request.fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &authenticated.runner_id,
+                &request.execution_lease_id,
+                request.fencing_generation,
+            )
+            .await?;
         if lease.state != LeaseState::Active {
             return Err(Status::failed_precondition(
                 "source ticket requires an active lease",
@@ -437,11 +390,13 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
             .inner
             .control_plane
             .signed_capsule_for_lease(&lease.id)
+            .await
             .map_err(control_plane_status)?;
         let job = self
             .inner
             .control_plane
             .job(&lease.job_id)
+            .await
             .map_err(control_plane_status)?;
         if job_key != request.job_id || job.attempt != request.job_attempt {
             return Err(Status::permission_denied(
@@ -473,6 +428,7 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
                 issued_unix_ms: now,
                 expires_unix_ms: expires,
             })
+            .await
             .map_err(control_plane_status)?;
         let digest = wire_v2_digest(&issued.value.tree_manifest_digest)?;
         Ok(Response::new(v2::SourceTicketResponse {
@@ -488,7 +444,7 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
         &self,
         request: Request<tonic::Streaming<v2::ObjectUploadFrame>>,
     ) -> Result<Response<v2::ObjectUploadResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         let session = self.authenticated_session(&authenticated)?;
         require_session_protocol(&session, 2)?;
         let _transfer_slot = self
@@ -523,7 +479,9 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
             declared_digest: parse_v2_digest(&header.digest_algorithm, &header.digest)?,
             declared_size: Some(header.size_bytes),
         };
-        let authorized = self.authorize_runner_upload(&authenticated, &binding)?;
+        let authorized = self
+            .authorize_runner_upload(&authenticated, &binding)
+            .await?;
         let mut pending = self.begin_runner_upload(&authorized)?;
         loop {
             let frame =
@@ -577,7 +535,7 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
         &self,
         request: Request<v2::ObjectDownloadRequest>,
     ) -> Result<Response<Self::DownloadObjectStream>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         let request = request.into_inner();
         validate_identifier_status("source ticket id", &request.ticket_id)?;
         validate_identifier_status("execution lease id", &request.execution_lease_id)?;
@@ -591,20 +549,24 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
             request.fencing_generation,
             true,
         )?;
-        let lease = self.bound_lease(
-            &authenticated.runner_id,
-            &request.execution_lease_id,
-            request.fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &authenticated.runner_id,
+                &request.execution_lease_id,
+                request.fencing_generation,
+            )
+            .await?;
         let (job_key, _) = self
             .inner
             .control_plane
             .signed_capsule_for_lease(&lease.id)
+            .await
             .map_err(control_plane_status)?;
         let job = self
             .inner
             .control_plane
             .job(&lease.job_id)
+            .await
             .map_err(control_plane_status)?;
         if lease.state != LeaseState::Active
             || job_key != request.job_id
@@ -618,6 +580,7 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
             .inner
             .control_plane
             .runner_source_ticket(&request.ticket_id)
+            .await
             .map_err(|_| Status::permission_denied("source download is not authorized"))?;
         let now = now_unix_ms()?;
         if ticket.runner_id != authenticated.runner_id
@@ -665,6 +628,7 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
         self.inner
             .control_plane
             .begin_runner_source_download(&transfer)
+            .await
             .map_err(control_plane_status)?;
         let permit = data
             .transfer_slots
@@ -762,7 +726,7 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
             }
             let mut completed = transfer;
             completed.recorded_unix_ms = now_unix_ms().unwrap_or(completed.recorded_unix_ms);
-            if let Err(error) = control.finish_runner_source_download(&completed) {
+            if let Err(error) = control.finish_runner_source_download(&completed).await {
                 let _ = sender.send(Err(control_plane_status(error))).await;
             }
         });
@@ -773,16 +737,18 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
         &self,
         request: Request<v2::CompleteLeaseRequest>,
     ) -> Result<Response<v2::CompleteLeaseResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         let session = self.authenticated_session(&authenticated)?;
         require_session_protocol(&session, 2)?;
         let (request, artifact_claims, credential_taint) =
             self.adapt_v2_completion(request.into_inner())?;
-        let lease = self.bound_lease(
-            &authenticated.runner_id,
-            &request.lease_id,
-            request.fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &authenticated.runner_id,
+                &request.lease_id,
+                request.fencing_generation,
+            )
+            .await?;
         if lease.state != LeaseState::Completed {
             require_session_lease(
                 &session,
@@ -801,6 +767,7 @@ impl v2::runner_object_transfer_server::RunnerObjectTransfer for RunnerControlSe
                 request.final_job_attempt,
                 &artifact_claims,
             )
+            .await
             .map_err(control_plane_status)?;
         let response = self
             .complete_authenticated(&authenticated, request, credential_taint)

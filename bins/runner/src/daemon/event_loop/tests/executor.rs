@@ -109,6 +109,7 @@ fn native_backend_rejects_secret_and_oidc_grants_without_environment_fallback() 
             metadata_id: "secret-1".to_owned(),
             name: "TOKEN".to_owned(),
             purpose: None,
+            resolution: None,
         });
     execution_capsule.jobs[0].steps[0]
         .capabilities

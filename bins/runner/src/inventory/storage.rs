@@ -14,9 +14,10 @@ pub(super) fn probe_storage_bytes(path: &Path) -> Result<u64, InventoryError> {
     {
         let program = [Path::new("/bin/df"), Path::new("/usr/bin/df")]
             .into_iter()
+            .filter_map(|candidate| fs::canonicalize(candidate).ok())
             .find(|candidate| storage_probe_program_is_safe(candidate))
             .ok_or(InventoryError::UnsupportedProbe("storage"))?;
-        let output = run_storage_probe(program, path, STORAGE_PROBE_TIMEOUT)?;
+        let output = run_storage_probe(&program, path, STORAGE_PROBE_TIMEOUT)?;
         if !output.status || output.stdout.len() > MAX_PROC_FILE_BYTES as usize {
             return Err(InventoryError::InvalidStorageProbe);
         }

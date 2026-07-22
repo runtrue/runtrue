@@ -13,7 +13,7 @@ use crate::scm_worker::{GitHubInstallationTokenProvider, DEFAULT_SCM_WORKFLOW_DI
 use rand_core::OsRng;
 use runtrue_attest::CapsuleSigningKey;
 use runtrue_auth::{SessionPolicy, TokenHasher};
-use runtrue_control_plane::{ControlPlane, ControlPlaneError};
+use runtrue_control_plane::{ControlPlaneError, ControlPlaneStore};
 use runtrue_oidc::OidcIssuer;
 use runtrue_policy::CedarAuthorizationEngine;
 use runtrue_scm::{
@@ -164,7 +164,7 @@ impl GitHubInstallationMetrics {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub control_plane: Arc<ControlPlane>,
+    pub store: Arc<dyn ControlPlaneStore>,
     pub(in crate::app) auth: BootstrapAuth,
     pub(in crate::app) webhook: Option<Arc<GitHubWebhookVerifier>>,
     pub(in crate::app) webhook_limits: WebhookLimits,
@@ -184,7 +184,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(
-        control_plane: Arc<ControlPlane>,
+        store: Arc<dyn ControlPlaneStore>,
         bootstrap_token: &str,
         webhook_secret: Option<&[u8]>,
     ) -> Result<Self, ServerBuildError> {
@@ -193,7 +193,7 @@ impl AppState {
             .try_fill_bytes(&mut seed)
             .map_err(|_| ServerBuildError::RandomnessUnavailable)?;
         Self::new_with_security_seed(
-            control_plane,
+            store,
             bootstrap_token,
             webhook_secret,
             seed,
@@ -202,7 +202,7 @@ impl AppState {
     }
 
     pub fn new_with_security_seed(
-        control_plane: Arc<ControlPlane>,
+        store: Arc<dyn ControlPlaneStore>,
         bootstrap_token: &str,
         webhook_secret: Option<&[u8]>,
         mut security_seed: [u8; 32],
@@ -235,7 +235,7 @@ impl AppState {
             DenyFirstPolicy::default(),
         )?;
         Ok(Self {
-            control_plane,
+            store,
             auth: BootstrapAuth::new(bootstrap_token)?,
             webhook,
             webhook_limits,
@@ -311,7 +311,7 @@ impl AppState {
         Ok(self)
     }
 
-    pub fn with_github_oauth_quickstart(
+    pub async fn with_github_oauth_quickstart(
         mut self,
         config: GitHubOauthQuickstartConfig,
     ) -> Result<Self, ServerBuildError> {
@@ -361,7 +361,7 @@ impl AppState {
             updated_unix_ms: config.now_unix_ms,
             version: 1,
         };
-        match self.control_plane.tenant_identity(&tenant.id) {
+        match self.store.tenant_identity(&tenant.id).await {
             Ok(existing) if existing.slug == tenant.slug && existing.status == "active" => {}
             Ok(_) => {
                 return Err(ServerBuildError::HumanOidc(
@@ -369,13 +369,14 @@ impl AppState {
                 ))
             }
             Err(ControlPlaneError::NotFound { .. }) => {
-                self.control_plane.put_tenant_identity(&tenant, None)?;
+                self.store.put_tenant_identity(&tenant, None).await?;
             }
             Err(error) => return Err(error.into()),
         }
         match self
-            .control_plane
-            .tenant_oidc_provider_configuration(&provider.tenant_id, &provider.id)
+            .store
+            .oidc_provider(&provider.tenant_id, &provider.id)
+            .await
         {
             Ok(existing)
                 if existing.issuer == provider.issuer
@@ -388,8 +389,7 @@ impl AppState {
                 ))
             }
             Err(ControlPlaneError::NotFound { .. }) => {
-                self.control_plane
-                    .put_tenant_oidc_provider_configuration(&provider, None)?;
+                self.store.put_oidc_provider(&provider, None).await?;
             }
             Err(error) => return Err(error.into()),
         }
@@ -471,14 +471,13 @@ impl AppState {
         worker_id: &str,
         now_unix_ms: u64,
     ) -> Result<bool, GitHubLifecycleWorkerError> {
-        if self.github_installation.is_none() || self.control_plane.recovery_state()?.safe_mode {
+        if self.github_installation.is_none() || self.store.recovery_state().await?.safe_mode {
             return Ok(false);
         }
-        let Some(delivery) = self.control_plane.claim_next_github_lifecycle_delivery(
-            worker_id,
-            now_unix_ms,
-            GITHUB_LIFECYCLE_LEASE_MS,
-        )?
+        let Some(delivery) = self
+            .store
+            .claim_next_github_lifecycle_delivery(worker_id, now_unix_ms, GITHUB_LIFECYCLE_LEASE_MS)
+            .await?
         else {
             return Ok(false);
         };
@@ -521,7 +520,7 @@ impl AppState {
     ) -> Result<RunnerControlService, RunnerServiceError> {
         let service = if let Some(data_plane) = &self.runner_data_plane {
             RunnerControlService::new_with_data_plane_and_config(
-                Arc::clone(&self.control_plane),
+                Arc::clone(&self.store),
                 authority,
                 Arc::clone(&self.secret_master_key),
                 Arc::clone(&self.oidc),
@@ -530,7 +529,7 @@ impl AppState {
             )?
         } else {
             RunnerControlService::new_with_brokers_and_config(
-                Arc::clone(&self.control_plane),
+                Arc::clone(&self.store),
                 authority,
                 Arc::clone(&self.secret_master_key),
                 Arc::clone(&self.oidc),

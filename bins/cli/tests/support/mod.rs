@@ -30,7 +30,7 @@ pub(crate) fn example_path() -> PathBuf {
 
 pub(crate) fn github_fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../crates/gha-import/tests/fixtures")
+        .join("tests/fixtures/github-actions")
         .join(name)
 }
 

@@ -82,21 +82,29 @@ fn all_eligible_runners_exhausted_tx(
     Ok(true)
 }
 
-pub(in crate::store) fn runner_reserved_resources_tx(
+pub(in crate::store) fn runner_reserved_requirements_tx(
     transaction: &Transaction<'_>,
     runner_id: &str,
-) -> Result<(u64, u64, u64), ControlPlaneError> {
+) -> Result<Vec<SchedulingRequirements>, ControlPlaneError> {
     let mut statement = transaction.prepare(
         "SELECT j.requirements_json FROM leases l
          JOIN jobs j ON j.id = l.job_id
          WHERE l.runner_id = ?1 AND l.state IN ('offered', 'active', 'cancel_requested')
          ORDER BY l.id",
     )?;
-    let requirements = statement
+    let values = statement
         .query_map([runner_id], |row| {
             json_column::<SchedulingRequirements>(row, 0)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(values)
+}
+
+pub(in crate::store) fn runner_reserved_resources_tx(
+    transaction: &Transaction<'_>,
+    runner_id: &str,
+) -> Result<(u64, u64, u64), ControlPlaneError> {
+    let requirements = runner_reserved_requirements_tx(transaction, runner_id)?;
     let mut cpu = 0_u64;
     let mut memory = 0_u64;
     let mut storage = 0_u64;
@@ -175,10 +183,15 @@ pub(in crate::store) fn signed_job_locality_hits(
     source_tree_digest: Option<&ContentDigest>,
     locality: &BTreeSet<ContentDigest>,
 ) -> usize {
-    fn digest_from_reference(value: &str) -> Option<ContentDigest> {
-        let encoded = value.rsplit_once('@').map_or(value, |(_, digest)| digest);
-        ContentDigest::parse(encoded).ok()
-    }
+    signed_job_preferred_content(job, source_tree_digest)
+        .intersection(locality)
+        .count()
+}
+
+fn signed_job_preferred_content(
+    job: &runtrue_workflow_ir::PlannedJob,
+    source_tree_digest: Option<&ContentDigest>,
+) -> BTreeSet<ContentDigest> {
     let mut preferred = BTreeSet::new();
     if let Some(source) = source_tree_digest {
         preferred.insert(source.clone());
@@ -201,7 +214,25 @@ pub(in crate::store) fn signed_job_locality_hits(
             preferred.insert(script_digest.clone());
         }
     }
-    preferred.intersection(locality).count()
+    preferred
+}
+
+fn digest_from_reference(value: &str) -> Option<ContentDigest> {
+    let encoded = value.rsplit_once('@').map_or(value, |(_, digest)| digest);
+    ContentDigest::parse(encoded).ok()
+}
+
+pub(in crate::store) fn signed_job_package_tier(
+    job: &runtrue_workflow_ir::PlannedJob,
+    source_tree_digest: Option<&ContentDigest>,
+    package_tiers: &BTreeMap<ContentDigest, runtrue_scheduler::PackagePreparationTier>,
+) -> u8 {
+    signed_job_preferred_content(job, source_tree_digest)
+        .iter()
+        .filter_map(|digest| package_tiers.get(digest))
+        .map(|tier| tier.placement_rank())
+        .max()
+        .unwrap_or(0)
 }
 
 pub(in crate::store) fn scheduler_maintenance_tx(
@@ -299,12 +330,26 @@ pub(in crate::store) fn scheduler_maintenance_tx(
         values
     };
     for runner_id in ephemeral_ids {
-        let has_lease_history: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM leases WHERE runner_id = ?1)",
+        let has_durable_history: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM leases WHERE runner_id = ?1
+                UNION ALL
+                SELECT 1 FROM runner_fleet_requests WHERE runner_id = ?1
+                UNION ALL
+                SELECT 1 FROM runner_launch_claims WHERE runner_id = ?1
+                UNION ALL
+                SELECT 1 FROM runner_slots WHERE active_runner_id = ?1
+                UNION ALL
+                SELECT 1 FROM runner_replacements
+                    WHERE source_runner_id = ?1 OR target_runner_id = ?1
+                UNION ALL
+                SELECT 1 FROM runner_software_update_claims
+                    WHERE runner_id = ?1 OR source_runner_id = ?1
+             )",
             [&runner_id],
             |row| row.get(0),
         )?;
-        if has_lease_history {
+        if has_durable_history {
             let mut persisted = persisted_runner_tx(transaction, &runner_id)?;
             persisted.runner.retired = true;
             transaction.execute(
@@ -318,8 +363,9 @@ pub(in crate::store) fn scheduler_maintenance_tx(
             )?;
             continue;
         }
-        // Ephemeral identities with no lease history have no execution audit
-        // state. Remove their enrollment-only children before the runner row.
+        // Ephemeral identities with no execution or fleet history have no
+        // durable audit state. Remove their enrollment-only children before
+        // the runner row.
         transaction.execute(
             "DELETE FROM runner_certificate_rotations WHERE runner_id = ?1",
             [&runner_id],
@@ -487,7 +533,7 @@ impl ControlPlane {
         let existing_id: Option<String> = transaction
             .query_row(
                 "SELECT id FROM leases WHERE runner_id = ?1
-                 AND state IN ('offered', 'active', 'cancel_requested')
+                 AND state = 'offered'
                  AND accept_by_unix_ms > ?2 AND expires_unix_ms > ?2
                  AND hard_deadline_unix_ms > ?2
                  ORDER BY issued_unix_ms, id LIMIT 1",
@@ -497,19 +543,8 @@ impl ControlPlane {
             .optional()?;
         if let Some(existing_id) = existing_id {
             let lease = lease_tx(&transaction, &existing_id)?;
-            let result = (lease.state == LeaseState::Offered).then_some(lease);
             transaction.commit()?;
-            return Ok(result);
-        }
-        let stale_open_remains: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM leases WHERE runner_id = ?1
-             AND state IN ('offered', 'active', 'cancel_requested'))",
-            [runner_id],
-            |row| row.get(0),
-        )?;
-        if stale_open_remains {
-            transaction.commit()?;
-            return Ok(None);
+            return Ok(Some(lease));
         }
 
         let runner_row: Option<(String, String, String, String, Option<String>)> = transaction
@@ -583,6 +618,7 @@ impl ControlPlane {
             return Ok(None);
         }
 
+        let reserved_requirements = runner_reserved_requirements_tx(&transaction, runner_id)?;
         let (reserved_cpu, reserved_memory, reserved_storage) =
             runner_reserved_resources_tx(&transaction, runner_id)?;
         let used_cpu = reserved_cpu.max(u64::from(runner.used_cpus));
@@ -615,7 +651,7 @@ impl ControlPlane {
             job: JobRecord,
             planned: runtrue_workflow_ir::PlannedJob,
             digest: ContentDigest,
-            score: (Reverse<i64>, Reverse<usize>, u64, String),
+            score: (Reverse<i64>, Reverse<u8>, Reverse<usize>, u64, String),
         }
         let mut admissible = Vec::new();
         for job_id in candidate_ids {
@@ -748,7 +784,19 @@ impl ControlPlane {
                 continue;
             }
             let requirements = &job.requirements;
-            if requirements.os != runner.os
+            let isolation_capacity_available = match requirements.isolation {
+                runtrue_workflow_ir::Isolation::Wasm => {
+                    reserved_requirements
+                        .iter()
+                        .all(|reserved| reserved.isolation == runtrue_workflow_ir::Isolation::Wasm)
+                        && reserved_requirements.len() < runner.max_concurrent_wasm_jobs as usize
+                }
+                runtrue_workflow_ir::Isolation::Oci
+                | runtrue_workflow_ir::Isolation::Microvm
+                | runtrue_workflow_ir::Isolation::Native => reserved_requirements.is_empty(),
+            };
+            if !isolation_capacity_available
+                || requirements.os != runner.os
                 || requirements.arch != runner.arch
                 || !runner.isolation_backends.contains(&requirements.isolation)
                 || (!requirements.allowed_pools.is_empty()
@@ -776,9 +824,15 @@ impl ControlPlane {
                 capsule.context.source_tree_digest.as_ref(),
                 &runner.locality,
             );
+            let package_tier = signed_job_package_tier(
+                planned,
+                capsule.context.source_tree_digest.as_ref(),
+                &runner.package_tiers,
+            );
             admissible.push(AdmissibleCandidate {
                 score: (
                     Reverse(effective_priority),
+                    Reverse(package_tier),
                     Reverse(locality_hits),
                     job.created_unix_ms,
                     job.id.clone(),

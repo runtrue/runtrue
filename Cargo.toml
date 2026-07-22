@@ -2,12 +2,14 @@
 resolver = "2"
 members = [
   "bins/cli",
+  "bins/autoscaler",
   "bins/guest",
   "bins/image",
   "bins/runner",
   "bins/server",
   "bins/update",
   "crates/artifacts",
+  "crates/autoscaler",
   "crates/audit",
   "crates/backup",
   "crates/auth",
@@ -26,7 +28,6 @@ members = [
   "crates/executor-wasm",
   "crates/expression",
   "crates/git",
-  "crates/gha-import",
   "crates/guest-core",
   "crates/lifecycle",
   "crates/lock",
@@ -42,6 +43,7 @@ members = [
   "crates/reports",
   "crates/runtrue",
   "crates/runtime-local",
+  "crates/runtime-metrics",
   "crates/runner-core",
   "crates/scheduler",
   "crates/scm",
@@ -63,6 +65,7 @@ rust-version = "1.94"
 
 [workspace.dependencies]
 runtrue-artifacts = { path = "crates/artifacts" }
+runtrue-autoscaler = { path = "crates/autoscaler" }
 runtrue-auth = { path = "crates/auth" }
 runtrue-cache = { path = "crates/cache" }
 runtrue-attest = { path = "crates/attest" }
@@ -80,7 +83,7 @@ runtrue-executor-oci = { path = "crates/executor-oci" }
 runtrue-executor-wasm = { path = "crates/executor-wasm" }
 runtrue-expression = { path = "crates/expression" }
 runtrue-git = { path = "crates/git" }
-runtrue-gha-import = { path = "crates/gha-import" }
+runtrue-gha-import = { git = "https://github.com/runtrue/github-actions-frontend", rev = "1064f9efe2e5b3a4229a4aee2454b2b07e3294e6" }
 runtrue-guest-core = { path = "crates/guest-core" }
 runtrue-lifecycle = { path = "crates/lifecycle" }
 runtrue-lock = { path = "crates/lock" }
@@ -96,6 +99,7 @@ runtrue-replay = { path = "crates/replay" }
 runtrue-reports = { path = "crates/reports" }
 runtrue = { path = "crates/runtrue" }
 runtrue-runtime-local = { path = "crates/runtime-local" }
+runtrue-runtime-metrics = { path = "crates/runtime-metrics" }
 runtrue-runner-core = { path = "crates/runner-core" }
 runtrue-scheduler = { path = "crates/scheduler" }
 runtrue-scm = { path = "crates/scm" }
@@ -132,6 +136,7 @@ rand_core = { version = "=0.6.4", features = ["getrandom"] }
 rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "ring", "pem", "x509-parser", "zeroize"] }
 regex = "=1.10.4"
 rusqlite = { version = "=0.31.0", features = ["bundled"] }
+sqlx = { version = "=0.8.6", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
 rustls-pki-types = "=1.15.0"
 rustix = { version = "=0.38.44", features = ["fs"] }
 serde = { version = "=1.0.228", features = ["derive"] }
@@ -158,6 +163,13 @@ wat = "=1.253.0"
 zeroize = "=1.7.0"
 x509-parser = { version = "=0.18.1", default-features = false, features = ["verify"] }
 x25519-dalek = { version = "=2.0.1", default-features = false, features = ["static_secrets", "zeroize"] }
+
+[patch."https://github.com/runtrue/runtrue"]
+runtrue-compiler = { path = "crates/compiler" }
+runtrue-lock = { path = "crates/lock" }
+runtrue-model = { path = "crates/model" }
+runtrue-workflow-ast = { path = "crates/workflow-ast" }
+runtrue-workflow-frontend = { path = "crates/workflow-frontend" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

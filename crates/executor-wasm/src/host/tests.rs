@@ -148,6 +148,7 @@ fn secret_reads_require_the_exact_declared_handle() {
             metadata_id: "declared".to_owned(),
             name: "TOKEN".to_owned(),
             purpose: Some("test".to_owned()),
+            resolution: None,
         },
     );
     assert_eq!(
@@ -175,6 +176,7 @@ fn declared_but_unused_credentials_do_not_taint_guest_output() {
             metadata_id: "declared".to_owned(),
             name: "TOKEN".to_owned(),
             purpose: None,
+            resolution: None,
         },
     );
     state
@@ -211,6 +213,7 @@ fn successful_credential_release_suppresses_transformed_and_split_guest_material
             metadata_id: "declared".to_owned(),
             name: "TOKEN".to_owned(),
             purpose: None,
+            resolution: None,
         },
     );
     state
@@ -365,6 +368,7 @@ fn host_enforces_adapter_request_response_and_secret_budgets() {
             metadata_id: "declared".to_owned(),
             name: "TOKEN".to_owned(),
             purpose: None,
+            resolution: None,
         },
     );
 

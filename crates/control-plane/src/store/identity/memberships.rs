@@ -19,28 +19,35 @@ pub(in crate::store) fn membership_row(row: &Row<'_>) -> rusqlite::Result<Tenant
     })
 }
 
+pub(in crate::store) fn validate_tenant_membership(
+    record: &TenantMembershipRecord,
+) -> Result<Vec<u8>, ControlPlaneError> {
+    for value in [
+        &record.id,
+        &record.tenant_id,
+        &record.user_id,
+        &record.role_template,
+    ] {
+        validate_r9_identifier(value)?;
+    }
+    let attributes = r9_json_bytes(&record.attributes, MAX_R9_IDENTITY_JSON_BYTES)?;
+    if record.expected_attributes_digest()? != record.attributes_digest
+        || !matches!(record.status.as_str(), "active" | "suspended" | "revoked")
+        || record.version == 0
+        || record.updated_unix_ms < record.created_unix_ms
+    {
+        return Err(ControlPlaneError::InvalidInput("invalid tenant membership"));
+    }
+    Ok(attributes)
+}
+
 impl ControlPlane {
     pub fn put_tenant_membership(
         &self,
         record: &TenantMembershipRecord,
         expected_version: Option<u64>,
     ) -> Result<bool, ControlPlaneError> {
-        for value in [
-            &record.id,
-            &record.tenant_id,
-            &record.user_id,
-            &record.role_template,
-        ] {
-            validate_r9_identifier(value)?;
-        }
-        let attributes = r9_json_bytes(&record.attributes, MAX_R9_IDENTITY_JSON_BYTES)?;
-        if record.expected_attributes_digest()? != record.attributes_digest
-            || !matches!(record.status.as_str(), "active" | "suspended" | "revoked")
-            || record.version == 0
-            || record.updated_unix_ms < record.created_unix_ms
-        {
-            return Err(ControlPlaneError::InvalidInput("invalid tenant membership"));
-        }
+        let attributes = validate_tenant_membership(record)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         require_r9_tenant_tx(&transaction, &record.tenant_id)?;

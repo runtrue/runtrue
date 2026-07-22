@@ -4,6 +4,83 @@ fn compile(source: &str) -> Result<Compilation, CompileError> {
     Compiler::default().compile_yaml(source, CompileContext::default())
 }
 
+#[test]
+fn trusted_secret_resolution_is_bound_before_capsule_sealing() {
+    let source = r#"
+version: 1
+permissions:
+  repository: deny
+  network: deny
+  secrets: [{ name: TOKEN, purpose: publish }]
+jobs:
+  publish:
+    permissions:
+      secrets: [{ name: TOKEN, purpose: publish }]
+    steps:
+      - capabilities:
+          secrets: [{ name: TOKEN, purpose: publish }]
+        run: { command: ["true"] }
+"#;
+    let mut compilation = compile(source).unwrap();
+    let local_digest = compilation.capsule_digest.clone();
+    let local_approval = compilation.approval_subject_digest.clone();
+    let resolution_digest = ContentDigest::sha256(b"resolution");
+    compilation
+        .bind_secret_resolutions(&BTreeMap::from([(
+            "TOKEN".to_owned(),
+            ResolvedSecretMetadata {
+                metadata_id: "secret-production".to_owned(),
+                binding: runtrue_model::SecretResolutionBinding {
+                    scope: "project:release".to_owned(),
+                    metadata_version: Some(7),
+                    resolution_digest: resolution_digest.clone(),
+                    project_versions: vec![runtrue_model::SecretProjectVersion {
+                        project_id: "release".to_owned(),
+                        version: 3,
+                    }],
+                },
+            },
+        )]))
+        .unwrap();
+
+    assert_ne!(compilation.capsule_digest, local_digest);
+    assert_ne!(compilation.approval_subject_digest, local_approval);
+    assert_eq!(
+        compilation.approval_subject.secret_metadata_ids,
+        ["secret-production"]
+    );
+    let reference = &compilation.capsule.jobs[0].steps[0].capabilities.secrets[0];
+    assert_eq!(reference.metadata_id, "secret-production");
+    let binding = reference.resolution.as_ref().unwrap();
+    assert_eq!(binding.metadata_version, Some(7));
+    assert_eq!(binding.resolution_digest, resolution_digest);
+    assert_eq!(binding.project_versions[0].version, 3);
+    assert_eq!(
+        compilation.capsule_digest,
+        compilation.capsule.digest().unwrap()
+    );
+    assert_eq!(
+        compilation.approval_subject_digest,
+        compilation.approval_subject.digest().unwrap()
+    );
+}
+
+#[test]
+fn trusted_secret_binding_requires_the_exact_declared_name_set() {
+    let source = r#"
+version: 1
+permissions:
+  secrets: [{ name: TOKEN }]
+jobs:
+  test:
+    steps: [{ run: { command: ["true"] } }]
+"#;
+    let mut compilation = compile(source).unwrap();
+    assert!(compilation
+        .bind_secret_resolutions(&BTreeMap::new())
+        .is_err());
+}
+
 fn workflow(body: &str) -> String {
     format!(
         "version: 1\nname: test\npermissions:\n  network: deny\n  repository: deny\njobs:\n{body}"
@@ -1183,6 +1260,38 @@ fn workflow_change_gate_does_not_change_canonical_workflow_identity() {
     );
     assert!(!unchanged.capsule.approval.workflow_definition);
     assert!(changed.capsule.approval.workflow_definition);
+}
+
+#[test]
+fn frontend_provenance_is_bound_to_capsule_and_approval_subject() {
+    let provenance = ir::WorkflowFrontendProvenance {
+        frontend_id: "runtrue.github-actions".to_owned(),
+        contract_generation: 1,
+        frontend_generation: 2,
+        configuration_digest: ContentDigest::sha256(b"frontend config"),
+        input_digest: ContentDigest::sha256(b"source"),
+        native_digest: ContentDigest::sha256(b"native"),
+        report_digest: Some(ContentDigest::sha256(b"compatibility report")),
+    };
+    let source = workflow("  build:\n    steps: [{ run: { command: [\"true\"] } }]\n");
+    let compilation = Compiler::default()
+        .compile_yaml(
+            &source,
+            CompileContext {
+                workflow_frontend: Some(provenance.clone()),
+                ..CompileContext::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        compilation.capsule.context.workflow_frontend,
+        Some(provenance.clone())
+    );
+    assert_eq!(
+        compilation.approval_subject.workflow_frontend,
+        Some(provenance)
+    );
+    assert!(compilation.workflow_frontend_report.is_none());
 }
 
 #[test]

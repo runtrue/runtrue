@@ -15,8 +15,8 @@ use crate::runner_broker::{SecretEnvelopeBinding, SecretEnvelopeSealer, ENVELOPE
 use crate::runner_certificates::RunnerCertificateAuthority;
 use runtrue_cache::CacheRestoreRequest;
 use runtrue_control_plane::{
-    AuthorizeRunnerOidcRequest, ControlPlane, IssueRunnerSecretRequest, RecordRunnerBlobUpload,
-    RecordRunnerOidcIssuance,
+    AuthorizeRunnerOidcRequest, ControlPlaneStore, IssueRunnerSecretRequest,
+    RecordRunnerBlobUpload, RecordRunnerOidcIssuance,
 };
 use runtrue_model::ContentDigest;
 use runtrue_oidc::{MintTokenRequest, OidcIssuer, DEFAULT_TOKEN_TTL_SECONDS};
@@ -41,7 +41,7 @@ pub struct RunnerControlService {
 
 impl RunnerControlService {
     pub fn new(
-        control_plane: Arc<ControlPlane>,
+        control_plane: Arc<dyn ControlPlaneStore>,
         certificate_authority: Arc<RunnerCertificateAuthority>,
     ) -> Result<Self, RunnerServiceError> {
         Self::with_config(
@@ -52,7 +52,7 @@ impl RunnerControlService {
     }
 
     pub fn new_with_brokers(
-        control_plane: Arc<ControlPlane>,
+        control_plane: Arc<dyn ControlPlaneStore>,
         certificate_authority: Arc<RunnerCertificateAuthority>,
         secret_master_key: Arc<MasterKey>,
         oidc_issuer: Arc<OidcIssuer>,
@@ -67,7 +67,7 @@ impl RunnerControlService {
     }
 
     pub fn new_with_brokers_and_config(
-        control_plane: Arc<ControlPlane>,
+        control_plane: Arc<dyn ControlPlaneStore>,
         certificate_authority: Arc<RunnerCertificateAuthority>,
         secret_master_key: Arc<MasterKey>,
         oidc_issuer: Arc<OidcIssuer>,
@@ -84,7 +84,7 @@ impl RunnerControlService {
     }
 
     pub fn new_with_data_plane(
-        control_plane: Arc<ControlPlane>,
+        control_plane: Arc<dyn ControlPlaneStore>,
         certificate_authority: Arc<RunnerCertificateAuthority>,
         secret_master_key: Arc<MasterKey>,
         oidc_issuer: Arc<OidcIssuer>,
@@ -101,7 +101,7 @@ impl RunnerControlService {
     }
 
     pub fn new_with_data_plane_and_config(
-        control_plane: Arc<ControlPlane>,
+        control_plane: Arc<dyn ControlPlaneStore>,
         certificate_authority: Arc<RunnerCertificateAuthority>,
         secret_master_key: Arc<MasterKey>,
         oidc_issuer: Arc<OidcIssuer>,
@@ -119,7 +119,7 @@ impl RunnerControlService {
     }
 
     pub fn with_config(
-        control_plane: Arc<ControlPlane>,
+        control_plane: Arc<dyn ControlPlaneStore>,
         certificate_authority: Arc<RunnerCertificateAuthority>,
         config: RunnerControlConfig,
     ) -> Result<Self, RunnerServiceError> {
@@ -134,7 +134,7 @@ impl RunnerControlService {
     }
 
     pub(super) fn with_optional_security(
-        control_plane: Arc<ControlPlane>,
+        control_plane: Arc<dyn ControlPlaneStore>,
         certificate_authority: Option<Arc<RunnerCertificateAuthority>>,
         secret_master_key: Option<Arc<MasterKey>>,
         oidc_issuer: Option<Arc<OidcIssuer>>,
@@ -169,7 +169,7 @@ impl RunnerControlService {
 
     #[cfg(test)]
     pub(super) fn with_test_config(
-        control_plane: Arc<ControlPlane>,
+        control_plane: Arc<dyn ControlPlaneStore>,
         config: RunnerControlConfig,
     ) -> Result<Self, RunnerServiceError> {
         Self::with_optional_security(control_plane, None, None, None, None, config)
@@ -203,7 +203,7 @@ impl RunnerControlService {
         self.inner.protocol_metrics.snapshot()
     }
 
-    pub(super) fn authenticate<T>(
+    pub(super) async fn authenticate<T>(
         &self,
         request: &Request<T>,
     ) -> Result<AuthenticatedIdentity, Status> {
@@ -226,7 +226,8 @@ impl RunnerControlService {
         let authenticated = self
             .inner
             .control_plane
-            .authenticate_runner_certificate(&fingerprint, now_unix_ms()?)
+            .authenticate_pool_runner_certificate(&fingerprint, now_unix_ms()?)
+            .await
             .map_err(control_plane_status)?;
         Ok(AuthenticatedIdentity {
             runner_id: authenticated.runner.runner.id,
@@ -327,12 +328,13 @@ impl RunnerControlService {
         }
     }
 
-    pub(super) fn cleanup_session(&self, session: &RunnerSession) {
+    pub(super) async fn cleanup_session(&self, session: &RunnerSession) {
         if let Ok(now) = now_unix_ms() {
             let _ = self
                 .inner
                 .control_plane
-                .mark_runner_disconnected(&session.runner_id, now);
+                .set_pool_runner_connected(&session.runner_id, false, now)
+                .await;
         }
         self.remove_session(&session.runner_id, &session.connection_id);
     }
@@ -401,6 +403,7 @@ impl RunnerControlService {
             .inner
             .control_plane
             .recovery_state()
+            .await
             .map_err(control_plane_status)?;
         if recovery.safe_mode {
             return Err(Status::unavailable(
@@ -410,7 +413,8 @@ impl RunnerControlService {
         let persisted = self
             .inner
             .control_plane
-            .runner(&authenticated.runner_id)
+            .pool_runner(&authenticated.runner_id)
+            .await
             .map_err(control_plane_status)?;
         if matches!(
             persisted.runner.status,
@@ -429,7 +433,8 @@ impl RunnerControlService {
         let posture_digest = self
             .inner
             .control_plane
-            .validate_runner_inventory_binding(&persisted.runner.id, &inventory_digest)
+            .validate_pool_runner_inventory(&persisted.runner.id, &inventory_digest)
+            .await
             .map_err(control_plane_status)?;
         let runner_image_digest = inventory
             .runner_image_digest
@@ -443,6 +448,7 @@ impl RunnerControlService {
             runner_id: authenticated.runner_id,
             connection_id: hello.connection_id,
             protocol_version: hello.protocol_version,
+            max_concurrent_wasm_jobs: persisted.runner.max_concurrent_wasm_jobs as usize,
             posture_digest,
             runner_image_digest,
             certificate_fingerprint: authenticated.certificate_fingerprint,
@@ -460,12 +466,14 @@ impl RunnerControlService {
                 rotation_notice_sent: false,
             }),
             offer_lock: tokio::sync::Mutex::new(()),
+            broker_lock: tokio::sync::Mutex::new(()),
         });
         self.register_session(Arc::clone(&session))?;
         if let Err(error) = self
             .inner
             .control_plane
-            .mark_runner_connected(&session.runner_id, now_unix_ms()?)
+            .set_pool_runner_connected(&session.runner_id, true, now_unix_ms()?)
+            .await
         {
             self.remove_session(&session.runner_id, &session.connection_id);
             return Err(control_plane_status(error));
@@ -480,11 +488,11 @@ impl RunnerControlService {
             })),
         };
         if let Err(error) = self.send_control(&session, control_hello).await {
-            self.cleanup_session(&session);
+            self.cleanup_session(&session).await;
             return Err(error);
         }
         if let Err(error) = self.synchronize_session(&session, now_unix_ms()?).await {
-            self.cleanup_session(&session);
+            self.cleanup_session(&session).await;
             return Err(error);
         }
 
@@ -494,7 +502,7 @@ impl RunnerControlService {
             if let Err(status) = result {
                 service.send_stream_error(&session, status).await;
             }
-            service.cleanup_session(&session);
+            service.cleanup_session(&session).await;
         });
         Ok(ReceiverStream::new(receiver))
     }
@@ -540,27 +548,33 @@ impl RunnerControlService {
                 Ok(false)
             }
             Some(v1::runner_message::Body::JobState(update)) => {
-                self.handle_job_state(session, &update)?;
+                self.handle_job_state(session, &update).await?;
                 Ok(false)
             }
             Some(v1::runner_message::Body::StepState(update)) => {
-                self.validate_step_state(session, &update)?;
+                self.validate_step_state(session, &update).await?;
                 Ok(false)
             }
             Some(v1::runner_message::Body::LogBatch(batch)) => {
-                self.validate_log_batch(session, &batch)?;
+                self.validate_log_batch(session, &batch).await?;
                 Ok(false)
             }
             Some(v1::runner_message::Body::CancellationAck(ack)) => {
-                self.handle_cancellation_ack(session, &ack)?;
+                self.handle_cancellation_ack(session, &ack).await?;
                 Ok(false)
             }
             Some(v1::runner_message::Body::Locality(locality)) => {
                 validate_runner_message_identity(session, &locality.runner_id)?;
-                let digests = validate_locality(&locality)?;
+                let (digests, package_tiers) = validate_locality(&locality)?;
                 self.inner
                     .control_plane
-                    .update_runner_locality(&session.runner_id, &digests, now_unix_ms()?)
+                    .update_pool_runner_locality(
+                        &session.runner_id,
+                        &digests,
+                        &package_tiers,
+                        now_unix_ms()?,
+                    )
+                    .await
                     .map_err(control_plane_status)?;
                 Ok(false)
             }
@@ -576,7 +590,7 @@ impl RunnerControlService {
     }
 }
 impl RunnerControlService {
-    fn issue_scm_provider_credential(
+    async fn issue_scm_provider_credential(
         &self,
         session: &Arc<RunnerSession>,
         lease: &Lease,
@@ -588,6 +602,7 @@ impl RunnerControlService {
             .inner
             .control_plane
             .signed_capsule_for_lease(&lease.id)
+            .await
             .map_err(control_plane_status)?;
         validate_capsule_binding(lease, &signed)?;
         let capsule: ExecutionCapsule = serde_json::from_slice(&signed.canonical_capsule)
@@ -654,6 +669,7 @@ impl RunnerControlService {
                 &event.repository.owner,
                 &event.repository.name,
             )
+            .await
             .map_err(control_plane_status)?;
         if repository.id != signed.repository_id {
             return Err(Status::permission_denied(
@@ -724,21 +740,24 @@ impl RunnerControlService {
         }))
     }
 
-    pub(super) fn request_secret_authenticated(
+    pub(super) async fn request_secret_authenticated(
         &self,
         authenticated: &AuthenticatedIdentity,
         request: v1::SecretLeaseRequest,
     ) -> Result<v1::SecretLeaseResponse, Status> {
         validate_identifier_status("secret metadata id", &request.secret_metadata_id)?;
         validate_bounded_text("secret purpose", &request.purpose, true)?;
-        let (session, lease) = self.active_broker_binding(
-            authenticated,
-            &request.execution_lease_id,
-            request.fencing_generation,
-            &request.job_id,
-            request.job_attempt,
-            &request.step_id,
-        )?;
+        let (session, lease) = self
+            .active_broker_binding(
+                authenticated,
+                &request.execution_lease_id,
+                request.fencing_generation,
+                &request.job_id,
+                request.job_attempt,
+                &request.step_id,
+            )
+            .await?;
+        let _broker_guard = session.broker_lock.lock().await;
         let guest_key = parse_guest_session_key(request.guest_session_key.as_ref())?;
         let now = now_unix_ms()?;
         let expires_unix_ms = now
@@ -746,13 +765,10 @@ impl RunnerControlService {
             .map(|deadline| deadline.min(lease.expires_unix_ms))
             .filter(|deadline| *deadline > now)
             .ok_or_else(|| Status::failed_precondition("execution lease is expiring"))?;
-        if let Some(response) = self.issue_scm_provider_credential(
-            &session,
-            &lease,
-            &request,
-            guest_key,
-            expires_unix_ms,
-        )? {
+        if let Some(response) = self
+            .issue_scm_provider_credential(&session, &lease, &request, guest_key, expires_unix_ms)
+            .await?
+        {
             return Ok(response);
         }
         let mut guest_key_binding = Vec::with_capacity(64);
@@ -764,13 +780,15 @@ impl RunnerControlService {
             self.inner.secret_master_key.as_ref().ok_or_else(|| {
                 Status::failed_precondition("runner secret broker is not configured")
             })?;
-        let running_state = session.state()?;
-        if running_state
-            .running_steps
-            .get(&(lease.id.clone(), request.job_attempt))
-            .map(String::as_str)
-            != Some(request.step_id.as_str())
-        {
+        let step_is_running = {
+            let running_state = session.state()?;
+            running_state
+                .running_steps
+                .get(&(lease.id.clone(), request.job_attempt))
+                .map(String::as_str)
+                == Some(request.step_id.as_str())
+        };
+        if !step_is_running {
             return Err(Status::failed_precondition(
                 "secret release raced with the running step transition",
             ));
@@ -795,8 +813,8 @@ impl RunnerControlService {
                 },
                 master_key,
             )
+            .await
             .map_err(control_plane_status)?;
-        drop(running_state);
         let envelope = sealer
             .seal(
                 &SecretEnvelopeBinding {
@@ -822,7 +840,7 @@ impl RunnerControlService {
         })
     }
 
-    pub(super) fn revoke_secret_authenticated(
+    pub(super) async fn revoke_secret_authenticated(
         &self,
         authenticated: &AuthenticatedIdentity,
         request: v1::RevokeSecretLeaseRequest,
@@ -830,17 +848,20 @@ impl RunnerControlService {
         validate_identifier_status("secret lease id", &request.secret_lease_id)?;
         validate_identifier_status("execution lease id", &request.execution_lease_id)?;
         let session = self.authenticated_session(authenticated)?;
+        let _broker_guard = session.broker_lock.lock().await;
         require_session_lease(
             &session,
             &request.execution_lease_id,
             request.fencing_generation,
             true,
         )?;
-        let lease = self.bound_lease(
-            &authenticated.runner_id,
-            &request.execution_lease_id,
-            request.fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &authenticated.runner_id,
+                &request.execution_lease_id,
+                request.fencing_generation,
+            )
+            .await?;
         if lease.state != LeaseState::Active {
             return Err(Status::failed_precondition(
                 "secret revocation requires an active accepted lease",
@@ -863,55 +884,63 @@ impl RunnerControlService {
         let record = self
             .inner
             .control_plane
-            .runner_secret_lease(&request.secret_lease_id)
+            .runner_secret_lease_record(&request.secret_lease_id)
+            .await
             .map_err(control_plane_status)?;
-        let state = session.state()?;
-        if state
-            .running_steps
-            .get(&(request.execution_lease_id.clone(), request.job_attempt))
-            .map(String::as_str)
-            != Some(record.step_id.as_str())
-        {
+        let step_is_running = {
+            let state = session.state()?;
+            state
+                .running_steps
+                .get(&(request.execution_lease_id.clone(), request.job_attempt))
+                .map(String::as_str)
+                == Some(record.step_id.as_str())
+        };
+        if !step_is_running {
             return Err(Status::failed_precondition(
                 "secret revocation must come from its currently running step",
             ));
         }
         self.inner
             .control_plane
-            .revoke_runner_secret(
+            .revoke_runner_secret_lease_record(
                 &request.secret_lease_id,
                 &request.execution_lease_id,
                 request.fencing_generation,
                 &authenticated.runner_id,
                 now_unix_ms()?,
             )
+            .await
             .map_err(control_plane_status)?;
-        drop(state);
         Ok(())
     }
 
-    pub(super) fn mint_oidc_authenticated(
+    pub(super) async fn mint_oidc_authenticated(
         &self,
         authenticated: &AuthenticatedIdentity,
         request: v1::OidcTokenRequest,
     ) -> Result<v1::OidcTokenResponse, Status> {
         validate_bounded_text("OIDC audience", &request.audience, false)?;
-        let (session, lease) = self.active_broker_binding(
-            authenticated,
-            &request.execution_lease_id,
-            request.fencing_generation,
-            &request.job_id,
-            request.job_attempt,
-            &request.step_id,
-        )?;
+        let (session, lease) = self
+            .active_broker_binding(
+                authenticated,
+                &request.execution_lease_id,
+                request.fencing_generation,
+                &request.job_id,
+                request.job_attempt,
+                &request.step_id,
+            )
+            .await?;
+        let _broker_guard = session.broker_lock.lock().await;
         let now = now_unix_ms()?;
-        let running_state = session.state()?;
-        if running_state
-            .running_steps
-            .get(&(lease.id.clone(), request.job_attempt))
-            .map(String::as_str)
-            != Some(request.step_id.as_str())
-        {
+        let step_is_running = {
+            let running_state = session.state()?;
+            running_state
+                .running_steps
+                .get(&(lease.id.clone(), request.job_attempt))
+                .map(String::as_str)
+                == Some(request.step_id.as_str())
+        };
+        if !step_is_running {
             return Err(Status::failed_precondition(
                 "OIDC mint raced with the running step transition",
             ));
@@ -919,7 +948,7 @@ impl RunnerControlService {
         let grant = self
             .inner
             .control_plane
-            .authorize_runner_oidc(&AuthorizeRunnerOidcRequest {
+            .authorize_runner_oidc_grant(&AuthorizeRunnerOidcRequest {
                 execution_lease_id: lease.id.clone(),
                 fencing_generation: lease.fencing_generation,
                 runner_id: authenticated.runner_id.clone(),
@@ -930,6 +959,7 @@ impl RunnerControlService {
                 runner_posture_digest: session.posture_digest.clone(),
                 now_unix_ms: now,
             })
+            .await
             .map_err(control_plane_status)?;
         let issuer =
             self.inner.oidc_issuer.as_ref().ok_or_else(|| {
@@ -951,7 +981,7 @@ impl RunnerControlService {
             .ok_or_else(|| Status::out_of_range("OIDC expiry is outside the supported range"))?;
         self.inner
             .control_plane
-            .record_runner_oidc_issuance(&RecordRunnerOidcIssuance {
+            .record_runner_oidc_token(&RecordRunnerOidcIssuance {
                 grant_id: grant.grant_id,
                 audience: request.audience,
                 jti: minted.jti.clone(),
@@ -961,8 +991,8 @@ impl RunnerControlService {
                 issued_unix_ms: now,
                 expires_unix_ms,
             })
+            .await
             .map_err(control_plane_status)?;
-        drop(running_state);
         Ok(v1::OidcTokenResponse {
             token: minted.token,
             expires_at: Some(proto_timestamp(expires_unix_ms)),
@@ -997,7 +1027,7 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<tonic::Streaming<v1::RunnerMessage>>,
     ) -> Result<Response<Self::OpenStream>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         self.open_authenticated(authenticated, request.into_inner())
             .await
             .map(Response::new)
@@ -1007,7 +1037,7 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<v1::FetchExecutionCapsuleRequest>,
     ) -> Result<Response<v1::FetchExecutionCapsuleResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         self.fetch_authenticated(&authenticated, request.into_inner())
             .await
             .map(Response::new)
@@ -1017,8 +1047,9 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<v1::SecretLeaseRequest>,
     ) -> Result<Response<v1::SecretLeaseResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         self.request_secret_authenticated(&authenticated, request.into_inner())
+            .await
             .map(Response::new)
     }
 
@@ -1026,8 +1057,9 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<v1::RevokeSecretLeaseRequest>,
     ) -> Result<Response<()>, Status> {
-        let authenticated = self.authenticate(&request)?;
-        self.revoke_secret_authenticated(&authenticated, request.into_inner())?;
+        let authenticated = self.authenticate(&request).await?;
+        self.revoke_secret_authenticated(&authenticated, request.into_inner())
+            .await?;
         Ok(Response::new(()))
     }
 
@@ -1035,8 +1067,9 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<v1::OidcTokenRequest>,
     ) -> Result<Response<v1::OidcTokenResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         self.mint_oidc_authenticated(&authenticated, request.into_inner())
+            .await
             .map(Response::new)
     }
 
@@ -1044,8 +1077,9 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<v1::CacheTicketRequest>,
     ) -> Result<Response<v1::CacheTicketResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         self.request_cache_ticket_authenticated(&authenticated, request.into_inner())
+            .await
             .map(Response::new)
     }
 
@@ -1053,8 +1087,9 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<v1::CommitCacheEntryRequest>,
     ) -> Result<Response<v1::CommitCacheEntryResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         self.commit_cache_authenticated(&authenticated, request.into_inner())
+            .await
             .map(Response::new)
     }
 
@@ -1062,8 +1097,9 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<v1::ArtifactTicketRequest>,
     ) -> Result<Response<v1::ArtifactTicketResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         self.request_artifact_ticket_authenticated(&authenticated, request.into_inner())
+            .await
             .map(Response::new)
     }
 
@@ -1071,8 +1107,9 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<v1::CommitArtifactRequest>,
     ) -> Result<Response<v1::CommitArtifactResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         self.commit_artifact_authenticated(&authenticated, request.into_inner())
+            .await
             .map(Response::new)
     }
 
@@ -1080,7 +1117,7 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<tonic::Streaming<v1::UploadBlobChunk>>,
     ) -> Result<Response<v1::UploadBlobResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         let _transfer_slot = self
             .data_plane()?
             .transfer_slots
@@ -1111,7 +1148,9 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
             declared_digest: declared,
             declared_size: None,
         };
-        let authorized = self.authorize_runner_upload(&authenticated, &binding)?;
+        let authorized = self
+            .authorize_runner_upload(&authenticated, &binding)
+            .await?;
         let mut pending = self.begin_runner_upload(&authorized)?;
         let mut next = Some(first);
         while let Some(chunk) = next.take() {
@@ -1160,7 +1199,7 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<v1::DownloadBlobRequest>,
     ) -> Result<Response<Self::DownloadBlobStream>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         let transfer_slot = self
             .data_plane()?
             .transfer_slots
@@ -1170,14 +1209,16 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
                 Status::resource_exhausted("runner object transfer concurrency exhausted")
             })?;
         let request = request.into_inner();
-        let subject = self.active_data_subject(
-            &authenticated,
-            &request.execution_lease_id,
-            request.fencing_generation,
-            &request.job_id,
-            request.job_attempt,
-            &request.step_id,
-        )?;
+        let subject = self
+            .active_data_subject(
+                &authenticated,
+                &request.execution_lease_id,
+                request.fencing_generation,
+                &request.job_id,
+                request.job_attempt,
+                &request.step_id,
+            )
+            .await?;
         let data = self.data_plane()?;
         let ticket_id = ContentDigest::parse(request.ticket_id)
             .map_err(|_| Status::invalid_argument("cache restore ticket id is invalid"))?;
@@ -1228,7 +1269,7 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         let transfer_size = reader.size_bytes();
         self.inner
             .control_plane
-            .record_runner_blob_download(
+            .record_runner_blob_transfer(
                 &RecordRunnerBlobUpload {
                     ticket_id: ticket_id.to_string(),
                     blob_digest: digest.clone(),
@@ -1243,7 +1284,9 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
                     recorded_unix_ms: now_unix_ms()?,
                 },
                 &subject.session.runner_id,
+                "download",
             )
+            .await
             .map_err(control_plane_status)?;
         let wire_digest = v1::Digest::try_from(&digest)
             .map_err(|_| Status::internal("download digest cannot be encoded"))?;
@@ -1285,7 +1328,7 @@ impl v1::runner_control_server::RunnerControl for RunnerControlService {
         &self,
         request: Request<v1::CompleteLeaseRequest>,
     ) -> Result<Response<v1::CompleteLeaseResponse>, Status> {
-        let authenticated = self.authenticate(&request)?;
+        let authenticated = self.authenticate(&request).await?;
         self.complete_authenticated(
             &authenticated,
             request.into_inner(),

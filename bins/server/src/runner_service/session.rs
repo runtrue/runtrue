@@ -1,6 +1,6 @@
 use super::{RunnerControlConfig, RunnerDataPlane, RunnerProtocolMetrics};
 use crate::runner_certificates::RunnerCertificateAuthority;
-use runtrue_control_plane::ControlPlane;
+use runtrue_control_plane::ControlPlaneStore;
 use runtrue_model::ContentDigest;
 use runtrue_oidc::OidcIssuer;
 use runtrue_protocol::v1;
@@ -29,6 +29,7 @@ pub(super) struct RunnerSession {
     pub(super) runner_id: String,
     pub(super) connection_id: String,
     pub(super) protocol_version: u32,
+    pub(super) max_concurrent_wasm_jobs: usize,
     pub(super) posture_digest: ContentDigest,
     pub(super) runner_image_digest: ContentDigest,
     pub(super) certificate_fingerprint: Option<ContentDigest>,
@@ -36,6 +37,7 @@ pub(super) struct RunnerSession {
     pub(super) outbound: mpsc::Sender<Result<v1::ControlMessage, Status>>,
     pub(super) state: Mutex<SessionState>,
     pub(super) offer_lock: tokio::sync::Mutex<()>,
+    pub(super) broker_lock: tokio::sync::Mutex<()>,
 }
 
 impl RunnerSession {
@@ -47,7 +49,7 @@ impl RunnerSession {
 }
 
 pub(super) struct RunnerControlInner {
-    pub(super) control_plane: Arc<ControlPlane>,
+    pub(super) control_plane: Arc<dyn ControlPlaneStore>,
     pub(super) certificate_authority: Option<Arc<RunnerCertificateAuthority>>,
     pub(super) secret_master_key: Option<Arc<MasterKey>>,
     pub(super) oidc_issuer: Option<Arc<OidcIssuer>>,

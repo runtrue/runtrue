@@ -7,7 +7,7 @@ use runtrue_backup::{
 };
 use runtrue_control_plane::{
     BackupPinRecord, ControlPlane, CreateRunRequest, NewJob, RepositoryRecord, RunnerPoolRecord,
-    RunnerPoolStatus, SecretMetadataReference, SignedCapsuleRecord,
+    RunnerPoolStatus, SecretMetadataReference, SignedCapsuleRecord, WorkflowFrontendReportRecord,
 };
 use runtrue_git::{GitTreeEntry, GitTreeEntryKind, GitTreeManifest, GIT_TREE_MANIFEST_VERSION};
 use runtrue_model::ContentDigest;
@@ -17,7 +17,8 @@ use runtrue_storage::{CasLimits, FsCas};
 use runtrue_workflow_ir::{
     ApprovalRequirements, Architecture, CapsuleContext, ExecutionCapsule, Isolation,
     OperatingSystem, ParityGrade, PermissionSet, PlannedJob, RunnerRequirements, Trust,
-    WorkflowIdentity, CAPSULE_SCHEMA_VERSION, ENGINE_COMPATIBILITY_VERSION,
+    WorkflowFrontendProvenance, WorkflowIdentity, CAPSULE_SCHEMA_VERSION,
+    ENGINE_COMPATIBILITY_VERSION,
 };
 use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, fs, path::Path};
@@ -260,7 +261,19 @@ fn populate_database(path: &Path, security_seed: &[u8; 32]) -> String {
             created_unix_ms: NOW,
         })
         .unwrap();
-    let capsule = execution_capsule();
+    let report_bytes = br#"{"status":"compatible"}"#.to_vec();
+    let report_digest = ContentDigest::sha256(&report_bytes);
+    let provenance = WorkflowFrontendProvenance {
+        frontend_id: "runtrue.github-actions".to_owned(),
+        contract_generation: 1,
+        frontend_generation: 2,
+        configuration_digest: ContentDigest::sha256(b"frontend config"),
+        input_digest: ContentDigest::sha256(b"source"),
+        native_digest: ContentDigest::sha256(b"native"),
+        report_digest: Some(report_digest.clone()),
+    };
+    let mut capsule = execution_capsule();
+    capsule.context.workflow_frontend = Some(provenance.clone());
     let mut capsule_seed = derive_security_seed(security_seed, b"capsule-signing");
     let signing_key = CapsuleSigningKey::from_seed(capsule_seed);
     capsule_seed.zeroize();
@@ -277,6 +290,13 @@ fn populate_database(path: &Path, security_seed: &[u8; 32]) -> String {
             },
             &signing_key.verifying_key(),
         )
+        .unwrap();
+    control
+        .store_workflow_frontend_report(&WorkflowFrontendReportRecord {
+            capsule_id: "capsule-1".to_owned(),
+            media_type: "application/vnd.runtrue.frontend-compatibility+json".to_owned(),
+            bytes: report_bytes,
+        })
         .unwrap();
     control
         .create_runner_pool(&RunnerPoolRecord {
@@ -429,6 +449,10 @@ fn online_backup_restore_fences_stale_leases_and_requires_explicit_activation() 
     assert_eq!(
         control.jobs_for_run("run-1").unwrap()[0].status,
         runtrue_lifecycle::JobState::Lost
+    );
+    assert_eq!(
+        control.workflow_frontend_report("capsule-1").unwrap().bytes,
+        br#"{"status":"compatible"}"#
     );
     drop(control);
 
@@ -644,15 +668,18 @@ fn runner() -> RunnerRecord {
         logical_cpus: 2,
         memory_bytes: 4_096,
         storage_bytes: 4_096,
+        max_concurrent_wasm_jobs: 1,
         region: None,
         verified_capabilities: Default::default(),
         self_reported_capabilities: Default::default(),
         status: RunnerStatus::Online,
         active_jobs: 0,
+        active_wasm_jobs: 0,
         used_cpus: 0,
         used_memory_bytes: 0,
         used_storage_bytes: 0,
         locality: Default::default(),
+        package_tiers: Default::default(),
         last_heartbeat_unix_ms: NOW,
     }
 }

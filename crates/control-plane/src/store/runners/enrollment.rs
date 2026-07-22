@@ -316,8 +316,78 @@ impl ControlPlane {
             certificate,
             inventory_digest,
             &posture_digest,
+            None,
             now_unix_ms,
         )
+    }
+
+    pub fn replay_runner_enrollment(
+        &self,
+        token: &str,
+        request_digest: &ContentDigest,
+    ) -> Result<Option<RunnerEnrollmentReplay>, ControlPlaneError> {
+        validate_enrollment_token(token)?;
+        let token_hash = enrollment_token_hash(token);
+        let connection = self.connection()?;
+        let Some(record) = enrollment_token_by_hash(&connection, &token_hash)? else {
+            return Err(ControlPlaneError::InvalidEnrollmentToken);
+        };
+        let replay = connection
+            .query_row(
+                "SELECT request_digest,runner_id,pool_id,certificate_chain_pem,certificate_expires_unix_ms,authoritative_posture_digest,selected_protocol_version,created_unix_ms FROM runner_enrollment_replays WHERE enrollment_token_id=?1",
+                [&record.id],
+                |row| Ok(RunnerEnrollmentReplay {
+                    request_digest: digest_column(row, 0)?,
+                    runner_id: row.get(1)?,
+                    pool_id: row.get(2)?,
+                    certificate_chain_pem: row.get(3)?,
+                    certificate_expires_unix_ms: u64_column(row, 4, "enrollment replay certificate expiry")?,
+                    authoritative_posture_digest: digest_column(row, 5)?,
+                    selected_protocol_version: row.get(6)?,
+                    created_unix_ms: u64_column(row, 7, "enrollment replay creation")?,
+                }),
+            )
+            .optional()?;
+        match replay {
+            Some(value) if &value.request_digest == request_digest => Ok(Some(value)),
+            Some(_) => Err(ControlPlaneError::EnrollmentTokenConsumed),
+            None => Ok(None),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_runner_enrollment_idempotent(
+        &self,
+        token: &str,
+        request_digest: &ContentDigest,
+        runner: &RunnerRecord,
+        certificate: &RunnerCertificateRecord,
+        certificate_chain_pem: &[u8],
+        inventory_digest: &ContentDigest,
+        selected_protocol_version: u32,
+        now_unix_ms: u64,
+    ) -> Result<RunnerEnrollmentReplay, ControlPlaneError> {
+        if certificate_chain_pem.is_empty() || certificate_chain_pem.len() > 256 * 1024 {
+            return Err(ControlPlaneError::InvalidInput(
+                "runner enrollment certificate chain is empty or exceeds its bound",
+            ));
+        }
+        let posture_digest = authoritative_runner_posture_digest(runner, inventory_digest)?;
+        self.complete_runner_enrollment_bound(
+            token,
+            runner,
+            certificate,
+            inventory_digest,
+            &posture_digest,
+            Some((
+                request_digest,
+                certificate_chain_pem,
+                selected_protocol_version,
+            )),
+            now_unix_ms,
+        )?;
+        self.replay_runner_enrollment(token, request_digest)?
+            .ok_or_else(|| ControlPlaneError::CorruptState("enrollment replay is missing".into()))
     }
 
     fn complete_runner_enrollment_bound(
@@ -327,13 +397,16 @@ impl ControlPlane {
         certificate: &RunnerCertificateRecord,
         inventory_digest: &ContentDigest,
         posture_digest: &ContentDigest,
+        replay: Option<(&ContentDigest, &[u8], u32)>,
         now_unix_ms: u64,
     ) -> Result<EnrollmentTokenRecord, ControlPlaneError> {
         validate_enrollment_token(token)?;
         validate_runner_record(runner)?;
         validate_new_runner_certificate(certificate, now_unix_ms)?;
-        if runner.status != RunnerStatus::Offline
-            || runner.id != certificate.runner_id
+        if !matches!(
+            runner.status,
+            RunnerStatus::Offline | RunnerStatus::Probationary
+        ) || runner.id != certificate.runner_id
             || runner.pool_id != certificate.pool_id
         {
             return Err(ControlPlaneError::CertificateIdentityMismatch);
@@ -344,9 +417,51 @@ impl ControlPlane {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let record = enrollment_token_by_hash(&transaction, &token_hash)?
             .ok_or(ControlPlaneError::InvalidEnrollmentToken)?;
+        if record.consumed_unix_ms.is_some() {
+            if let Some((request_digest, _, _)) = replay {
+                let existing: Option<String> = transaction
+                    .query_row(
+                        "SELECT request_digest FROM runner_enrollment_replays WHERE enrollment_token_id=?1",
+                        [&record.id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                return match existing {
+                    Some(value) if value == request_digest.as_str() => Ok(record),
+                    _ => Err(ControlPlaneError::EnrollmentTokenConsumed),
+                };
+            }
+        }
         validate_usable_enrollment_token(&record, now_unix_ms)?;
         if record.pool_id != runner.pool_id {
             return Err(ControlPlaneError::CertificateIdentityMismatch);
+        }
+        let software_replacement: Option<(String,String,String,u64)> = transaction.query_row(
+            "SELECT c.replacement_id,c.source_runner_id,c.source_posture_digest,c.generation
+             FROM runner_software_update_claims c
+             JOIN runner_replacements r ON r.id=c.replacement_id AND r.state='claim-issued'
+             JOIN runner_pool_update_policies p ON p.pool_id=c.pool_id AND p.version=c.policy_version
+                AND p.enabled=1 AND p.paused=0 AND p.release_id=c.release_id
+             JOIN runner_update_releases u ON u.id=c.release_id AND u.revoked_unix_ms IS NULL
+             WHERE c.enrollment_token_id=?1 AND c.consumed_unix_ms IS NULL
+               AND c.canceled_unix_ms IS NULL AND c.expires_unix_ms>?2",
+            params![record.id,to_i64(now_unix_ms)?],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,u64_column(row,3,"replacement generation")?)),
+        ).optional()?;
+        if (software_replacement.is_some()) != (runner.status == RunnerStatus::Probationary) {
+            return Err(ControlPlaneError::CertificateIdentityMismatch);
+        }
+        if let Some((_, source_runner_id, expected_posture, _)) = &software_replacement {
+            let current_posture: String = transaction.query_row(
+                "SELECT posture_digest FROM runner_enrollment_postures WHERE runner_id=?1",
+                [source_runner_id],
+                |row| row.get(0),
+            )?;
+            if &current_posture != expected_posture {
+                return Err(ControlPlaneError::InvalidInput(
+                    "software update source posture changed",
+                ));
+            }
         }
         let (pool_status, pool_tenant, pool_region): (String, String, Option<String>) = transaction
             .query_row(
@@ -400,6 +515,67 @@ impl ControlPlane {
         )?;
         if changed != 1 {
             return Err(ControlPlaneError::EnrollmentTokenConsumed);
+        }
+        let launch_claim: Option<String> = transaction
+            .query_row(
+                "SELECT fleet_request_id FROM runner_launch_claims
+                 WHERE enrollment_token_id = ?1",
+                [&record.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(fleet_request_id) = launch_claim {
+            let claim_changed = transaction.execute(
+                "UPDATE runner_launch_claims
+                 SET consumed_unix_ms = ?2, runner_id = ?3
+                 WHERE enrollment_token_id = ?1 AND consumed_unix_ms IS NULL
+                   AND runner_id IS NULL",
+                params![record.id, to_i64(now_unix_ms)?, runner.id],
+            )?;
+            let request_changed = transaction.execute(
+                "UPDATE runner_fleet_requests
+                 SET state = 'enrolled', runner_id = ?2, updated_unix_ms = ?3
+                 WHERE id = ?1 AND state = 'bootstrapping'",
+                params![fleet_request_id, runner.id, to_i64(now_unix_ms)?],
+            )?;
+            if claim_changed != 1 || request_changed != 1 {
+                return Err(ControlPlaneError::InvalidTransition {
+                    entity: "runner launch claim",
+                    from: "bootstrapping",
+                    to: "enrolled",
+                });
+            }
+        }
+        if let Some((replacement_id, _, _, generation)) = software_replacement {
+            let claim_changed=transaction.execute(
+                "UPDATE runner_software_update_claims SET consumed_unix_ms=?2,runner_id=?3
+                 WHERE enrollment_token_id=?1 AND consumed_unix_ms IS NULL AND canceled_unix_ms IS NULL",
+                params![record.id,to_i64(now_unix_ms)?,runner.id])?;
+            let replacement_changed = transaction.execute(
+                "UPDATE runner_replacements SET target_runner_id=?2,target_posture_digest=?3,
+                    state='probationary',updated_unix_ms=?4
+                 WHERE id=?1 AND generation=?5 AND state='claim-issued'",
+                params![
+                    replacement_id,
+                    runner.id,
+                    posture_digest.as_str(),
+                    to_i64(now_unix_ms)?,
+                    to_i64(generation)?
+                ],
+            )?;
+            if claim_changed != 1 || replacement_changed != 1 {
+                return Err(ControlPlaneError::InvalidTransition {
+                    entity: "software update claim",
+                    from: "claim-issued",
+                    to: "probationary",
+                });
+            }
+        }
+        if let Some((request_digest, certificate_chain_pem, selected_protocol_version)) = replay {
+            transaction.execute(
+                "INSERT INTO runner_enrollment_replays(enrollment_token_id,request_digest,runner_id,pool_id,certificate_chain_pem,certificate_expires_unix_ms,authoritative_posture_digest,selected_protocol_version,created_unix_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![record.id,request_digest.as_str(),runner.id,runner.pool_id,certificate_chain_pem,to_i64(certificate.not_after_unix_ms)?,posture_digest.as_str(),i64::from(selected_protocol_version),to_i64(now_unix_ms)?],
+            )?;
         }
         transaction.commit()?;
         Ok(EnrollmentTokenRecord {

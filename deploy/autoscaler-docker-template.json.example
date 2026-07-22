@@ -1,0 +1,42 @@
+{
+  "image": "local/runtrue-runner:0.1.0",
+  "command": ["enroll-if-needed"],
+  "environment": [
+    "RUNTRUE_RUNNER_ENDPOINT=https://server:8443",
+    "RUNTRUE_RUNNER_ENROLLMENT_ENDPOINT=https://server:8444",
+    "RUNTRUE_RUNNER_LAUNCH_CLAIM_FILE=/run/runtrue-launch/claim.json",
+    "RUNTRUE_RUNNER_CA_CERTIFICATE=/run/runtrue-runner-ca.pem",
+    "RUNTRUE_RUNNER_CREDENTIAL_DIRECTORY=/var/lib/runtrue/runner/credentials",
+    "RUNTRUE_RUNNER_STATE_DIRECTORY=/var/lib/runtrue/runner/state",
+    "RUNTRUE_RUNNER_WORKSPACE_DIRECTORY=/var/lib/runtrue/workspaces",
+    "RUNTRUE_RUNNER_CAPSULE_KEYRING=/run/runtrue-runner-trust/capsule-keys",
+    "RUNTRUE_RUNNER_TRUSTED_NATIVE=true",
+    "RUNTRUE_RUNNER_EPHEMERAL=true"
+  ],
+  "labels": {"dev.runtrue.autoscaled": "true"},
+  "network": "runtrue_control",
+  "user": "__RUNTRUE_RUNTIME_UID__:__RUNTRUE_RUNTIME_GID__",
+  "memory_bytes": 2147483648,
+  "nano_cpus": 2000000000,
+  "pids_limit": 512,
+  "capacity_reserve_memory_bytes": __RUNTRUE_CAPACITY_RESERVE_MEMORY_BYTES__,
+  "capacity_reserve_nano_cpus": __RUNTRUE_CAPACITY_RESERVE_NANO_CPUS__,
+  "tmpfs": {
+    "/tmp": "rw,noexec,nosuid,nodev,size=134217728,mode=1777",
+    "/run": "rw,noexec,nosuid,nodev,size=16777216,mode=0755"
+  },
+  "mounts": [
+    {
+      "Type": "bind",
+      "Source": "/var/lib/runtrue/tls/runner-ca.pem",
+      "Target": "/run/runtrue-runner-ca.pem",
+      "ReadOnly": true
+    },
+    {
+      "Type": "bind",
+      "Source": "/var/lib/runtrue/runner-trust",
+      "Target": "/run/runtrue-runner-trust",
+      "ReadOnly": true
+    }
+  ]
+}

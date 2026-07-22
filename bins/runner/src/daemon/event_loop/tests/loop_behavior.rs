@@ -184,3 +184,65 @@ async fn drain_rejects_new_work_and_exits_without_execution() {
             if !decision.accepted && decision.rejection_code == "trusted_native_disabled"
     )));
 }
+
+#[tokio::test]
+async fn wasm_runner_executes_two_accepted_leases_concurrently() {
+    let (mut config, first_offer, fetched) = fixture_for(Isolation::Wasm, 2);
+    config.mode = RunMode::Daemon;
+    let mut second_offer = first_offer.clone();
+    second_offer.lease_id = "lease-2".to_owned();
+    let shared = Arc::new(Mutex::new(FakeState {
+        controls: VecDeque::from([
+            v1::ControlMessage {
+                body: Some(control_message::Body::LeaseOffer(Box::new(first_offer))),
+            },
+            v1::ControlMessage {
+                body: Some(control_message::Body::LeaseOffer(Box::new(second_offer))),
+            },
+            v1::ControlMessage {
+                body: Some(control_message::Body::DrainRunner(v1::DrainRunner {
+                    reason: "test complete".to_owned(),
+                    deadline: Some(timestamp(now_unix_ms().unwrap() + 100)),
+                })),
+            },
+        ]),
+        fetched: Some(fetched),
+        ..FakeState::default()
+    }));
+    let directory = tempfile::tempdir().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        RunnerDaemon::new(
+            FakeTransport(Arc::clone(&shared)),
+            FakeExecutor {
+                wait_for_cancel: true,
+            },
+            config,
+            RunnerStateStore::open(directory.path().join("state")).unwrap(),
+            WorkspaceManager::open(directory.path().join("work")).unwrap(),
+        )
+        .run(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let state = shared.lock().await;
+    let accepted = state
+        .sent
+        .iter()
+        .filter(|message| {
+            matches!(
+                &message.body,
+                Some(runner_message::Body::LeaseDecision(decision)) if decision.accepted
+            )
+        })
+        .count();
+    assert_eq!(accepted, 2);
+    let completed = state
+        .completions
+        .iter()
+        .map(|completion| completion.lease_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(completed, BTreeSet::from(["lease-1", "lease-2"]));
+}

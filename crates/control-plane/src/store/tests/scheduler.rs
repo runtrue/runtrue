@@ -1,5 +1,22 @@
 use super::*;
 
+fn add_component_step(job: &mut PlannedJob, reference: String) {
+    job.steps.push(PlannedStep {
+        id: "component".to_owned(),
+        name: "component".to_owned(),
+        condition: None,
+        action: StepAction::Component { reference },
+        inputs: BTreeMap::new(),
+        environment: BTreeMap::new(),
+        capabilities: StepCapabilitySet::default(),
+        cache: None,
+        timeout_ms: None,
+        continue_on_error: false,
+        outputs: BTreeMap::new(),
+        working_directory: None,
+    });
+}
+
 #[test]
 fn source_snapshot_digest_contributes_to_runner_locality() {
     let job = planned_job(
@@ -21,6 +38,50 @@ fn source_snapshot_digest_contributes_to_runner_locality() {
             &BTreeSet::from([ContentDigest::sha256(b"other snapshot")]),
         ),
         0
+    );
+}
+
+#[test]
+fn signed_component_digest_contributes_to_runner_locality() {
+    let mut job = planned_job(
+        "wasm",
+        &[],
+        Trust::UntrustedOk,
+        OperatingSystem::Linux,
+        None,
+    );
+    let component = ContentDigest::sha256(b"prepared wasm component");
+    add_component_step(
+        &mut job,
+        format!("wasm://registry.example/action@{component}"),
+    );
+    assert_eq!(
+        signed_job_locality_hits(&job, None, &BTreeSet::from([component])),
+        1
+    );
+}
+
+#[test]
+fn signed_component_digest_uses_the_advertised_package_tier() {
+    let component = ContentDigest::sha256(b"component");
+    let mut job = planned_job(
+        "wasm-tier",
+        &[],
+        Trust::UntrustedOk,
+        OperatingSystem::Linux,
+        None,
+    );
+    add_component_step(
+        &mut job,
+        format!("wasm://registry.example/action@{component}"),
+    );
+    assert_eq!(
+        signed_job_package_tier(
+            &job,
+            None,
+            &BTreeMap::from([(component, runtrue_scheduler::PackagePreparationTier::Warm,)]),
+        ),
+        runtrue_scheduler::PackagePreparationTier::Warm.placement_rank()
     );
 }
 
@@ -233,4 +294,66 @@ fn bounded_selector_rotates_past_incompatible_pages_and_uses_random_fences() {
     assert!(lease.id.starts_with("lease-"));
     assert_eq!(lease.job_id, "run-page-z-compatible");
     assert_eq!(lease.fencing_generation, 1);
+}
+
+#[test]
+fn durable_scheduler_packs_wasm_leases_up_to_runner_slot_capacity() {
+    let control = ControlPlane::open_in_memory("wasm-slot-capacity", NOW).unwrap();
+    control.create_repository(&repository()).unwrap();
+    add_runner_pool_only(&control);
+    let mut wasm_runner = runner();
+    wasm_runner.isolation_backends = BTreeSet::from([Isolation::Wasm]);
+    wasm_runner.max_concurrent_wasm_jobs = 2;
+    wasm_runner.verified_capabilities.clear();
+    control
+        .register_runner_with_inventory(
+            &wasm_runner,
+            &ContentDigest::sha256(b"wasm-slot-runner-inventory"),
+            NOW,
+        )
+        .unwrap();
+
+    let mut decoded = execution_capsule();
+    decoded.jobs[0].runner.isolation = Isolation::Wasm;
+    decoded.jobs[0].runner.capabilities.clear();
+    let capsule = store_test_capsule(&control, "capsule-wasm-slots", decoded.clone());
+    for index in 1..=3 {
+        let run_id = format!("run-wasm-{index}");
+        let request = run_for_capsule(&run_id, &capsule, &decoded, NOW + index);
+        control
+            .create_run_idempotent(&format!("{run_id}-key"), &request)
+            .unwrap();
+    }
+
+    let first = control
+        .offer_next_lease_for_runner(&wasm_runner.id, NOW + 10)
+        .unwrap()
+        .unwrap();
+    control
+        .accept_lease(
+            &first.id,
+            &wasm_runner.id,
+            first.fencing_generation,
+            first.installation_fencing_epoch,
+            NOW + 11,
+        )
+        .unwrap();
+    let second = control
+        .offer_next_lease_for_runner(&wasm_runner.id, NOW + 12)
+        .unwrap()
+        .unwrap();
+    assert_ne!(first.job_id, second.job_id);
+    control
+        .accept_lease(
+            &second.id,
+            &wasm_runner.id,
+            second.fencing_generation,
+            second.installation_fencing_epoch,
+            NOW + 13,
+        )
+        .unwrap();
+    assert!(control
+        .offer_next_lease_for_runner(&wasm_runner.id, NOW + 14)
+        .unwrap()
+        .is_none());
 }

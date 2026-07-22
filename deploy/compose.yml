@@ -32,7 +32,7 @@ services:
       RUNTRUE_DATA_ROOT: /var/lib/runtrue/server/blobs
       RUNTRUE_INSTALLATION_ID: "${RUNTRUE_INSTALLATION_ID:-single-node-evaluation}"
       RUNTRUE_BOOTSTRAP_TOKEN_FILE: /run/runtrue-secrets/bootstrap.token
-      RUNTRUE_SECURITY_KEY_FILE: /var/lib/runtrue/server/security.key
+      RUNTRUE_SECURITY_KEY_FILE: /run/runtrue-keys/security.key
       RUNTRUE_OIDC_ISSUER: "http://127.0.0.1:${RUNTRUE_HTTP_PORT:-8080}/oidc"
     ports:
       - "127.0.0.1:${RUNTRUE_HTTP_PORT:-8080}:8080"
@@ -51,8 +51,8 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/keys/security.key"
-        target: /var/lib/runtrue/server/security.key
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/keys"
+        target: /run/runtrue-keys
         read_only: true
         bind:
           create_host_path: false
@@ -69,6 +69,45 @@ services:
     stop_grace_period: 30s
     mem_limit: 1g
     cpus: 2.0
+    networks:
+      - control
+
+  frontend:
+    <<: *runtrue-security
+    image: "${RUNTRUE_IMAGE_REPOSITORY:-local/runtrue}-frontend:${RUNTRUE_IMAGE_TAG:-0.1.0}"
+    build:
+      context: ../web
+      dockerfile: Containerfile
+      args:
+        RUNTRUE_VERSION: "${RUNTRUE_IMAGE_TAG:-0.1.0}"
+        RUNTRUE_REVISION: "${RUNTRUE_IMAGE_REVISION:-unknown}"
+    environment:
+      BACKEND_ORIGIN: http://server:8080
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:${RUNTRUE_WEB_PORT:-3000}:3000"
+    expose:
+      - "3000"
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/frontend-healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    stop_grace_period: 15s
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    depends_on:
+      server:
+        condition: service_healthy
     networks:
       - control
 

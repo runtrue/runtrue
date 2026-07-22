@@ -284,6 +284,16 @@ malformed, incompatible, or unauthenticated existing entry is quarantined and
 rebuilt by the executor, but the runner still refuses to advertise Wasm for
 that startup so the integrity event cannot be hidden.
 
+After successful preflight, the runner advertises exact component payload
+digests as tenant-scoped `wasm-component-warm` or `wasm-component-warmish`
+locality. The protocol retains the exact digest union for compatibility and
+adds a digest-to-tier binding for graded placement. Scheduler hard
+filters still decide runtime, pool, tenant, region, posture, and resources;
+locality only prefers an otherwise admissible signed job whose component digest
+is already prepared; warm wins over warmish only after those filters. The runner
+caps the combined prepared-component and source
+snapshot locality list at 256 exact digests.
+
 Remote Wasm leases use the same signed-capsule admission, fencing, cancellation,
 workspace cleanup, result hashing, and exact selected-job engine path as other
 backends. Only the offered Wasm job is dispatched. Services, command/script

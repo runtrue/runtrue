@@ -33,7 +33,7 @@ pub(in crate::app) async fn list_secret_metadata(
     Extension(principal): Extension<RequestPrincipal>,
     Path(scope): Path<String>,
 ) -> Response {
-    let tenant = match scope_tenant(&state, &scope) {
+    let tenant = match scope_tenant(&state, &scope).await {
         Ok(tenant) => tenant,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -43,10 +43,12 @@ pub(in crate::app) async fn list_secret_metadata(
         &principal,
         CedarAction::ReadSecretMetadata,
         scoped_resource(CedarResourceKind::Secret, &scope, &tenant, &scope),
-    ) {
+    )
+    .await
+    {
         return response;
     }
-    match state.control_plane.list_secret_metadata(&tenant, &scope) {
+    match state.store.secrets(&tenant, &scope).await {
         Ok(items) => Json(Items { items }).into_response(),
         Err(error) => control_plane_problem(&request_id, error),
     }
@@ -85,7 +87,7 @@ pub(in crate::app) async fn create_secret(
         Ok(key) => key,
         Err(response) => return response,
     };
-    let tenant = match scope_tenant(&state, &scope) {
+    let tenant = match scope_tenant(&state, &scope).await {
         Ok(tenant) => tenant,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -96,7 +98,9 @@ pub(in crate::app) async fn create_secret(
         &principal,
         CedarAction::WriteSecret,
         scoped_resource(CedarResourceKind::Secret, &resource_id, &tenant, &scope),
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let now = match now_unix_ms(&request_id) {
@@ -124,12 +128,16 @@ pub(in crate::app) async fn create_secret(
         created_unix_ms: now,
         updated_unix_ms: now,
     };
-    match state.control_plane.create_secret_idempotent(
-        &idempotency_key,
-        &metadata,
-        plaintext.as_ref(),
-        &state.secret_master_key,
-    ) {
+    match state
+        .store
+        .create_secret(
+            &idempotency_key,
+            &metadata,
+            plaintext.as_ref(),
+            &state.secret_master_key,
+        )
+        .await
+    {
         Ok(result) => {
             let mut response = (StatusCode::CREATED, Json(result.value)).into_response();
             response.headers_mut().insert(
@@ -148,7 +156,7 @@ pub(in crate::app) async fn get_secret_metadata(
     Extension(principal): Extension<RequestPrincipal>,
     Path((scope, name)): Path<(String, String)>,
 ) -> Response {
-    let tenant = match scope_tenant(&state, &scope) {
+    let tenant = match scope_tenant(&state, &scope).await {
         Ok(tenant) => tenant,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -159,13 +167,12 @@ pub(in crate::app) async fn get_secret_metadata(
         &principal,
         CedarAction::ReadSecretMetadata,
         scoped_resource(CedarResourceKind::Secret, &resource_id, &tenant, &scope),
-    ) {
+    )
+    .await
+    {
         return response;
     }
-    match state
-        .control_plane
-        .secret_metadata_by_name(&tenant, &scope, &name)
-    {
+    match state.store.secret_by_name(&tenant, &scope, &name).await {
         Ok(metadata) => Json(metadata).into_response(),
         Err(error) => control_plane_problem(&request_id, error),
     }
@@ -193,7 +200,7 @@ pub(in crate::app) async fn rotate_secret(
         Ok(key) => key,
         Err(response) => return response,
     };
-    let tenant = match scope_tenant(&state, &scope) {
+    let tenant = match scope_tenant(&state, &scope).await {
         Ok(tenant) => tenant,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -204,7 +211,9 @@ pub(in crate::app) async fn rotate_secret(
         &principal,
         CedarAction::WriteSecret,
         scoped_resource(CedarResourceKind::Secret, &resource_id, &tenant, &scope),
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let now = match now_unix_ms(&request_id) {
@@ -212,15 +221,19 @@ pub(in crate::app) async fn rotate_secret(
         Err(response) => return response,
     };
     let plaintext = SecretPlaintext::new(body.value.into_bytes());
-    match state.control_plane.rotate_secret_idempotent(
-        &idempotency_key,
-        &tenant,
-        &scope,
-        &name,
-        &plaintext,
-        &state.secret_master_key,
-        now,
-    ) {
+    match state
+        .store
+        .rotate_secret(
+            &idempotency_key,
+            &tenant,
+            &scope,
+            &name,
+            &plaintext,
+            &state.secret_master_key,
+            now,
+        )
+        .await
+    {
         Ok(result) => {
             let mut response = Json(result.value).into_response();
             response.headers_mut().insert(
@@ -239,7 +252,7 @@ pub(in crate::app) async fn delete_secret(
     Extension(principal): Extension<RequestPrincipal>,
     Path((scope, name)): Path<(String, String)>,
 ) -> Response {
-    let tenant = match scope_tenant(&state, &scope) {
+    let tenant = match scope_tenant(&state, &scope).await {
         Ok(tenant) => tenant,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -250,7 +263,9 @@ pub(in crate::app) async fn delete_secret(
         &principal,
         CedarAction::WriteSecret,
         scoped_resource(CedarResourceKind::Secret, &resource_id, &tenant, &scope),
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let now = match now_unix_ms(&request_id) {
@@ -258,8 +273,9 @@ pub(in crate::app) async fn delete_secret(
         Err(response) => return response,
     };
     match state
-        .control_plane
-        .delete_secret(&tenant, &scope, &name, &state.secret_master_key, now)
+        .store
+        .delete_secret_configuration(&tenant, &scope, &name, &state.secret_master_key, now)
+        .await
     {
         Ok(metadata) => Json(metadata).into_response(),
         Err(error) => control_plane_problem(&request_id, error),

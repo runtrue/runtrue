@@ -1,6 +1,6 @@
 use crate::daemon::RunnerError;
 use runtrue_executor_wasm::{CapabilityAdapterError, CapabilityCallContext, NetworkAdapter};
-use runtrue_workflow_ir::{NetworkPermission, NetworkProtocol};
+use runtrue_workflow_ir::{DnsPolicy, NetworkPermission, NetworkProtocol};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -226,11 +226,19 @@ fn authorize_destination(
     host: &str,
     port: u16,
 ) -> Result<(), CapabilityAdapterError> {
-    let NetworkPermission::Allow { destinations, .. } = grant else {
+    let NetworkPermission::Allow {
+        dns, destinations, ..
+    } = grant
+    else {
         return Err(CapabilityAdapterError::Denied(
             "network access is denied".to_owned(),
         ));
     };
+    if *dns == DnsPolicy::Deny && host.parse::<IpAddr>().is_err() {
+        return Err(CapabilityAdapterError::Denied(
+            "DNS resolution is outside the signed grant".to_owned(),
+        ));
+    }
     if destinations.iter().any(|destination| {
         destination.protocol == NetworkProtocol::Tcp
             && destination.port == port
@@ -247,7 +255,7 @@ fn authorize_destination(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtrue_workflow_ir::{DnsPolicy, NetworkDestination};
+    use runtrue_workflow_ir::NetworkDestination;
 
     fn grant() -> NetworkPermission {
         NetworkPermission::Allow {
@@ -268,6 +276,22 @@ mod tests {
         assert!(authorize_destination(&grant(), "github.example.test", 8443).is_err());
         assert!(authorize_destination(&grant(), "api.github.com", 443).is_err());
         assert!(authorize_destination(&NetworkPermission::Deny, "github.example.test", 443).is_err());
+    }
+
+    #[test]
+    fn dns_denial_only_allows_exact_ip_destinations() {
+        let mut denied = grant();
+        let NetworkPermission::Allow { dns, .. } = &mut denied else {
+            unreachable!();
+        };
+        *dns = DnsPolicy::Deny;
+        assert!(authorize_destination(&denied, "github.example.test", 443).is_err());
+
+        let NetworkPermission::Allow { destinations, .. } = &mut denied else {
+            unreachable!();
+        };
+        destinations[0].host = "192.0.2.10".to_owned();
+        assert!(authorize_destination(&denied, "192.0.2.10", 443).is_ok());
     }
 
     #[test]

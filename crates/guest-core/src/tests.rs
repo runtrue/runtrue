@@ -23,6 +23,7 @@ fn fixture() -> (
             metadata_id: "secret-1".to_owned(),
             name: "TOKEN".to_owned(),
             purpose: Some("tests".to_owned()),
+            resolution: None,
         }],
         oidc_audiences: vec!["https://cloud.example".to_owned()],
         ..StepCapabilitySet::default()

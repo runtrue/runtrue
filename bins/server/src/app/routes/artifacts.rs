@@ -27,17 +27,20 @@ struct ArtifactPromotionBody {
 }
 
 #[allow(clippy::result_large_err)]
-fn artifact_for_principal(
+async fn artifact_for_principal(
     state: &AppState,
     request_id: &RequestId,
     principal: &RequestPrincipal,
     artifact_id: &str,
 ) -> Result<ArtifactCatalogRecord, Response> {
     let artifact = match api_token_tenant(principal) {
-        Some(tenant_id) => state
-            .control_plane
-            .artifact_for_tenant(tenant_id, artifact_id),
-        None => state.control_plane.artifact(artifact_id),
+        Some(tenant_id) => {
+            state
+                .store
+                .artifact_for_tenant(tenant_id, artifact_id)
+                .await
+        }
+        None => state.store.artifact(artifact_id).await,
     }
     .map_err(|error| control_plane_problem(request_id, error))?;
     authorize_resource(
@@ -51,7 +54,8 @@ fn artifact_for_principal(
             &artifact.tenant_id,
         )
         .in_repository(&artifact.repository_id),
-    )?;
+    )
+    .await?;
     Ok(artifact)
 }
 
@@ -61,7 +65,7 @@ pub(in crate::app) async fn get_artifact(
     Extension(principal): Extension<RequestPrincipal>,
     Path(artifact_id): Path<String>,
 ) -> Response {
-    match artifact_for_principal(&state, &request_id, &principal, &artifact_id) {
+    match artifact_for_principal(&state, &request_id, &principal, &artifact_id).await {
         Ok(artifact) => {
             let mut response = Json(artifact).into_response();
             response
@@ -79,7 +83,8 @@ pub(in crate::app) async fn get_artifact_provenance(
     Extension(principal): Extension<RequestPrincipal>,
     Path(artifact_id): Path<String>,
 ) -> Response {
-    let catalog = match artifact_for_principal(&state, &request_id, &principal, &artifact_id) {
+    let catalog = match artifact_for_principal(&state, &request_id, &principal, &artifact_id).await
+    {
         Ok(artifact) => artifact,
         Err(response) => return response,
     };
@@ -135,7 +140,8 @@ pub(in crate::app) async fn create_artifact_download_ticket(
     Path(artifact_id): Path<String>,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let artifact = match artifact_for_principal(&state, &request_id, &principal, &artifact_id) {
+    let artifact = match artifact_for_principal(&state, &request_id, &principal, &artifact_id).await
+    {
         Ok(artifact) => artifact,
         Err(response) => return response,
     };
@@ -174,7 +180,7 @@ pub(in crate::app) async fn create_artifact_download_ticket(
         expires_unix_ms: now.saturating_add(body.ttl_seconds.saturating_mul(1_000)),
         used_unix_ms: None,
     };
-    match state.control_plane.issue_artifact_download_ticket(&ticket) {
+    match state.store.issue_artifact_download_ticket(&ticket).await {
         Ok(_) => (
             StatusCode::CREATED,
             Json(serde_json::json!({
@@ -209,12 +215,16 @@ pub(in crate::app) async fn download_artifact(
         Ok(now) => now,
         Err(response) => return response,
     };
-    let ticket = match state.control_plane.consume_artifact_download_ticket(
-        &token_hash,
-        api_token_tenant(&principal),
-        &approval_actor_id(&principal),
-        now,
-    ) {
+    let ticket = match state
+        .store
+        .consume_artifact_download_ticket(
+            &token_hash,
+            api_token_tenant(&principal),
+            &approval_actor_id(&principal),
+            now,
+        )
+        .await
+    {
         Ok(ticket) => ticket,
         Err(ControlPlaneError::NotFound { .. }) => {
             return not_found_problem(&request_id, "artifact download");
@@ -234,8 +244,9 @@ pub(in crate::app) async fn download_artifact(
     };
     if artifact.record.provenance.statement_digest
         != state
-            .control_plane
+            .store
             .artifact_for_tenant(&ticket.tenant_id, &ticket.artifact_id)
+            .await
             .map(|record| record.provenance_digest)
             .unwrap_or_else(|_| ContentDigest::sha256(b"invalid-artifact-catalog"))
     {
@@ -355,10 +366,11 @@ pub(in crate::app) async fn promote_artifact(
         serde_json::json!({"classification": body.target_classification}),
         serde_json::json!({"approval_id": body.approval_id}),
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::app) fn create_promotion_response(
+pub(in crate::app) async fn create_promotion_response(
     state: &AppState,
     request_id: &RequestId,
     headers: &HeaderMap,
@@ -389,8 +401,9 @@ pub(in crate::app) fn create_promotion_response(
         created_unix_ms: now,
     };
     match state
-        .control_plane
-        .create_promotion_request_idempotent(&idempotency_key, &request)
+        .store
+        .create_promotion_request(&idempotency_key, &request)
+        .await
     {
         Ok(result) => {
             let mut response = (StatusCode::ACCEPTED, Json(result.value)).into_response();

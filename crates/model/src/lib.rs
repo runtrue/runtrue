@@ -12,7 +12,7 @@ pub use content_digest::{ContentDigest, DIGEST_ALGORITHM};
 pub use duration::DurationMillis;
 pub use error::ModelError;
 pub use path::normalize_relative_path;
-pub use secret_reference::SecretReference;
+pub use secret_reference::{SecretProjectVersion, SecretReference, SecretResolutionBinding};
 
 #[cfg(test)]
 mod tests {

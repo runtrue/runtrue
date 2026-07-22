@@ -43,4 +43,5 @@ pub(in crate::app) async fn promote_cache(
         serde_json::json!({"trust_domain": body.target_trust_domain}),
         body.evidence,
     )
+    .await
 }

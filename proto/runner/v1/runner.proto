@@ -463,6 +463,20 @@ message LocalitySummary {
   // Exact immutable objects eligible for placement scoring. Bloom filters are
   // informational only and never authorize a cache read.
   repeated Digest content_digests = 6;
+  // Package-specific in-memory preparation. Entries must also appear in
+  // content_digests so older control planes retain binary locality behavior.
+  repeated PackageLocality package_locality = 7;
+}
+
+enum PackagePreparationTier {
+  PACKAGE_PREPARATION_TIER_UNSPECIFIED = 0;
+  PACKAGE_PREPARATION_TIER_WARMISH = 1;
+  PACKAGE_PREPARATION_TIER_WARM = 2;
+}
+
+message PackageLocality {
+  Digest digest = 1;
+  PackagePreparationTier tier = 2;
 }
 
 message LocalityClass {

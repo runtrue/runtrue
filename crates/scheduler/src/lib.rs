@@ -14,7 +14,10 @@ mod scheduler;
 mod validation;
 
 pub use error::SchedulerError;
-pub use model::{Lease, LeaseState, QueuedJob, RunnerRecord, RunnerStatus, SchedulingRequirements};
+pub use model::{
+    Lease, LeaseState, ObservedLeaseOffer, PackagePreparationTier, PlacementObservation,
+    PlacementScoreObservation, QueuedJob, RunnerRecord, RunnerStatus, SchedulingRequirements,
+};
 pub use quota::TenantQuota;
 pub use scheduler::{
     Scheduler, DEFAULT_ACCEPT_WINDOW_MS, DEFAULT_LEASE_DURATION_MS, PRIORITY_AGING_INTERVAL_MS,

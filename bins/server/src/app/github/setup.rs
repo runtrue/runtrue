@@ -63,7 +63,9 @@ pub(in crate::app) async fn create_github_setup(
         &principal,
         CedarAction::EditWorkflowSettings,
         &tenant_id,
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let idempotency_key = match idempotency_key(&request_id, &headers) {
@@ -75,10 +77,7 @@ pub(in crate::app) async fn create_github_setup(
         Ok(now) => now,
         Err(response) => return response,
     };
-    let return_path = body
-        .return_path
-        .as_deref()
-        .unwrap_or("/ui/github/installations?github=installed");
+    let return_path = body.return_path.as_deref().unwrap_or("/?github=installed");
     match start_github_setup_service(
         &state,
         &request_id,
@@ -90,7 +89,9 @@ pub(in crate::app) async fn create_github_setup(
             now_unix_ms: now,
             repository_preselection: None,
         },
-    ) {
+    )
+    .await
+    {
         Ok(view) => {
             let replayed = view.replayed;
             let mut response = (StatusCode::CREATED, Json(view)).into_response();
@@ -139,7 +140,7 @@ pub(in crate::app) async fn finish_github_installation(
     let Some(github) = state.github_installation.as_ref() else {
         return github_callback_response(StatusCode::NOT_FOUND.into_response());
     };
-    match state.control_plane.recovery_state() {
+    match state.store.recovery_state().await {
         Ok(recovery) if !recovery.safe_mode => {}
         Ok(_) => {
             return github_callback_response(problem_response(
@@ -195,8 +196,9 @@ pub(in crate::app) async fn finish_github_installation(
     };
     let state_digest = github_setup_state_digest(callback_state);
     let setup = match state
-        .control_plane
+        .store
         .begin_github_setup_by_state(&state_digest, now)
+        .await
     {
         Ok(setup) => setup.value,
         Err(_) => return github_callback_rejected(&state, &request_id),
@@ -219,7 +221,9 @@ pub(in crate::app) async fn finish_github_installation(
             SCM_READ_SCOPE,
             None,
             now,
-        ) {
+        )
+        .await
+        {
             Ok(authenticated) => authenticated,
             Err(_) => return github_callback_rejected(&state, &request_id),
         };
@@ -246,7 +250,7 @@ pub(in crate::app) async fn finish_github_installation(
     }
     let permission_ready = snapshot.validate_runtrue_ci_permissions().is_ok();
     let reconciliation =
-        match github_reconciliation_from_snapshot(&state, &setup.tenant_id, snapshot, now) {
+        match github_reconciliation_from_snapshot(&state, &setup.tenant_id, snapshot, now).await {
             Ok(reconciliation) => reconciliation,
             Err(_) => return github_callback_rejected(&state, &request_id),
         };
@@ -259,13 +263,14 @@ pub(in crate::app) async fn finish_github_installation(
         now_unix_ms: now,
     };
     let completed = match state
-        .control_plane
+        .store
         .complete_github_setup_transaction(&completion)
+        .await
     {
         Ok(completed) => completed,
         Err(_) => return github_callback_rejected(&state, &request_id),
     };
-    if let Err(error) = provision_selected_github_repositories(&state, &reconciliation) {
+    if let Err(error) = provision_selected_github_repositories(&state, &reconciliation).await {
         return github_callback_response(control_plane_problem(&request_id, error));
     }
     github
@@ -275,7 +280,7 @@ pub(in crate::app) async fn finish_github_installation(
     let return_path = if permission_ready {
         completed.value.return_path
     } else {
-        "/ui/github/installations?github=permissions".to_owned()
+        "/?github=permissions".to_owned()
     };
     let location = match HeaderValue::from_str(&return_path) {
         Ok(location) if valid_return_to(&return_path) => location,

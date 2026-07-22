@@ -169,7 +169,9 @@ pub(in crate::app) async fn create_api_token(
         &principal,
         CedarAction::ManageApiToken,
         ServerResource::new(CedarResourceKind::ApiToken, &id, &tenant_id),
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let issued = match ApiTokenRecord::issue(
@@ -192,18 +194,15 @@ pub(in crate::app) async fn create_api_token(
         Err(()) => return internal_problem(&request_id),
     };
     let actor = request_audit_principal(&principal);
-    let persisted = if let Some((parent_token_id, _)) = parent_token.as_ref() {
-        state.control_plane.create_delegated_api_token(
+    let persisted = state
+        .store
+        .create_token(
             &issued.record,
-            parent_token_id,
+            parent_token.as_ref().map(|(id, _)| id.as_str()),
             actor,
             &request_id.0,
         )
-    } else {
-        state
-            .control_plane
-            .create_api_token(&issued.record, actor, &request_id.0)
-    };
+        .await;
     if let Err(error) = persisted {
         return control_plane_problem(&request_id, error);
     }
@@ -253,13 +252,16 @@ pub(in crate::app) async fn list_api_tokens(
         &principal,
         CedarAction::ManageApiToken,
         &tenant_id,
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let limit = query.limit.unwrap_or(50);
     match state
-        .control_plane
-        .list_api_tokens_page(&tenant_id, query.cursor.as_deref(), limit)
+        .store
+        .tokens_page(&tenant_id, query.cursor.as_deref(), limit)
+        .await
     {
         Ok(records) => {
             let next_cursor = (records.len() == limit)
@@ -284,7 +286,7 @@ pub(in crate::app) async fn revoke_api_token(
     Extension(principal): Extension<RequestPrincipal>,
     Path(token_id): Path<String>,
 ) -> Response {
-    let existing = match state.control_plane.api_token(&token_id) {
+    let existing = match state.store.token(&token_id).await {
         Ok(record) => record,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -298,20 +300,26 @@ pub(in crate::app) async fn revoke_api_token(
             &existing.id,
             &existing.tenant_id,
         ),
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let now = match now_unix_ms(&request_id) {
         Ok(now) => now,
         Err(response) => return response,
     };
-    match state.control_plane.revoke_api_token_authenticated(
-        &token_id,
-        request_audit_principal(&principal),
-        request_credential_id(&principal),
-        &request_id.0,
-        now,
-    ) {
+    match state
+        .store
+        .revoke_token(
+            &token_id,
+            request_audit_principal(&principal),
+            request_credential_id(&principal),
+            &request_id.0,
+            now,
+        )
+        .await
+    {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => control_plane_problem(&request_id, error),
     }

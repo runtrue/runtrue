@@ -2,6 +2,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
+pub const SCM_EVENT_TASK_KIND: &str = "scm.event";
+pub const SCM_EVENT_RECOVERY_WINDOW_MS: u64 = 24 * 60 * 60 * 1_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DurableTaskStatus {

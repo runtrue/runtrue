@@ -5,17 +5,27 @@
 # RUNTRUE_GITHUB_SIGNER_SOCKET before this overlay starts.
 services:
   server:
+    build:
+      secrets:
+        - github_token
     environment:
       RUNTRUE_PUBLIC_ORIGIN: "${RUNTRUE_PUBLIC_ORIGIN:?set the external Runtrue HTTPS origin}"
       RUNTRUE_BROWSER_COOKIE_SEALING_KEY_FILE: /run/runtrue-secrets/browser-cookie.key
       RUNTRUE_GIT_MIRROR_ROOT: /var/lib/runtrue/server/git-mirrors
       RUNTRUE_GITHUB_APP_ID: "${RUNTRUE_GITHUB_APP_ID:?set the numeric GitHub App id}"
       RUNTRUE_GITHUB_APP_SLUG: "${RUNTRUE_GITHUB_APP_SLUG:?set the GitHub App slug}"
-      RUNTRUE_GITHUB_WEB_ORIGIN: "${RUNTRUE_GITHUB_WEB_ORIGIN:?set the exact GitHub web HTTPS origin}"
-      RUNTRUE_GITHUB_API_ORIGIN: "${RUNTRUE_GITHUB_API_ORIGIN:?set the exact GitHub REST API origin}"
+      RUNTRUE_GITHUB_WEB_ORIGIN: "${RUNTRUE_GITHUB_WEB_ORIGIN:-https://github.com}"
+      RUNTRUE_GITHUB_API_ORIGIN: "${RUNTRUE_GITHUB_API_ORIGIN:-https://api.github.com}"
       RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE: "${RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE:-provider://github-app/production}"
       RUNTRUE_GITHUB_APP_JWT_PROVIDER_SOCKET: /run/runtrue-github-signer.sock
       RUNTRUE_GITHUB_WEBHOOK_SECRET_FILE: /run/runtrue-secrets/github-webhook.secret
+      RUNTRUE_GITHUB_OAUTH_CLIENT_ID: "${RUNTRUE_GITHUB_OAUTH_CLIENT_ID:?set the GitHub App OAuth client id}"
+      RUNTRUE_GITHUB_OAUTH_CLIENT_SECRET_FILE: /run/runtrue-secrets/github-oauth-client.secret
+      RUNTRUE_GITHUB_OAUTH_ADMIN_USER_IDS: "${RUNTRUE_GITHUB_OAUTH_ADMIN_USER_IDS:?set at least one numeric GitHub administrator id}"
+      RUNTRUE_GITHUB_OAUTH_OPERATOR_USER_IDS: "${RUNTRUE_GITHUB_OAUTH_OPERATOR_USER_IDS:-}"
+      # The GitHub Actions frontend discovers workflow files under this root.
+      # Repositories can still override it from their Runtrue settings.
+      RUNTRUE_SCM_WORKFLOW_DIRECTORY: .github/workflows
     volumes:
       - type: bind
         source: "${RUNTRUE_GITHUB_SIGNER_SOCKET:?set the absolute host signer socket path}"
@@ -27,6 +37,15 @@ services:
       - control
       - scm-egress
 
+  backup:
+    build:
+      secrets:
+        - github_token
+
 networks:
   scm-egress:
     driver: bridge
+
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN

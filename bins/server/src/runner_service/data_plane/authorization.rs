@@ -11,7 +11,7 @@ use runtrue_workflow_ir::ExecutionCapsule;
 use std::{io::Read as _, sync::Arc};
 use tonic::Status;
 impl RunnerControlService {
-    pub(in crate::runner_service) fn active_broker_binding(
+    pub(in crate::runner_service) async fn active_broker_binding(
         &self,
         authenticated: &AuthenticatedIdentity,
         execution_lease_id: &str,
@@ -25,11 +25,13 @@ impl RunnerControlService {
         validate_identifier_status("step id", step_id)?;
         let session = self.authenticated_session(authenticated)?;
         require_session_lease(&session, execution_lease_id, fencing_generation, true)?;
-        let lease = self.bound_lease(
-            &authenticated.runner_id,
-            execution_lease_id,
-            fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &authenticated.runner_id,
+                execution_lease_id,
+                fencing_generation,
+            )
+            .await?;
         if lease.state != LeaseState::Active {
             return Err(Status::failed_precondition(
                 "runner brokers require an active accepted lease",
@@ -39,13 +41,15 @@ impl RunnerControlService {
             .inner
             .control_plane
             .signed_capsule_for_lease(&lease.id)
+            .await
             .map_err(control_plane_status)?;
         if job_key != wire_job_id {
             return Err(Status::permission_denied(
                 "broker job does not match the signed lease job",
             ));
         }
-        self.require_declared_attempt_step(&lease, job_attempt, step_id)?;
+        self.require_declared_attempt_step(&lease, job_attempt, step_id)
+            .await?;
         if session
             .state()?
             .running_steps
@@ -60,7 +64,7 @@ impl RunnerControlService {
         Ok((session, lease))
     }
 
-    pub(in crate::runner_service) fn active_data_subject(
+    pub(in crate::runner_service) async fn active_data_subject(
         &self,
         authenticated: &AuthenticatedIdentity,
         execution_lease_id: &str,
@@ -69,18 +73,21 @@ impl RunnerControlService {
         job_attempt: u32,
         step_id: &str,
     ) -> Result<RunnerDataSubject, Status> {
-        let (session, lease) = self.active_broker_binding(
-            authenticated,
-            execution_lease_id,
-            fencing_generation,
-            wire_job_id,
-            job_attempt,
-            step_id,
-        )?;
+        let (session, lease) = self
+            .active_broker_binding(
+                authenticated,
+                execution_lease_id,
+                fencing_generation,
+                wire_job_id,
+                job_attempt,
+                step_id,
+            )
+            .await?;
         let (job_key, signed) = self
             .inner
             .control_plane
             .signed_capsule_for_lease(&lease.id)
+            .await
             .map_err(control_plane_status)?;
         validate_capsule_binding(&lease, &signed)?;
         let capsule: ExecutionCapsule = serde_json::from_slice(&signed.canonical_capsule)
@@ -89,16 +96,19 @@ impl RunnerControlService {
             .inner
             .control_plane
             .job(&lease.job_id)
+            .await
             .map_err(control_plane_status)?;
         let run = self
             .inner
             .control_plane
             .run(&job.run_id)
+            .await
             .map_err(control_plane_status)?;
         let repository = self
             .inner
             .control_plane
             .repository(&run.repository_id)
+            .await
             .map_err(control_plane_status)?;
         Ok(RunnerDataSubject {
             session,
@@ -110,7 +120,7 @@ impl RunnerControlService {
         })
     }
 
-    pub(in crate::runner_service) fn active_artifact_subject(
+    pub(in crate::runner_service) async fn active_artifact_subject(
         &self,
         authenticated: &AuthenticatedIdentity,
         execution_lease_id: &str,
@@ -126,32 +136,36 @@ impl RunnerControlService {
         }
         let session = self.authenticated_session(authenticated)?;
         require_session_lease(&session, execution_lease_id, fencing_generation, true)?;
-        let lease = self.bound_lease(
-            &authenticated.runner_id,
-            execution_lease_id,
-            fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &authenticated.runner_id,
+                execution_lease_id,
+                fencing_generation,
+            )
+            .await?;
         if lease.state != LeaseState::Active {
             return Err(Status::failed_precondition(
                 "artifact finalization requires an active lease",
             ));
         }
-        let state = session.state()?;
-        if state.current_attempts.get(execution_lease_id).copied() != Some(job_attempt)
-            || state
-                .running_steps
-                .keys()
-                .any(|(lease_id, _)| lease_id == execution_lease_id)
-        {
+        let attempt_is_complete = {
+            let state = session.state()?;
+            state.current_attempts.get(execution_lease_id).copied() == Some(job_attempt)
+                && !state
+                    .running_steps
+                    .keys()
+                    .any(|(lease_id, _)| lease_id == execution_lease_id)
+        };
+        if !attempt_is_complete {
             return Err(Status::failed_precondition(
                 "artifact finalization requires a completed current attempt",
             ));
         }
-        drop(state);
         let (job_key, signed) = self
             .inner
             .control_plane
             .signed_capsule_for_lease(&lease.id)
+            .await
             .map_err(control_plane_status)?;
         if job_key != wire_job_id {
             return Err(Status::permission_denied(
@@ -165,16 +179,19 @@ impl RunnerControlService {
             .inner
             .control_plane
             .job(&lease.job_id)
+            .await
             .map_err(control_plane_status)?;
         let run = self
             .inner
             .control_plane
             .run(&job.run_id)
+            .await
             .map_err(control_plane_status)?;
         let repository = self
             .inner
             .control_plane
             .repository(&run.repository_id)
+            .await
             .map_err(control_plane_status)?;
         Ok(RunnerDataSubject {
             session,

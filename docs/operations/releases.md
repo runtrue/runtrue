@@ -23,6 +23,7 @@ cargo +1.94.0 check --workspace --all-targets --locked
 cargo +1.94.0 test --workspace --locked
 cargo +1.94.0 clippy --workspace --all-targets --locked -- -D warnings
 tests/check_brand.sh
+tests/conformance/verify_workflow_frontend.sh
 python3 tests/conformance/check_schema.py
 python3 tests/conformance/check_openapi_routes.py
 python3 tests/conformance/check_migrations.py
@@ -31,6 +32,12 @@ npm --prefix web test
 (cd components/github-signer && go test ./...)
 cargo +1.94.0 audit
 ```
+
+The exact GitHub Actions frontend commit selected by `Cargo.toml` must also
+pass that repository's locked formatting, test, and strict Clippy gates in a
+clean checkout. Retain those results with the release evidence; the core gate
+verifies the exact revision and integrated compositions but does not execute
+the external dependency's test suite.
 
 Also build every shipped container definition from its pinned base and rerun
 the update trust and rollback acceptance suite:

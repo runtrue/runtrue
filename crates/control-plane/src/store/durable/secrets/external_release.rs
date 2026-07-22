@@ -98,23 +98,22 @@ impl ExternalSecretReleaseAuthority for ControlPlane {
                 )
                 .optional()?
                 .ok_or(ControlPlaneError::RunnerBrokerCapabilityDenied)?;
-            let declared = step.capabilities.secrets.iter().any(|secret| {
+            let declared = step.capabilities.secrets.iter().find(|secret| {
                 secret.metadata_id == metadata.id
                     && secret.name == metadata.name
                     && secret.purpose.as_deref().unwrap_or_default() == request.purpose
             });
-            let repository_scope = format!("repository:{}", subject.repository_id);
-            let tenant_scope = format!("tenant:{}", subject.tenant_id);
+            let binding = declared.and_then(|secret| secret.resolution.as_ref());
             let provider_reference = metadata
                 .provider_reference
                 .clone()
                 .ok_or(ControlPlaneError::RunnerBrokerCapabilityDenied)?;
-            if !declared
+            if declared.is_none()
+                || binding.is_none_or(|binding| {
+                    binding.scope != metadata.scope
+                        || binding.metadata_version != metadata.current_version
+                })
                 || metadata.tenant_id != subject.tenant_id
-                || !matches!(
-                    metadata.scope.as_str(),
-                    scope if scope == repository_scope || scope == tenant_scope
-                )
                 || metadata.provider == "built-in"
                 || metadata.status != "active"
             {

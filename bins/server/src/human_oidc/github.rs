@@ -131,6 +131,11 @@ struct GitHubOrganizationResponse {
 }
 
 #[derive(Deserialize)]
+struct GitHubOrganizationMembershipResponse {
+    organization: GitHubOrganizationResponse,
+}
+
+#[derive(Deserialize)]
 struct GitHubRepositoryResponse {
     id: u64,
     name: String,
@@ -143,6 +148,10 @@ struct GitHubRepositoryResponse {
 const GITHUB_CATALOG_PAGE_SIZE: usize = 100;
 const GITHUB_CATALOG_MAX_PAGES: usize = 10;
 const GITHUB_CATALOG_PAGE_BYTES: usize = 2 * 1024 * 1024;
+
+fn github_organization_memberships_path(page: usize) -> String {
+    format!("/user/memberships/orgs?state=active&per_page={GITHUB_CATALOG_PAGE_SIZE}&page={page}")
+}
 
 impl HardenedGitHubOauthClient {
     fn catalog_page<T: DeserializeOwned>(
@@ -321,12 +330,17 @@ impl GitHubOauthAdapter for HardenedGitHubOauthClient {
     fn authorized_organizations(&self, access_token: &str) -> Result<Vec<String>, HumanOidcError> {
         let mut organizations = BTreeMap::<String, ()>::new();
         for page in 1..=GITHUB_CATALOG_MAX_PAGES {
-            let values = self.catalog_page::<GitHubOrganizationResponse>(
-                &format!("/user/orgs?per_page={GITHUB_CATALOG_PAGE_SIZE}&page={page}"),
+            // GitHub App user access tokens return an empty list from
+            // `/user/orgs`. The memberships endpoint supports both GitHub App
+            // user tokens and classic OAuth tokens and includes private active
+            // memberships.
+            let values = self.catalog_page::<GitHubOrganizationMembershipResponse>(
+                &github_organization_memberships_path(page),
                 access_token,
             )?;
             let full_page = values.len() == GITHUB_CATALOG_PAGE_SIZE;
-            for organization in values {
+            for membership in values {
+                let organization = membership.organization;
                 if organization.login.is_empty() || organization.login.len() > 255 {
                     return Err(HumanOidcError::InvalidTokenResponse);
                 }
@@ -380,5 +394,23 @@ impl GitHubOauthAdapter for HardenedGitHubOauthClient {
                 Some(&owner),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn organization_catalog_uses_active_memberships_for_github_app_tokens() {
+        assert_eq!(
+            github_organization_memberships_path(2),
+            "/user/memberships/orgs?state=active&per_page=100&page=2"
+        );
+
+        let membership: GitHubOrganizationMembershipResponse =
+            serde_json::from_value(serde_json::json!({"organization": {"login": "runtrue"}}))
+                .unwrap();
+        assert_eq!(membership.organization.login, "runtrue");
     }
 }

@@ -64,8 +64,8 @@ Verification performs all of the following:
 
 - manifest version, path, entry-count, per-file, and total-byte bounds;
 - an exact archive file-set comparison and every file digest;
-- SQLite `integrity_check`, `foreign_key_check`, supported `user_version`, and
-  contiguous migration history;
+- SQLite `integrity_check`, `foreign_key_check`, the exact unified migration
+  ledger and catalog digests, and the frozen contiguous legacy history;
 - the complete database audit hash chain;
 - canonical Capsule decoding and every stored Capsule signature against the supplied
   installation key;

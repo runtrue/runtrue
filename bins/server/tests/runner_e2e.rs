@@ -240,6 +240,7 @@ fn e2e_inventory() -> VerifiedInventory {
         logical_cpus: 2,
         memory_bytes: 1024 * 1024 * 1024,
         storage_bytes: 1024 * 1024 * 1024,
+        max_concurrent_wasm_jobs: 1,
         isolation_backends: BTreeSet::from([Isolation::Native]),
         capabilities: BTreeSet::new(),
         region: None,
@@ -342,7 +343,7 @@ async fn configured_data_plane_is_reached_only_over_enrolled_mtls_identity() {
         .unwrap(),
     );
     let state = AppState::new_with_security_seed(
-        Arc::clone(&control),
+        control.clone(),
         "bootstrap",
         None,
         [9; 32],
@@ -720,6 +721,7 @@ async fn configured_data_plane_is_reached_only_over_enrolled_mtls_identity() {
                 trust_store: trust.store,
                 allow_trusted_native: true,
                 mode: RunMode::Daemon,
+                max_concurrent_wasm_jobs: 1,
                 max_capsule_bytes: 16 * 1024 * 1024,
                 credential_store: None,
                 admission_lock: None,
@@ -1226,6 +1228,7 @@ async fn configured_data_plane_is_reached_only_over_enrolled_mtls_identity() {
                 trust_store: attacker_trust.store,
                 allow_trusted_native: true,
                 mode: RunMode::Daemon,
+                max_concurrent_wasm_jobs: 1,
                 max_capsule_bytes: 16 * 1024 * 1024,
                 credential_store: None,
                 admission_lock: None,

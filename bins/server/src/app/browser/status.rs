@@ -51,7 +51,7 @@ pub(in crate::app) async fn browser_session_status(
     Extension(request_id): Extension<RequestId>,
     headers: HeaderMap,
 ) -> Response {
-    match browser_session_status_service(&state, &request_id, &headers) {
+    match browser_session_status_service(&state, &request_id, &headers).await {
         Ok(status) => {
             let mut response = Json(status).into_response();
             protect_sensitive_response(&mut response);
@@ -66,7 +66,7 @@ pub(in crate::app) async fn browser_policy_status(
     Extension(request_id): Extension<RequestId>,
     headers: HeaderMap,
 ) -> Response {
-    match browser_policy_status_service(&state, &request_id, &headers) {
+    match browser_policy_status_service(&state, &request_id, &headers).await {
         Ok(status) => Json(status).into_response(),
         Err(response) => *response,
     }
@@ -77,7 +77,7 @@ pub(in crate::app) async fn browser_session_page(
     Extension(request_id): Extension<RequestId>,
     headers: HeaderMap,
 ) -> Response {
-    match browser_session_status_service(&state, &request_id, &headers) {
+    match browser_session_status_service(&state, &request_id, &headers).await {
         Ok(status) => html_response(format!(
             "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Runtrue session</title><main><h1>Session</h1><dl><dt>Tenant</dt><dd>{}</dd><dt>Principal</dt><dd>{}</dd><dt>Device</dt><dd>{}</dd><dt>Access generation</dt><dd>{}</dd></dl><form method=\"post\" action=\"/auth/session/logout\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><button type=\"submit\">Log out</button></form><p><a href=\"/ui/policy\">Policy status</a></p></main></html>",
             escape_html(&status.tenant_id),
@@ -95,7 +95,7 @@ pub(in crate::app) async fn browser_policy_page(
     Extension(request_id): Extension<RequestId>,
     headers: HeaderMap,
 ) -> Response {
-    match browser_policy_status_service(&state, &request_id, &headers) {
+    match browser_policy_status_service(&state, &request_id, &headers).await {
         Ok(status) => html_response(format!(
             "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Runtrue policy</title><main><h1>Active policy</h1><dl><dt>Tenant</dt><dd>{}</dd><dt>Policy epoch</dt><dd>{}</dd><dt>Decision-cache generation</dt><dd>{}</dd><dt>Digest</dt><dd>{}</dd></dl><p><a href=\"/ui/session\">Session</a></p></main></html>",
             escape_html(&status.tenant_id),
@@ -113,14 +113,15 @@ pub(in crate::app) async fn browser_policy_page(
     }
 }
 
-pub(in crate::app) fn browser_session_status_service(
+pub(in crate::app) async fn browser_session_status_service(
     state: &AppState,
     request_id: &RequestId,
     headers: &HeaderMap,
 ) -> Result<BrowserSessionStatusView, Box<Response>> {
     let now = now_unix_ms(request_id)?;
     let (_, record, csrf) =
-        authenticated_browser_session(state, request_id, headers, SESSION_READ_SCOPE, None, now)?;
+        authenticated_browser_session(state, request_id, headers, SESSION_READ_SCOPE, None, now)
+            .await?;
     Ok(BrowserSessionStatusView {
         principal_id: record.principal_id,
         tenant_id: record.tenant_id,
@@ -134,17 +135,19 @@ pub(in crate::app) fn browser_session_status_service(
     })
 }
 
-pub(in crate::app) fn browser_policy_status_service(
+pub(in crate::app) async fn browser_policy_status_service(
     state: &AppState,
     request_id: &RequestId,
     headers: &HeaderMap,
 ) -> Result<BrowserPolicyStatusView, Box<Response>> {
     let now = now_unix_ms(request_id)?;
     let (context, _, _) =
-        authenticated_browser_session(state, request_id, headers, POLICY_READ_SCOPE, None, now)?;
+        authenticated_browser_session(state, request_id, headers, POLICY_READ_SCOPE, None, now)
+            .await?;
     let active = state
-        .control_plane
-        .active_policy_state(&context.tenant_id)
+        .store
+        .active_state(&context.tenant_id)
+        .await
         .map_err(|_| internal_problem(request_id))?;
     let snapshot = active.snapshot().map_err(|_| {
         if let Some(human) = &state.human_oidc {
@@ -213,7 +216,7 @@ pub(in crate::app) fn browser_policy_status_service(
 }
 
 #[allow(clippy::result_large_err)]
-pub(in crate::app) fn authorize_browser_tenant(
+pub(in crate::app) async fn authorize_browser_tenant(
     state: &AppState,
     request_id: &RequestId,
     context: &AuthContext,
@@ -235,10 +238,11 @@ pub(in crate::app) fn authorize_browser_tenant(
             untrusted: false,
         },
     )
+    .await
 }
 
 #[allow(clippy::result_large_err)]
-pub(in crate::app) fn authorize_browser_resource(
+pub(in crate::app) async fn authorize_browser_resource(
     state: &AppState,
     request_id: &RequestId,
     context: &AuthContext,
@@ -246,8 +250,9 @@ pub(in crate::app) fn authorize_browser_resource(
     resource: CedarResource,
 ) -> Result<(), Box<Response>> {
     let active = state
-        .control_plane
-        .active_policy_state(&context.tenant_id)
+        .store
+        .active_state(&context.tenant_id)
+        .await
         .map_err(|_| internal_problem(request_id))?;
     let request = CedarAuthorizationRequest {
         principal: CedarPrincipal {

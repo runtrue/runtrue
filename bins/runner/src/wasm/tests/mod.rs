@@ -22,7 +22,9 @@ fn github_actions_frontend_receives_the_larger_fuel_budget() {
 
     capsule.context.workflow_frontend = Some(runtrue_workflow_ir::WorkflowFrontendProvenance {
         frontend_id: super::execution::GITHUB_ACTIONS_FRONTEND_ID.to_owned(),
+        contract_generation: 2,
         frontend_generation: 1,
+        configuration_digest: ContentDigest::sha256(b"github-frontend-options"),
         input_digest: ContentDigest::sha256(b"github-workflow"),
         native_digest: ContentDigest::sha256(b"native-workflow"),
         report_digest: None,

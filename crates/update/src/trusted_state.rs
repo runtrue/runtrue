@@ -87,6 +87,17 @@ impl TrustedState {
         target_bytes: &[u8],
         now_unix_seconds: u64,
     ) -> Result<VerifiedRelease, UpdateError> {
+        let verified = self.verify_release_metadata(bundle, target_path, now_unix_seconds)?;
+        verified.target.verify_bytes(target_bytes)?;
+        Ok(verified)
+    }
+
+    pub fn verify_release_metadata(
+        &self,
+        bundle: &ReleaseBundle,
+        target_path: &str,
+        now_unix_seconds: u64,
+    ) -> Result<VerifiedRelease, UpdateError> {
         self.validate_structure()?;
         if bundle.root_rotations.len() > MAX_ROOT_ROTATIONS {
             return Err(UpdateError::TooManyRootRotations);
@@ -169,8 +180,6 @@ impl TrustedState {
             .targets
             .get(target_path)
             .ok_or_else(|| UpdateError::TargetNotFound(target_path.to_owned()))?;
-        target.verify_bytes(target_bytes)?;
-
         next.timestamp = Some(TrustedMetadata::from_envelope(
             bundle.timestamp.signed.header.version,
             &bundle.timestamp,

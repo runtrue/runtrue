@@ -58,13 +58,14 @@ fn descriptor_covers_the_declared_package_and_messages() {
         "RotateCertificateNow",
         "InvalidateContent",
         "LocalitySummary",
+        "PackageLocality",
         "LocalityClass",
         "RunnerHealth",
         "CompleteLeaseRequest",
         "CompleteLeaseResponse",
     ]);
 
-    assert_eq!(actual.len(), 50);
+    assert_eq!(actual.len(), 51);
     assert_eq!(actual, expected);
 }
 

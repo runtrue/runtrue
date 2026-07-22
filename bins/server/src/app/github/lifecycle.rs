@@ -3,9 +3,8 @@ use crate::app::{
     GITHUB_LIFECYCLE_RETRY_MAX_MS,
 };
 use runtrue_control_plane::{
-    CompleteGitHubLifecycleDelivery, DurableTask, FailGitHubLifecycleDelivery,
-    GitHubInstallationRecord, GitHubLifecycleDeliveryRecord, GitHubLifecycleDeliveryState,
-    SetGitHubInstallationStatus,
+    CompleteGitHubLifecycleDelivery, FailGitHubLifecycleDelivery, GitHubInstallationRecord,
+    GitHubLifecycleDeliveryRecord, GitHubLifecycleDeliveryState, SetGitHubInstallationStatus,
 };
 use runtrue_model::ContentDigest;
 use runtrue_scm::GitHubError;
@@ -32,16 +31,17 @@ pub(in crate::app) async fn reconcile_claimed_github_lifecycle(
     let now_unix_ms = wall_clock_unix_ms()?.max(delivery.updated_unix_ms);
     match outcome {
         GitHubLifecycleProjectionOutcome::Completed(completion_digest) => {
-            state.control_plane.complete_github_lifecycle_delivery(
-                &CompleteGitHubLifecycleDelivery {
+            state
+                .store
+                .complete_github_lifecycle_delivery(&CompleteGitHubLifecycleDelivery {
                     tenant_id: delivery.tenant_id,
                     delivery_id: delivery.delivery_id,
                     worker_id: worker_id.to_owned(),
                     lease_generation: delivery.lease_generation,
                     completion_digest,
                     now_unix_ms,
-                },
-            )?;
+                })
+                .await?;
         }
         GitHubLifecycleProjectionOutcome::Failed(failure) => {
             let error_digest = ContentDigest::sha256(
@@ -65,8 +65,9 @@ pub(in crate::app) async fn reconcile_claimed_github_lifecycle(
             } else {
                 None
             };
-            let result = state.control_plane.fail_github_lifecycle_delivery(
-                &FailGitHubLifecycleDelivery {
+            let result = state
+                .store
+                .fail_github_lifecycle_delivery(&FailGitHubLifecycleDelivery {
                     tenant_id: delivery.tenant_id,
                     delivery_id: delivery.delivery_id,
                     worker_id: worker_id.to_owned(),
@@ -74,8 +75,8 @@ pub(in crate::app) async fn reconcile_claimed_github_lifecycle(
                     error_digest,
                     retry_unix_ms,
                     now_unix_ms,
-                },
-            )?;
+                })
+                .await?;
             if let Some(github) = &state.github_installation {
                 if result.value.state == GitHubLifecycleDeliveryState::Failed {
                     github
@@ -104,8 +105,9 @@ pub(in crate::app) async fn github_lifecycle_projection(
         ));
     };
     let mut current = match state
-        .control_plane
+        .store
         .github_installation_for_tenant(&delivery.tenant_id, &delivery.installation_id)
+        .await
     {
         Ok(current) => current,
         Err(_) => {
@@ -162,8 +164,9 @@ pub(in crate::app) async fn github_lifecycle_projection(
                 now_unix_ms: wall_clock_unix_ms()?.max(delivery.updated_unix_ms),
             };
             current = match state
-                .control_plane
+                .store
                 .set_github_installation_status(&transition)
+                .await
             {
                 Ok(result) => result.value,
                 Err(_) => {
@@ -194,7 +197,7 @@ pub(in crate::app) async fn github_lifecycle_projection(
             ));
         };
         if state
-            .control_plane
+            .store
             .set_github_installation_status(&SetGitHubInstallationStatus {
                 tenant_id: delivery.tenant_id.clone(),
                 installation_id: delivery.installation_id.clone(),
@@ -203,6 +206,7 @@ pub(in crate::app) async fn github_lifecycle_projection(
                 lifecycle_generation,
                 now_unix_ms: wall_clock_unix_ms()?.max(delivery.updated_unix_ms),
             })
+            .await
             .is_err()
         {
             return Ok(GitHubLifecycleProjectionOutcome::Failed(
@@ -266,7 +270,9 @@ pub(in crate::app) async fn github_lifecycle_projection(
         &delivery.tenant_id,
         snapshot,
         now_unix_ms,
-    ) {
+    )
+    .await
+    {
         Ok(reconciliation) => reconciliation,
         Err(_) => {
             return Ok(GitHubLifecycleProjectionOutcome::Failed(
@@ -275,8 +281,9 @@ pub(in crate::app) async fn github_lifecycle_projection(
         }
     };
     let reconciled = match state
-        .control_plane
+        .store
         .reconcile_github_installation(&reconciliation)
+        .await
     {
         Ok(reconciled) => reconciled,
         Err(_) => {
@@ -285,7 +292,10 @@ pub(in crate::app) async fn github_lifecycle_projection(
             ))
         }
     };
-    if provision_selected_github_repositories(state, &reconciliation).is_err() {
+    if provision_selected_github_repositories(state, &reconciliation)
+        .await
+        .is_err()
+    {
         return Ok(GitHubLifecycleProjectionOutcome::Failed(
             github_lifecycle_retry("repository-link-reconciliation-failed", None),
         ));
@@ -365,19 +375,6 @@ pub(in crate::app) fn github_lifecycle_provider_failure(
     }
 }
 
-pub(in crate::app) fn same_webhook_task(existing: &DurableTask, requested: &DurableTask) -> bool {
-    const IMMUTABLE_EVENT_FIELDS: [&str; 5] = [
-        "provider",
-        "installation_id",
-        "event_id",
-        "raw_payload_digest",
-        "normalized_digest",
-    ];
-    existing.kind == requested.kind
-        && IMMUTABLE_EVENT_FIELDS
-            .into_iter()
-            .all(|field| existing.payload.get(field) == requested.payload.get(field))
-}
 use super::installations::{
     github_reconciliation_from_snapshot, provision_selected_github_repositories,
 };

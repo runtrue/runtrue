@@ -25,7 +25,8 @@ use runtrue_executor_dispatch::ExecutorDispatcher;
 use runtrue_executor_wasm::{
     AotAuthenticationKey, AotCacheConfig, CapabilityAdapterError, CapabilityAdapters,
     CapabilityCallContext, DirectoryGrant, FilesystemAdapter, HandleAuthenticationKey,
-    RootedFilesystemAdapter, WasmComponentArtifact, WasmExecutor, WasmTarget,
+    PackagePreparationTier as WasmPackagePreparationTier, RootedFilesystemAdapter,
+    WasmComponentArtifact, WasmExecutor, WasmTarget,
 };
 use runtrue_model::ContentDigest;
 use runtrue_runner_core::AdmittedLease;
@@ -34,7 +35,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::Arc,
 };
 use zeroize::Zeroizing;
 

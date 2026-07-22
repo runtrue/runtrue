@@ -1,5 +1,11 @@
 # syntax=docker/dockerfile:1.10@sha256:865e5dd094beca432e8c0a1d5e1c465db5f998dca4e439981029b3b81fb39ed5
 FROM node@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2
+ARG RUNTRUE_VERSION=0.1.0
+ARG RUNTRUE_REVISION=unknown
+LABEL org.opencontainers.image.title="Runtrue frontend" \
+      org.opencontainers.image.version="${RUNTRUE_VERSION}" \
+      org.opencontainers.image.revision="${RUNTRUE_REVISION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
 WORKDIR /app
 ENV NODE_ENV=production PORT=3000
 COPY --chown=0:0 package.json server.js ./

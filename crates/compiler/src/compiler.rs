@@ -342,6 +342,7 @@ impl Compiler {
 
         Ok(Compilation {
             capsule,
+            workflow_frontend_report: None,
             triggers,
             capsule_digest,
             approval_subject,

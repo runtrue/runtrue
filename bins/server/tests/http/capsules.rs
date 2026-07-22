@@ -1,4 +1,88 @@
 use super::support::*;
+use runtrue_workflow_ir::WorkflowFrontendProvenance;
+
+#[tokio::test]
+async fn workflow_frontend_report_is_discoverable_and_retrieved_as_exact_bytes() {
+    let (control_plane, application) = application(None);
+    control_plane
+        .create_repository(&tenant_repository(
+            "repo-frontend-report",
+            "tenant-frontend-report",
+            "frontend-report",
+        ))
+        .unwrap();
+    let bytes = br#"{"status":"partial","unsupported":["uses"]}"#.to_vec();
+    let provenance = WorkflowFrontendProvenance {
+        frontend_id: "runtrue.github-actions".to_owned(),
+        contract_generation: 1,
+        frontend_generation: 2,
+        configuration_digest: ContentDigest::sha256(b"frontend config"),
+        input_digest: ContentDigest::sha256(b"source"),
+        native_digest: ContentDigest::sha256(b"native"),
+        report_digest: Some(ContentDigest::sha256(&bytes)),
+    };
+    let mut capsule = execution_capsule();
+    capsule.context.workflow_frontend = Some(provenance.clone());
+    let signing_key = CapsuleSigningKey::from_seed([41_u8; 32]);
+    let signature = signing_key.sign_capsule(&capsule).unwrap();
+    let capsule_id = "capsule-frontend-report";
+    control_plane
+        .store_signed_capsule(
+            &SignedCapsuleRecord {
+                id: capsule_id.to_owned(),
+                repository_id: "repo-frontend-report".to_owned(),
+                digest: signature.capsule_digest.clone(),
+                canonical_capsule: capsule.canonical_bytes().unwrap(),
+                signature,
+                created_unix_ms: 1,
+            },
+            &signing_key.verifying_key(),
+        )
+        .unwrap();
+    let report_digest = ContentDigest::sha256(&bytes);
+    control_plane
+        .store_workflow_frontend_report(&WorkflowFrontendReportRecord {
+            capsule_id: capsule_id.to_owned(),
+            media_type: "application/vnd.runtrue.frontend-compatibility+json".to_owned(),
+            bytes: bytes.clone(),
+        })
+        .unwrap();
+
+    let capsule_response = application
+        .clone()
+        .oneshot(api_request(
+            "GET",
+            &format!("/api/v1/capsules/{capsule_id}"),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(capsule_response.status(), StatusCode::OK);
+    let capsule_view = json_body(capsule_response).await;
+    assert_eq!(
+        capsule_view["workflow_frontend_report"]["digest"],
+        report_digest.to_string()
+    );
+
+    let report_response = application
+        .oneshot(api_request(
+            "GET",
+            &format!("/api/v1/capsules/{capsule_id}/workflow-frontend-report"),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(report_response.status(), StatusCode::OK);
+    assert_eq!(
+        report_response.headers()["content-type"],
+        "application/vnd.runtrue.frontend-compatibility+json"
+    );
+    assert_eq!(
+        report_response.headers()["x-runtrue-content-digest"],
+        report_digest.as_str()
+    );
+    assert_eq!(text_body(report_response).await.as_bytes(), bytes);
+}
 #[tokio::test]
 async fn create_capsule_binds_lockfile_selected_job_and_idempotency() {
     let (control_plane, application) = application(None);

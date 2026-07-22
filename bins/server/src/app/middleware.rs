@@ -76,12 +76,11 @@ pub(in crate::app) async fn require_bearer<B>(
         Err(response) => return response,
     };
     let required_scope = required_api_scope(request.method(), request.uri().path());
-    match state.control_plane.authenticate_api_token(
-        &state.token_hasher,
-        &candidate,
-        required_scope,
-        now,
-    ) {
+    match state
+        .store
+        .authenticate_token(&state.token_hasher, &candidate, required_scope, now)
+        .await
+    {
         Ok(context) => {
             request
                 .extensions_mut()
@@ -120,6 +119,17 @@ pub(in crate::app) fn required_api_scope(method: &Method, path: &str) -> &'stati
             "approvals:read"
         } else {
             "approvals:write"
+        }
+    } else if method == Method::POST
+        && path.starts_with("/api/v1/runner-pools/")
+        && path.ends_with("/update-claim")
+    {
+        "runner-updates:claim"
+    } else if path.starts_with("/api/v1/runner-pools/") && path.contains("/fleet") {
+        if read {
+            "runner-fleet:read"
+        } else {
+            "runner-fleet:write"
         }
     } else if path.starts_with("/api/v1/runners") || path.starts_with("/api/v1/runner-pools") {
         if read {
@@ -179,7 +189,7 @@ pub(in crate::app) async fn require_writable_control_plane<B>(
         .get::<RequestId>()
         .cloned()
         .unwrap_or_else(generated_request_id);
-    match state.control_plane.recovery_state() {
+    match state.store.recovery_state().await {
         Ok(state) if !state.safe_mode => next.run(request).await,
         Ok(_) => problem_response(
             &request_id,
@@ -206,7 +216,7 @@ pub(in crate::app) async fn require_writable_human_auth<B>(
         .get::<RequestId>()
         .cloned()
         .unwrap_or_else(generated_request_id);
-    match state.control_plane.recovery_state() {
+    match state.store.recovery_state().await {
         Ok(state) if !state.safe_mode => next.run(request).await,
         Ok(_) => problem_response(
             &request_id,
@@ -320,3 +330,27 @@ pub(in crate::app) fn generated_request_id() -> RequestId {
     }
 }
 use rand_core::RngCore as _;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn updater_claim_scope_cannot_broaden_release_or_policy() {
+        assert_eq!(
+            required_api_scope(
+                &Method::POST,
+                "/api/v1/runner-pools/pool/slots/slot/update-claim"
+            ),
+            "runner-updates:claim"
+        );
+        assert_eq!(
+            required_api_scope(&Method::POST, "/api/v1/runner-pools/pool/update-policy"),
+            "runners:write"
+        );
+        assert_eq!(
+            required_api_scope(&Method::POST, "/api/v1/runner-pools/pool/update-releases"),
+            "runners:write"
+        );
+    }
+}

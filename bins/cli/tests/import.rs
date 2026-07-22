@@ -48,7 +48,6 @@ fn github_import_writes_validated_native_yaml_lock_and_report() {
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["report"]["compatible"], true);
-    assert_eq!(result["report"]["schema_validated"], true);
     assert_eq!(result["report"]["native_ast_validated"], true);
     assert_eq!(result["report"]["compiler_validated"], true);
     assert!(result["native_yaml"]

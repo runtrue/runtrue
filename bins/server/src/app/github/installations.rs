@@ -95,7 +95,7 @@ pub(in crate::app) struct GitHubAppStatusView {
     pub(in crate::app) repositories: Vec<GitHubRepositoryPublicView>,
     pub(in crate::app) metrics: GitHubInstallationMetricsSnapshot,
 }
-pub(in crate::app) fn github_status_service(
+pub(in crate::app) async fn github_status_service(
     state: &AppState,
     tenant_id: &str,
 ) -> Result<GitHubAppStatusView, ControlPlaneError> {
@@ -114,27 +114,25 @@ pub(in crate::app) fn github_status_service(
         });
     };
     let installations = state
-        .control_plane
-        .list_github_installations_for_tenant(tenant_id, None, 100)?;
+        .store
+        .github_installations_for_tenant(tenant_id, None, 100)
+        .await?;
     let mut repositories = Vec::new();
     for installation in &installations {
         let catalog = state
-            .control_plane
-            .list_github_repository_catalog_for_tenant(
+            .store
+            .github_repository_catalog_for_tenant(
                 tenant_id,
                 &installation.installation.id,
                 true,
                 None,
                 100,
-            )?;
+            )
+            .await?;
         let links = state
-            .control_plane
-            .list_github_repository_links_for_tenant(
-                tenant_id,
-                &installation.installation.id,
-                None,
-                100,
-            )?;
+            .store
+            .github_repository_links_for_tenant(tenant_id, &installation.installation.id, None, 100)
+            .await?;
         for repository in catalog {
             let linked_repository_id = links
                 .iter()
@@ -193,10 +191,12 @@ pub(in crate::app) async fn github_app_status(
         &principal,
         CedarAction::EditWorkflowSettings,
         &tenant_id,
-    ) {
+    )
+    .await
+    {
         return response;
     }
-    match github_status_service(&state, &tenant_id) {
+    match github_status_service(&state, &tenant_id).await {
         Ok(status) => Json(status).into_response(),
         Err(error) => control_plane_problem(&request_id, error),
     }
@@ -209,7 +209,7 @@ pub(in crate::app) fn github_repository_internal_id(external_id: u64) -> String 
     format!("github-repository-{external_id}")
 }
 
-pub(in crate::app) fn github_reconciliation_from_snapshot(
+pub(in crate::app) async fn github_reconciliation_from_snapshot(
     state: &AppState,
     tenant_id: &str,
     snapshot: GitHubInstallationSnapshot,
@@ -223,8 +223,9 @@ pub(in crate::app) fn github_reconciliation_from_snapshot(
         ))?;
     let installation_id = github_installation_internal_id(snapshot.installation_id);
     let existing = match state
-        .control_plane
+        .store
         .github_installation_for_tenant(tenant_id, &installation_id)
+        .await
     {
         Ok(existing) => Some(existing),
         Err(ControlPlaneError::NotFound { .. }) => None,
@@ -330,7 +331,7 @@ pub(in crate::app) fn github_selected_repository(
     })
 }
 
-pub(in crate::app) fn provision_selected_github_repositories(
+pub(in crate::app) async fn provision_selected_github_repositories(
     state: &AppState,
     reconciliation: &ReconcileGitHubInstallation,
 ) -> Result<(), ControlPlaneError> {
@@ -338,9 +339,7 @@ pub(in crate::app) fn provision_selected_github_repositories(
         return Ok(());
     }
     let tenant_id = &reconciliation.installation.installation.tenant_id;
-    let existing = state
-        .control_plane
-        .list_repositories_for_tenant(tenant_id)?;
+    let existing = state.store.repositories_for_tenant(tenant_id).await?;
     for selected in &reconciliation.selected_repositories {
         let matches = existing
             .iter()
@@ -362,14 +361,15 @@ pub(in crate::app) fn provision_selected_github_repositories(
             _ => continue,
         };
         state
-            .control_plane
+            .store
             .link_selected_github_repository(&LinkSelectedGitHubRepository {
                 tenant_id: tenant_id.clone(),
                 installation_id: reconciliation.installation.installation.id.clone(),
                 external_repository_id: selected.external_repository_id.clone(),
                 repository,
                 now_unix_ms: reconciliation.now_unix_ms,
-            })?;
+            })
+            .await?;
     }
     Ok(())
 }
@@ -456,12 +456,15 @@ pub(in crate::app) async fn sync_github_installation(
         &principal,
         CedarAction::EditWorkflowSettings,
         &tenant_id,
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let current = match state
-        .control_plane
+        .store
         .github_installation_for_tenant(&tenant_id, &installation_id)
+        .await
     {
         Ok(current) => current,
         Err(error) => return control_plane_problem(&request_id, error),
@@ -492,18 +495,19 @@ pub(in crate::app) async fn sync_github_installation(
         Err(response) => return response,
     };
     let reconciliation =
-        match github_reconciliation_from_snapshot(&state, &tenant_id, snapshot, now) {
+        match github_reconciliation_from_snapshot(&state, &tenant_id, snapshot, now).await {
             Ok(reconciliation) => reconciliation,
             Err(error) => return control_plane_problem(&request_id, error),
         };
     let result = match state
-        .control_plane
+        .store
         .reconcile_github_installation(&reconciliation)
+        .await
     {
         Ok(result) => result,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    if let Err(error) = provision_selected_github_repositories(&state, &reconciliation) {
+    if let Err(error) = provision_selected_github_repositories(&state, &reconciliation).await {
         return control_plane_problem(&request_id, error);
     }
     if let Some(github) = &state.github_installation {
@@ -535,12 +539,15 @@ pub(in crate::app) async fn revoke_github_installation(
         &principal,
         CedarAction::EditWorkflowSettings,
         &tenant_id,
-    ) {
+    )
+    .await
+    {
         return response;
     }
     let current = match state
-        .control_plane
+        .store
         .github_installation_for_tenant(&tenant_id, &installation_id)
+        .await
     {
         Ok(current) => current,
         Err(error) => return control_plane_problem(&request_id, error),
@@ -557,7 +564,7 @@ pub(in crate::app) async fn revoke_github_installation(
         lifecycle_generation: current.lifecycle_generation.saturating_add(1),
         now_unix_ms: now,
     };
-    match state.control_plane.set_github_installation_status(&request) {
+    match state.store.set_github_installation_status(&request).await {
         Ok(result) => {
             if !result.replayed {
                 if let Some(github) = &state.github_installation {

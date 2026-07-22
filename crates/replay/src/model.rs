@@ -1,6 +1,6 @@
 use runtrue_engine::{JobState, RunState, StepState};
 use runtrue_model::ContentDigest;
-use runtrue_workflow_ir::ExecutionCapsule;
+use runtrue_workflow_ir::{ExecutionCapsule, WorkflowFrontendReportArtifact};
 use serde::{Deserialize, Serialize};
 
 pub const REPLAY_SCHEMA_VERSION: u32 = 1;
@@ -20,6 +20,10 @@ pub struct ReplayBundle {
     pub input_artifact_digests: Vec<ContentDigest>,
     pub artifact_references: Vec<ContentDigest>,
     pub cache_references: Vec<ContentDigest>,
+    /// Client-produced translation diagnostics bound by the signed capsule.
+    /// This is a compilation artifact, not Provider Evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_frontend_report: Option<WorkflowFrontendReportArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ReplayOutcome>,
 }

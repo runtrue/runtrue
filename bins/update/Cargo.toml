@@ -10,6 +10,10 @@ rust-version.workspace = true
 name = "runtrue-update"
 path = "src/main.rs"
 
+[[bin]]
+name = "runtrue-updater"
+path = "src/updater_main.rs"
+
 [dependencies]
 runtrue-model.workspace = true
 runtrue-update.workspace = true
@@ -18,6 +22,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+nix = { workspace = true, features = ["user"] }
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+zeroize.workspace = true
+hex.workspace = true
 
 [lints]
 workspace = true

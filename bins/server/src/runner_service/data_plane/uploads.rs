@@ -53,7 +53,7 @@ pub(in crate::runner_service) struct PendingRunnerUpload {
 }
 
 impl RunnerControlService {
-    pub(in crate::runner_service) fn authorize_runner_upload(
+    pub(in crate::runner_service) async fn authorize_runner_upload(
         &self,
         authenticated: &AuthenticatedIdentity,
         binding: &RunnerUploadBinding,
@@ -66,7 +66,8 @@ impl RunnerControlService {
                 &binding.job_id,
                 binding.job_attempt,
                 &binding.step_id,
-            )?
+            )
+            .await?
         } else {
             self.active_data_subject(
                 authenticated,
@@ -75,7 +76,8 @@ impl RunnerControlService {
                 &binding.job_id,
                 binding.job_attempt,
                 &binding.step_id,
-            )?
+            )
+            .await?
         };
         let data = Arc::clone(self.inner.data_plane.as_ref().ok_or_else(|| {
             Status::failed_precondition("runner object data plane is not configured")
@@ -270,7 +272,7 @@ impl RunnerControlService {
         let replayed = self
             .inner
             .control_plane
-            .record_runner_blob_upload(
+            .record_runner_blob_transfer(
                 &RecordRunnerBlobUpload {
                     ticket_id: authorized.ticket_id.to_string(),
                     blob_digest: binding.declared_digest.clone(),
@@ -283,7 +285,9 @@ impl RunnerControlService {
                     recorded_unix_ms: now_unix_ms()?,
                 },
                 &authenticated.runner_id,
+                "upload",
             )
+            .await
             .map_err(control_plane_status)?;
         Self::require_runner_upload_active(&authorized)?;
         Ok(v1::UploadBlobResponse {

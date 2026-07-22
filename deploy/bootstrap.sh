@@ -7,24 +7,33 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
 readonly RUNNER_COMPOSE_FILE="${SCRIPT_DIR}/compose.runner-tls.yml"
 readonly GITHUB_COMPOSE_FILE="${SCRIPT_DIR}/compose.github-app.yml"
+readonly TRAEFIK_COMPOSE_FILE="${SCRIPT_DIR}/compose.traefik.yml"
+readonly AUTOSCALER_COMPOSE_FILE="${SCRIPT_DIR}/compose.autoscaler.yml"
 
 STATE_DIR="${SCRIPT_DIR}/state"
 WITH_RUNNER_TLS=false
 WITH_GITHUB_APP=false
+WITH_TRAEFIK=false
+WITH_AUTOSCALER=false
 CHECK_ONLY=false
 TEMP_PATHS=()
 
 usage() {
   cat <<'EOF'
 Usage: deploy/bootstrap.sh [--state-dir PATH] [--with-runner-tls]
-                           [--with-github-app] [--check-only]
+                           [--with-github-app] [--with-traefik]
+                           [--with-autoscaler] [--check-only]
 
 Initializes private single-node evaluation state without replacing an existing
 credential. --with-runner-tls also creates a short-lived, self-signed local
 runner-control PKI. --with-github-app creates the webhook secret, browser
 cookie key, and private mirror directory used by the Compose GitHub overlay.
-It never creates or reads a GitHub App private key. --check-only performs
-validation without creating files.
+--with-traefik creates private ACME state for the Compose HTTPS edge. It never
+creates or reads a GitHub App private key. --check-only performs validation
+without creating files.
+--with-autoscaler enables the development-only Docker provider. It requires
+runner TLS and a pre-issued, mode-0600 autoscaler API token at
+STATE_DIR/runner-secrets/autoscaler.token.
 EOF
 }
 
@@ -58,6 +67,14 @@ while (($#)); do
       WITH_GITHUB_APP=true
       shift
       ;;
+    --with-traefik)
+      WITH_TRAEFIK=true
+      shift
+      ;;
+    --with-autoscaler)
+      WITH_AUTOSCALER=true
+      shift
+      ;;
     --check-only)
       CHECK_ONLY=true
       shift
@@ -71,6 +88,10 @@ while (($#)); do
       ;;
   esac
 done
+
+if "$WITH_AUTOSCALER" && ! "$WITH_RUNNER_TLS"; then
+  die '--with-autoscaler requires --with-runner-tls'
+fi
 
 for command in docker openssl realpath stat find install mktemp ln cmp; do
   command -v "$command" >/dev/null 2>&1 || die "required command not found: ${command}"
@@ -103,6 +124,20 @@ readonly RUNTIME_UID RUNTIME_GID
 if ((EUID != 0)) && { ((RUNTIME_UID != EUID)) || ((RUNTIME_GID != $(id -g))); }; then
   die 'a non-root bootstrap may only select its own uid and gid'
 fi
+DOCKER_GID=
+AUTOSCALER_RESERVE_MEMORY_BYTES=
+AUTOSCALER_RESERVE_NANO_CPUS=
+if "$WITH_AUTOSCALER"; then
+  DOCKER_GID=${RUNTRUE_DOCKER_GID:-$(stat -c '%g' -- /var/run/docker.sock 2>/dev/null || true)}
+  [[ "$DOCKER_GID" =~ ^[0-9]+$ ]] || die 'RUNTRUE_DOCKER_GID must identify the docker.sock group'
+  AUTOSCALER_RESERVE_MEMORY_BYTES=${RUNTRUE_AUTOSCALER_RESERVE_MEMORY_BYTES:-2147483648}
+  AUTOSCALER_RESERVE_NANO_CPUS=${RUNTRUE_AUTOSCALER_RESERVE_NANO_CPUS:-2000000000}
+  [[ "$AUTOSCALER_RESERVE_MEMORY_BYTES" =~ ^[0-9]+$ ]] ||
+    die 'RUNTRUE_AUTOSCALER_RESERVE_MEMORY_BYTES must be a non-negative integer'
+  [[ "$AUTOSCALER_RESERVE_NANO_CPUS" =~ ^[0-9]+$ ]] ||
+    die 'RUNTRUE_AUTOSCALER_RESERVE_NANO_CPUS must be a non-negative integer'
+fi
+readonly DOCKER_GID AUTOSCALER_RESERVE_MEMORY_BYTES AUTOSCALER_RESERVE_NANO_CPUS
 
 reject_symlink_components() {
   local path=$1 current=/ component
@@ -190,6 +225,39 @@ create_random_file() {
   publish_new_file "$temporary" "$destination"
 }
 
+create_empty_file() {
+  local destination=$1 temporary
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    validate_private_file "$destination" 0
+    return
+  fi
+  temporary=$(new_temporary_file "$(dirname -- "$destination")" "$(basename -- "$destination")")
+  TEMP_PATHS+=("$temporary")
+  : >"$temporary"
+  publish_new_file "$temporary" "$destination"
+}
+
+create_autoscaler_template() {
+  local destination="${STATE_DIR}/autoscaler/docker-template.json" temporary project_name
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    validate_private_file "$destination"
+    return
+  fi
+  project_name=${COMPOSE_PROJECT_NAME:-deploy}
+  [[ "$project_name" =~ ^[A-Za-z0-9_-]+$ ]] || die 'COMPOSE_PROJECT_NAME is unsafe'
+  temporary=$(new_temporary_file "${STATE_DIR}/autoscaler" docker-template.json)
+  TEMP_PATHS+=("$temporary")
+  sed \
+    -e "s#/var/lib/runtrue#${STATE_DIR}#g" \
+    -e "s#runtrue_control#${project_name}_control#g" \
+    -e "s#__RUNTRUE_RUNTIME_UID__#${RUNTIME_UID}#g" \
+    -e "s#__RUNTRUE_RUNTIME_GID__#${RUNTIME_GID}#g" \
+    -e "s#__RUNTRUE_CAPACITY_RESERVE_MEMORY_BYTES__#${AUTOSCALER_RESERVE_MEMORY_BYTES}#g" \
+    -e "s#__RUNTRUE_CAPACITY_RESERVE_NANO_CPUS__#${AUTOSCALER_RESERVE_NANO_CPUS}#g" \
+    "${SCRIPT_DIR}/autoscaler-docker-template.json.example" >"$temporary"
+  publish_new_file "$temporary" "$destination"
+}
+
 validate_bootstrap_material() {
   local token_file="${STATE_DIR}/secrets/bootstrap.token"
   local key_file="${STATE_DIR}/keys/security.key"
@@ -208,6 +276,9 @@ write_compose_environment() {
   {
     printf 'RUNTRUE_RUNTIME_UID=%s\n' "$RUNTIME_UID"
     printf 'RUNTRUE_RUNTIME_GID=%s\n' "$RUNTIME_GID"
+    if "$WITH_AUTOSCALER"; then
+      printf 'RUNTRUE_DOCKER_GID=%s\n' "$DOCKER_GID"
+    fi
     printf 'RUNTRUE_STATE_DIR=%s\n' "$STATE_DIR"
     printf 'RUNTRUE_HTTP_PORT=8080\n'
     printf 'RUNTRUE_INSTALLATION_ID=single-node-evaluation\n'
@@ -342,24 +413,57 @@ validate_compose() {
   if "$WITH_GITHUB_APP"; then
     compose_files+=(-f "$GITHUB_COMPOSE_FILE")
   fi
+  if "$WITH_TRAEFIK"; then
+    compose_files+=(-f "$TRAEFIK_COMPOSE_FILE")
+  fi
+  if "$WITH_AUTOSCALER"; then
+    compose_files+=(-f "$AUTOSCALER_COMPOSE_FILE")
+  fi
   if "$WITH_GITHUB_APP"; then
     env \
+      GITHUB_TOKEN=deployment-validation-token \
       RUNTRUE_PUBLIC_ORIGIN=https://runtrue.example.com \
       RUNTRUE_GITHUB_APP_ID=123 \
       RUNTRUE_GITHUB_APP_SLUG=runtrue \
       RUNTRUE_GITHUB_WEB_ORIGIN=https://github.example.com \
       RUNTRUE_GITHUB_API_ORIGIN=https://github.example.com/api/v3 \
       RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE=provider://github-app/production \
+      RUNTRUE_GITHUB_OAUTH_CLIENT_ID=Iv1.test \
+      RUNTRUE_GITHUB_OAUTH_ADMIN_USER_IDS=123456 \
       RUNTRUE_GITHUB_SIGNER_SOCKET=/run/runtrue/github-app-signer.sock \
+      RUNTRUE_ACME_EMAIL=operator@example.com \
+      docker compose --env-file "${STATE_DIR}/compose.env" \
+        "${compose_files[@]}" "${compose_profiles[@]}" config >"$rendered"
+  elif "$WITH_TRAEFIK"; then
+    env \
+      RUNTRUE_PUBLIC_ORIGIN=https://runtrue.example.com \
+      RUNTRUE_ACME_EMAIL=operator@example.com \
       docker compose --env-file "${STATE_DIR}/compose.env" \
         "${compose_files[@]}" "${compose_profiles[@]}" config >"$rendered"
   else
     docker compose --env-file "${STATE_DIR}/compose.env" \
       "${compose_files[@]}" "${compose_profiles[@]}" config >"$rendered"
   fi
-  grep -q 'host_ip: 127.0.0.1' "$rendered" || die 'Compose API publication is not loopback-only'
-  if grep -Eq '(^|/)(docker|podman)\.sock|privileged:[[:space:]]*true|network_mode:[[:space:]]*host' "$rendered"; then
-    die 'Compose configuration contains a forbidden host-runtime or privilege escape'
+  if "$WITH_TRAEFIK"; then
+    grep -q 'published: "80"' "$rendered" || die 'Traefik does not publish HTTP port 80'
+    grep -q 'published: "443"' "$rendered" || die 'Traefik does not publish HTTPS port 443'
+    ! grep -q 'host_ip: 127.0.0.1' "$rendered" || die 'Traefik overlay retained an application loopback port'
+  else
+    grep -q 'host_ip: 127.0.0.1' "$rendered" || die 'Compose API publication is not loopback-only'
+  fi
+  if grep -Eq 'privileged:[[:space:]]*true|network_mode:[[:space:]]*host|podman\.sock' "$rendered"; then
+    die 'Compose configuration contains a forbidden privilege escape'
+  fi
+  if ! awk '
+    /^  [A-Za-z0-9_.-]+:$/ { service=$1; sub(":$", "", service) }
+    /docker\.sock/ && service != "autoscaler" { exit 1 }
+  ' "$rendered"; then
+    die 'a container-runtime socket is mounted outside the autoscaler service'
+  fi
+  if "$WITH_AUTOSCALER"; then
+    grep -q '/var/run/docker.sock' "$rendered" || die 'autoscaler Docker socket mount is missing'
+  elif grep -q '/var/run/docker.sock' "$rendered"; then
+    die 'Docker socket requires explicit --with-autoscaler opt-in'
   fi
   rm -f -- "$rendered"
 }
@@ -385,6 +489,12 @@ declare -a STATE_DIRECTORIES=(
 if "$WITH_GITHUB_APP"; then
   STATE_DIRECTORIES+=("${STATE_DIR}/server/git-mirrors")
 fi
+if "$WITH_TRAEFIK"; then
+  STATE_DIRECTORIES+=("${STATE_DIR}/traefik")
+fi
+if "$WITH_AUTOSCALER"; then
+  STATE_DIRECTORIES+=("${STATE_DIR}/autoscaler" "${STATE_DIR}/autoscaler/claims")
+fi
 readonly -a STATE_DIRECTORIES
 
 if "$CHECK_ONLY"; then
@@ -401,9 +511,15 @@ else
     create_random_file "${STATE_DIR}/secrets/github-webhook.secret" hex 32
     create_random_file "${STATE_DIR}/secrets/browser-cookie.key" raw 32
   fi
+  if "$WITH_TRAEFIK"; then
+    create_empty_file "${STATE_DIR}/traefik/acme.json"
+  fi
   write_compose_environment
   if "$WITH_RUNNER_TLS"; then
     create_tls_material
+  fi
+  if "$WITH_AUTOSCALER"; then
+    create_autoscaler_template
   fi
 fi
 
@@ -413,8 +529,16 @@ if "$WITH_GITHUB_APP"; then
   validate_private_file "${STATE_DIR}/secrets/github-webhook.secret" 65
   validate_private_file "${STATE_DIR}/secrets/browser-cookie.key" 32
 fi
+if "$WITH_TRAEFIK"; then
+  validate_private_file "${STATE_DIR}/traefik/acme.json"
+fi
 if "$WITH_RUNNER_TLS"; then
   validate_tls_material
+fi
+if "$WITH_AUTOSCALER"; then
+  validate_private_file "${STATE_DIR}/runner-secrets/autoscaler.token"
+  [[ -s "${STATE_DIR}/runner-secrets/autoscaler.token" ]] || die 'autoscaler API token is empty'
+  validate_private_file "${STATE_DIR}/autoscaler/docker-template.json"
 fi
 validate_state_tree
 validate_compose

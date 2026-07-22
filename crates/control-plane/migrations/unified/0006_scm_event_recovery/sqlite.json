@@ -1,0 +1,6 @@
+{
+  "backend": "sqlite",
+  "sql": "ALTER TABLE durable_tasks ADD COLUMN recoverable_until_unix_ms INTEGER CHECK (recoverable_until_unix_ms IS NULL OR recoverable_until_unix_ms >= created_unix_ms); UPDATE durable_tasks SET recoverable_until_unix_ms = created_unix_ms + 86400000 WHERE kind = 'scm.event' AND status = 'failed' AND created_unix_ms <= 9223372036768375807 AND last_error IN ('repository-action preparation is temporarily unavailable', 'GitHub actor permission lookup is unavailable', 'Git mirror repository is unavailable or unsafe', 'source manifest CAS publication failed', 'Git mirror repository changed while planning', 'exact Git revision or trusted workflow is unavailable', 'exact reusable workflow mirror or object is unavailable', 'source snapshot construction is temporarily unavailable', 'restore safe mode blocked the SCM event commit'); CREATE INDEX recoverable_durable_tasks ON durable_tasks(kind, status, recoverable_until_unix_ms, available_unix_ms, id);",
+  "post_sql": "SELECT 1;",
+  "trust_sql": "SELECT 1;"
+}

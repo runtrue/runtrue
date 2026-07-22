@@ -28,7 +28,7 @@ can be named with `RUNTRUE_GITHUB_OAUTH_TENANT_ID` and
 The client secret must be a protected file and is never accepted from an
 environment value. The web/API origins come from the same exact
 `RUNTRUE_GITHUB_WEB_ORIGIN` and `RUNTRUE_GITHUB_API_ORIGIN` pair as the GitHub App.
-Opening `/ui/github/installations` without a session redirects through
+Opening `/` without a session redirects through
 `/auth/login` and returns at `/auth/callback`.
 
 OAuth state is a durable, expiring, one-use transaction and is also bound into

@@ -1,6 +1,7 @@
 use super::*;
 
 mod audit;
+mod events;
 mod policy_versions;
 mod replay;
 mod secrets;

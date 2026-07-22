@@ -107,7 +107,7 @@ pub fn github_installations_payload(page: &GitHubInstallationsPage) -> Value {
     })
 }
 
-fn repository_url(repository: &super::model::GitHubRepositoryLinkView) -> String {
+pub(crate) fn repository_url(repository: &super::model::GitHubRepositoryLinkView) -> String {
     format!(
         "{}/{}/{}",
         repository.web_origin.trim_end_matches('/'),

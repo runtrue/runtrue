@@ -2,6 +2,7 @@ mod identity_policy_deployment;
 mod support;
 
 use super::*;
+use crate::migration::LOGICAL_SCHEMA_GENERATION;
 use crate::types::{NewJob, RunnerPoolStatus};
 use runtrue_attest::CapsuleSigningKey;
 use runtrue_audit::{AuditPrincipal, AuditResource};
@@ -29,6 +30,7 @@ use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 mod artifacts;
 mod cache;
 mod durable;
+mod frontend_reports;
 mod leases;
 mod lifecycle;
 mod runners;
@@ -38,6 +40,10 @@ mod storage;
 mod workflow;
 
 const NOW: u64 = 1_000;
+
+const MAIN_MIGRATION_29: &str = "ALTER TABLE leases ADD COLUMN terminal_credential_taint TEXT NOT NULL DEFAULT 'unobserved' CHECK (terminal_credential_taint IN ('unobserved', 'unknown', 'none', 'credential_released')); PRAGMA user_version = 29;";
+const MAIN_MIGRATION_30: &str = "CREATE TABLE repository_workflow_settings (repository_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workflow_path TEXT NOT NULL CHECK (length(workflow_path) BETWEEN 1 AND 1024 AND instr(workflow_path, char(0)) = 0), updated_unix_ms INTEGER NOT NULL, FOREIGN KEY (tenant_id, repository_id) REFERENCES repositories(tenant_id, id)) STRICT; PRAGMA user_version = 30;";
+const MAIN_MIGRATION_31: &str = "ALTER TABLE repository_workflow_settings RENAME COLUMN workflow_path TO workflow_directory; PRAGMA user_version = 31;";
 
 fn add_runner_pool_only(control: &ControlPlane) {
     control
@@ -299,7 +305,7 @@ fn pending_scm_fixture_with_reusable_privileged_approval(
         analysis_id: Some("scm-analysis".to_owned()),
         source_snapshot_id: None,
         privileged_capability_digest: Some(privileged_subject.clone()),
-        resolved_repository_actions: serde_json::json!({}),
+        resolved_repository_actions: json!({}),
     };
     let run = CreateRunRequest {
         id: "scm-run".to_owned(),
@@ -335,6 +341,7 @@ fn pending_scm_fixture_with_reusable_privileged_approval(
     let prepared = PreparedScmExecution {
         capsule: capsule.clone(),
         metadata: metadata.clone(),
+        workflow_frontend_report: None,
         approvals,
         run: run.clone(),
         continuation: Some(context.clone()),
@@ -523,6 +530,12 @@ fn signed_broker_capsule() -> (SignedCapsuleRecord, runtrue_attest::CapsuleVerif
             metadata_id: "secret-broker".to_owned(),
             name: "TOKEN".to_owned(),
             purpose: Some("publish".to_owned()),
+            resolution: Some(runtrue_model::SecretResolutionBinding {
+                scope: "repository:repo-1".to_owned(),
+                metadata_version: Some(1),
+                resolution_digest: ContentDigest::sha256(b"secret-broker-resolution"),
+                project_versions: Vec::new(),
+            }),
         });
     capsule.jobs[0].steps[0]
         .capabilities
@@ -531,6 +544,12 @@ fn signed_broker_capsule() -> (SignedCapsuleRecord, runtrue_attest::CapsuleVerif
             metadata_id: "secret-purpose-less".to_owned(),
             name: "NO_PURPOSE".to_owned(),
             purpose: None,
+            resolution: Some(runtrue_model::SecretResolutionBinding {
+                scope: "repository:repo-1".to_owned(),
+                metadata_version: Some(1),
+                resolution_digest: ContentDigest::sha256(b"purpose-less-resolution"),
+                project_versions: Vec::new(),
+            }),
         });
     let signing_key = CapsuleSigningKey::from_seed([39_u8; 32]);
     let signature = signing_key.sign_capsule(&capsule).unwrap();
@@ -591,15 +610,18 @@ fn runner() -> RunnerRecord {
         logical_cpus: 4,
         memory_bytes: 8 * 1024,
         storage_bytes: 16 * 1024,
+        max_concurrent_wasm_jobs: 1,
         region: Some("test".to_owned()),
         verified_capabilities: ["kvm".to_owned()].into_iter().collect(),
         self_reported_capabilities: BTreeSet::new(),
         status: RunnerStatus::Online,
         active_jobs: 0,
+        active_wasm_jobs: 0,
         used_cpus: 0,
         used_memory_bytes: 0,
         used_storage_bytes: 0,
         locality: BTreeSet::new(),
+        package_tiers: Default::default(),
         last_heartbeat_unix_ms: NOW,
     }
 }
@@ -1261,6 +1283,7 @@ fn scm_dual_gate_continuation_is_durable_race_safe_and_run_bound() {
             &[PreparedScmExecution {
                 capsule: fixture.capsule.clone(),
                 metadata: fixture.metadata.clone(),
+                workflow_frontend_report: None,
                 approvals: replay_approvals,
                 run: fixture.run.clone(),
                 continuation: Some(fixture.context.clone()),
@@ -1454,28 +1477,6 @@ fn reusable_scm_approval_binds_exact_run_subject_and_can_be_scheduled() {
     assert_eq!(authorized_subject, fixture.subject.as_str());
     assert_ne!(authorized_subject, fixture.privileged_subject.as_str());
 
-    // Reproduce the schema-32 row shape and prove the data migration repairs
-    // already-queued work, not only newly admitted runs.
-    let connection = fixture.control.connection().unwrap();
-    connection
-        .execute(
-            "UPDATE run_approval_authorizations SET subject_digest = ?1
-             WHERE run_id = 'scm-run' AND kind = 'privileged-execution'",
-            [fixture.privileged_subject.as_str()],
-        )
-        .unwrap();
-    connection.execute_batch(database::MIGRATION_33).unwrap();
-    let repaired_subject: String = connection
-        .query_row(
-            "SELECT subject_digest FROM run_approval_authorizations
-             WHERE run_id = 'scm-run' AND kind = 'privileged-execution'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(repaired_subject, fixture.subject.as_str());
-    drop(connection);
-
     add_runner(&fixture.control);
     let lease = fixture
         .control
@@ -1556,18 +1557,7 @@ fn scm_denial_and_replanning_tamper_close_without_runs() {
         ScmContinuationResolution::Ready(_)
     ));
     let mut tampered_context = stale.context.clone();
-    tampered_context.resolved_repository_actions = serde_json::json!({
-        "ci/backport@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
-            "program": {
-                "kind": "component",
-                "reference": "wasm://registry.example/backport@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "scm_api_url": "https://api.example.invalid",
-                "signature_identity": "attacker@example.invalid",
-                "wit_world": "runtrue:action/run@1.0.0"
-            },
-            "inputs": {}
-        }
-    });
+    tampered_context.source_identity.policy_version_ids = vec!["policy-v2".to_owned()];
     assert!(matches!(
         stale
             .control
@@ -2214,7 +2204,7 @@ fn schema_one_is_upgraded_through_scm_check_schema_twenty_two() {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(version, crate::migration::SQLITE_RETIRED_USER_VERSION);
     let migrations: Vec<u32> = connection
         .prepare("SELECT version FROM schema_migrations ORDER BY version")
         .unwrap()
@@ -2234,6 +2224,430 @@ fn schema_one_is_upgraded_through_scm_check_schema_twenty_two() {
         )
         .unwrap();
     assert!(credential_taint_column);
+}
+
+#[test]
+fn unified_sqlite_ledger_is_authoritative_and_detects_drift() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unified-authority.sqlite");
+    let (control, applied) =
+        ControlPlane::open_with_migration_report(&path, "installation", NOW).unwrap();
+    assert_eq!(
+        applied.applied_migration_ids,
+        [
+            "legacy-baseline-v1",
+            "runner-immutable-replacement-v1",
+            "reusable-capability-approvals-v1",
+            "user-management-v1",
+            "durable-event-replay-v1",
+            "scm-event-recovery-v1"
+        ]
+    );
+    assert_eq!(
+        applied.bridged_legacy_lineage.as_deref(),
+        Some("sqlite-v1-through-v34")
+    );
+    drop(control);
+
+    let connection = Connection::open(&path).unwrap();
+    let (original_definition, original_implementation): (Vec<u8>, Vec<u8>) = connection
+        .query_row(
+            "SELECT definition_sha256,implementation_sha256
+             FROM runtrue_schema_migrations WHERE sequence=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", 7_u32)
+        .unwrap();
+    drop(connection);
+
+    // Ordinary startup uses only the unified ledger after the bridge.
+    let (control, replayed) =
+        ControlPlane::open_with_migration_report(&path, "installation", NOW + 1).unwrap();
+    assert_eq!(
+        replayed.replayed_migration_ids,
+        [
+            "legacy-baseline-v1",
+            "runner-immutable-replacement-v1",
+            "reusable-capability-approvals-v1",
+            "user-management-v1",
+            "durable-event-replay-v1",
+            "scm-event-recovery-v1"
+        ]
+    );
+    assert!(replayed.applied_migration_ids.is_empty());
+    drop(control);
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE runtrue_schema_migrations
+             SET implementation_sha256=zeroblob(32) WHERE sequence=1",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        ControlPlane::open(&path, "installation", NOW + 2),
+        Err(ControlPlaneError::InvalidMigrationHistory(_))
+    ));
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE runtrue_schema_migrations
+             SET implementation_sha256=?1 WHERE sequence=1",
+            [original_implementation],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE runtrue_schema_migrations
+             SET definition_sha256=zeroblob(32) WHERE sequence=1",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        ControlPlane::open(&path, "installation", NOW + 3),
+        Err(ControlPlaneError::InvalidMigrationHistory(_))
+    ));
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE runtrue_schema_migrations
+             SET definition_sha256=?1 WHERE sequence=1",
+            [original_definition],
+        )
+        .unwrap();
+    connection
+        .execute("DROP TABLE runner_fleet_requests", [])
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        ControlPlane::open(&path, "installation", NOW + 4),
+        Err(ControlPlaneError::InvalidMigrationHistory(_))
+    ));
+}
+
+#[test]
+fn failed_sqlite_legacy_bridge_rolls_back_schema_and_ledger() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("failed-bridge.sqlite");
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch(MIGRATION_1).unwrap();
+    connection
+        .execute(
+            "INSERT INTO installation_state(singleton,installation_id,fencing_epoch)
+             VALUES(1,'installation',1)",
+            [],
+        )
+        .unwrap();
+    // Deliberately omit the legacy generation-1 ledger record.
+    drop(connection);
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(matches!(
+        ControlPlane::open(&path, "installation", NOW + 1),
+        Err(ControlPlaneError::InvalidMigrationHistory(_))
+    ));
+    let connection = Connection::open(&path).unwrap();
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 1);
+    assert!(!table_exists(&connection, "runtrue_schema_migrations").unwrap());
+    let records: u32 = connection
+        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(records, 0);
+}
+
+#[test]
+fn every_sqlite_legacy_head_bridges_to_the_same_logical_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    for head in 1..=CURRENT_SCHEMA_VERSION {
+        let path = directory.path().join(format!("legacy-head-{head}.sqlite"));
+        let connection = Connection::open(&path).unwrap();
+        for (offset, migration) in SQLITE_LEGACY_MIGRATIONS
+            .iter()
+            .take(head as usize)
+            .enumerate()
+        {
+            connection.execute_batch(migration).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations(version,applied_unix_ms) VALUES(?1,?2)",
+                    params![i64::try_from(offset + 1).unwrap(), to_i64(NOW).unwrap()],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO installation_state(singleton,installation_id,fencing_epoch)
+                 VALUES(1,'installation',1)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let (control, report) =
+            ControlPlane::open_with_migration_report(&path, "installation", NOW + 1).unwrap();
+        assert_eq!(
+            report.applied_migration_ids,
+            [
+                "legacy-baseline-v1",
+                "runner-immutable-replacement-v1",
+                "reusable-capability-approvals-v1",
+                "user-management-v1",
+                "durable-event-replay-v1",
+                "scm-event-recovery-v1"
+            ]
+        );
+        assert_eq!(
+            report.bridged_legacy_lineage.as_deref(),
+            Some("sqlite-v1-through-v34")
+        );
+        drop(control);
+    }
+}
+
+#[test]
+fn concurrent_sqlite_starters_bridge_once_then_replay() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("concurrent-bridge.sqlite");
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch(MIGRATION_1).unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations(version,applied_unix_ms) VALUES(1,?1)",
+            [to_i64(NOW).unwrap()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO installation_state(singleton,installation_id,fencing_epoch)
+             VALUES(1,'installation',1)",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut starters = Vec::new();
+    for offset in 0..2 {
+        let path = path.clone();
+        let barrier = barrier.clone();
+        starters.push(std::thread::spawn(move || {
+            barrier.wait();
+            ControlPlane::open(&path, "installation", NOW + offset)
+        }));
+    }
+    barrier.wait();
+    for starter in starters {
+        drop(starter.join().unwrap().unwrap());
+    }
+    let connection = Connection::open(&path).unwrap();
+    let unified_rows: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM runtrue_schema_migrations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unified_rows, LOGICAL_SCHEMA_GENERATION);
+    let legacy_rows: u32 = connection
+        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(legacy_rows, CURRENT_SCHEMA_VERSION);
+}
+
+#[test]
+fn clean_and_divergent_schema_lineages_converge_without_data_loss() {
+    let directory = tempfile::tempdir().unwrap();
+    for lineage in ["clean", "next-29", "main-29", "main-30", "main-31"] {
+        let path = directory.path().join(format!("{lineage}.sqlite"));
+        let expected_workflow_directory = if lineage == "main-30" || lineage == "main-31" {
+            let mut connection = Connection::open(&path).unwrap();
+            for (offset, migration) in [
+                MIGRATION_1,
+                MIGRATION_2,
+                MIGRATION_3,
+                MIGRATION_4,
+                MIGRATION_5,
+                MIGRATION_6,
+                MIGRATION_7,
+                MIGRATION_8,
+                MIGRATION_9,
+                MIGRATION_10,
+                MIGRATION_11,
+                MIGRATION_12,
+                MIGRATION_13,
+                MIGRATION_14,
+                MIGRATION_15,
+                MIGRATION_16,
+                MIGRATION_17,
+                MIGRATION_18,
+                MIGRATION_19,
+                MIGRATION_20,
+                MIGRATION_21,
+                MIGRATION_22,
+                MIGRATION_23,
+                MIGRATION_24,
+                MIGRATION_25,
+                MIGRATION_26,
+                MIGRATION_27,
+                MIGRATION_28,
+            ]
+            .iter()
+            .enumerate()
+            {
+                apply_migration(
+                    &mut connection,
+                    migration,
+                    u32::try_from(offset + 1).unwrap(),
+                    NOW,
+                )
+                .unwrap();
+            }
+            apply_migration(&mut connection, MAIN_MIGRATION_29, 29, NOW).unwrap();
+            apply_migration(&mut connection, MAIN_MIGRATION_30, 30, NOW).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO repositories
+                     (id, tenant_id, owner, name, default_branch, visibility, created_unix_ms)
+                     VALUES ('repo-lineage', 'tenant-lineage', 'octo', 'runtrue', 'main', 'private', ?1)",
+                    [to_i64(NOW).unwrap()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO repository_workflow_settings
+                     (repository_id, tenant_id, workflow_path, updated_unix_ms)
+                     VALUES ('repo-lineage', 'tenant-lineage', 'automation/workflows', ?1)",
+                    [to_i64(NOW).unwrap()],
+                )
+                .unwrap();
+            if lineage == "main-31" {
+                apply_migration(&mut connection, MAIN_MIGRATION_31, 31, NOW).unwrap();
+            }
+            drop(connection);
+            Some("automation/workflows")
+        } else if lineage == "clean" {
+            None
+        } else {
+            let mut connection = Connection::open(&path).unwrap();
+            for (offset, migration) in [
+                MIGRATION_1,
+                MIGRATION_2,
+                MIGRATION_3,
+                MIGRATION_4,
+                MIGRATION_5,
+                MIGRATION_6,
+                MIGRATION_7,
+                MIGRATION_8,
+                MIGRATION_9,
+                MIGRATION_10,
+                MIGRATION_11,
+                MIGRATION_12,
+                MIGRATION_13,
+                MIGRATION_14,
+                MIGRATION_15,
+                MIGRATION_16,
+                MIGRATION_17,
+                MIGRATION_18,
+                MIGRATION_19,
+                MIGRATION_20,
+                MIGRATION_21,
+                MIGRATION_22,
+                MIGRATION_23,
+                MIGRATION_24,
+                MIGRATION_25,
+                MIGRATION_26,
+                MIGRATION_27,
+                MIGRATION_28,
+            ]
+            .iter()
+            .enumerate()
+            {
+                apply_migration(
+                    &mut connection,
+                    migration,
+                    u32::try_from(offset + 1).unwrap(),
+                    NOW,
+                )
+                .unwrap();
+            }
+            let lineage_migration = if lineage == "next-29" {
+                MIGRATION_29
+            } else {
+                MAIN_MIGRATION_29
+            };
+            apply_migration(&mut connection, lineage_migration, 29, NOW).unwrap();
+            drop(connection);
+            None
+        };
+        #[cfg(unix)]
+        if path.exists() {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        drop(ControlPlane::open(&path, format!("installation-{lineage}"), NOW + 1).unwrap());
+        let connection = Connection::open(&path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            version,
+            crate::migration::SQLITE_RETIRED_USER_VERSION,
+            "lineage {lineage}"
+        );
+        let migrations: Vec<u32> = connection
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            migrations,
+            (1..=CURRENT_SCHEMA_VERSION).collect::<Vec<_>>(),
+            "lineage {lineage}",
+        );
+        assert!(table_exists(&connection, "workflow_frontend_reports").unwrap());
+        assert!(column_exists(&connection, "leases", "terminal_credential_taint").unwrap());
+        assert!(column_exists(
+            &connection,
+            "repository_workflow_settings",
+            "workflow_directory",
+        )
+        .unwrap());
+        assert!(
+            !column_exists(&connection, "repository_workflow_settings", "workflow_path",).unwrap()
+        );
+        if let Some(expected) = expected_workflow_directory {
+            let actual: String = connection
+                .query_row(
+                    "SELECT workflow_directory FROM repository_workflow_settings
+                     WHERE repository_id = 'repo-lineage'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "lineage {lineage}");
+        }
+    }
 }
 
 #[test]
@@ -2312,7 +2726,7 @@ fn shipped_schema_sixteen_upgrades_cache_trust_before_artifact_catalog() {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(version, crate::migration::SQLITE_RETIRED_USER_VERSION);
     for table in [
         "cache_trust_generations",
         "cache_trust_current_heads",
@@ -2383,7 +2797,7 @@ fn shipped_schema_seventeen_upgrades_artifact_catalog_and_download_roots() {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(version, crate::migration::SQLITE_RETIRED_USER_VERSION);
     for table in [
         "artifacts_catalog",
         "artifact_download_tickets",
@@ -3166,7 +3580,7 @@ fn shipped_schema_seven_upgrades_token_ancestry_and_lease_deadlines() {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(version, crate::migration::SQLITE_RETIRED_USER_VERSION);
     for (table, column) in [
         ("api_tokens", "parent_token_id"),
         ("leases", "hard_deadline_unix_ms"),
@@ -3223,7 +3637,7 @@ fn shipped_schema_eight_upgrades_rotation_replay_journal() {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(version, crate::migration::SQLITE_RETIRED_USER_VERSION);
     let journal_exists: bool = connection
         .query_row(
             "SELECT EXISTS(
@@ -3490,7 +3904,7 @@ fn schema_nineteen_upgrades_through_output_lifecycle_integrity_schema_twenty_one
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(version, crate::migration::SQLITE_RETIRED_USER_VERSION);
     for table in [
         "expanded_job_sets",
         "normalized_trigger_events",
@@ -3556,7 +3970,7 @@ fn shipped_schema_twenty_one_upgrades_scm_check_reconciliation_journal() {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(version, crate::migration::SQLITE_RETIRED_USER_VERSION);
     let present: bool = connection
         .query_row(
             "SELECT EXISTS(
@@ -3626,7 +4040,7 @@ fn schema_twenty_four_upgrades_github_installation_lifecycle() {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(version, crate::migration::SQLITE_RETIRED_USER_VERSION);
     for table in [
         "github_app_setup_transactions",
         "github_installation_profiles",

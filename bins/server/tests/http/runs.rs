@@ -44,15 +44,18 @@ async fn replay_bundle_publication_rejects_explicit_tainted_completion() {
                 logical_cpus: 2,
                 memory_bytes: 4_096,
                 storage_bytes: 8_192,
+                max_concurrent_wasm_jobs: 1,
                 region: None,
                 verified_capabilities: BTreeSet::from(["kvm".to_owned()]),
                 self_reported_capabilities: BTreeSet::new(),
                 status: RunnerStatus::Online,
                 active_jobs: 0,
+                active_wasm_jobs: 0,
                 used_cpus: 0,
                 used_memory_bytes: 0,
                 used_storage_bytes: 0,
                 locality: BTreeSet::new(),
+                package_tiers: Default::default(),
                 last_heartbeat_unix_ms: 1,
             },
             &ContentDigest::sha256(b"replay-taint-runner-inventory"),
@@ -252,7 +255,7 @@ async fn source_bound_api_run_binds_ready_snapshot_before_queue_and_trigger() {
     control
         .mark_source_snapshot_ready("tenant-1", &wrong.id, &wrong.tree_manifest_digest, 2)
         .unwrap();
-    let application = router(AppState::new(Arc::clone(&control), TOKEN, None).unwrap());
+    let application = router(AppState::new(control.clone(), TOKEN, None).unwrap());
 
     let missing = application
         .clone()
@@ -392,7 +395,7 @@ async fn api_run_trigger_replays_after_restart_and_cross_tenant_callers_cannot_c
             &signing_key.verifying_key(),
         )
         .unwrap();
-    let application = router(AppState::new(Arc::clone(&control_plane), TOKEN, None).unwrap());
+    let application = router(AppState::new(control_plane.clone(), TOKEN, None).unwrap());
     let request = || {
         idempotent_request(
             "POST",
@@ -407,7 +410,7 @@ async fn api_run_trigger_replays_after_restart_and_cross_tenant_callers_cannot_c
     drop(control_plane);
 
     let reopened = Arc::new(ControlPlane::open(&database, "api-trigger-restart", 2).unwrap());
-    let application = router(AppState::new(Arc::clone(&reopened), TOKEN, None).unwrap());
+    let application = router(AppState::new(reopened.clone(), TOKEN, None).unwrap());
     let replay = application.clone().oneshot(request()).await.unwrap();
     assert_eq!(replay.status(), StatusCode::CREATED);
     assert_eq!(replay.headers()["idempotency-replayed"], "true");

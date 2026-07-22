@@ -39,6 +39,7 @@ mod matrix;
 mod permissions;
 mod reusable;
 mod risk;
+mod secret_resolution;
 mod settings;
 mod steps;
 mod triggers;
@@ -51,6 +52,7 @@ pub use reusable::source::{
     ReusableSourceBundleError, ReusableWorkflowSource, ReusableWorkflowSources,
 };
 pub use risk::{semantic_risk_diff, RiskFinding, RiskReport, RiskSeverity};
+pub use secret_resolution::ResolvedSecretMetadata;
 pub use settings::CompilerSettings;
 
 pub(crate) use bindings::*;

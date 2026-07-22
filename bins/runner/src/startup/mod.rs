@@ -11,7 +11,8 @@ use self::{
 };
 use clap::Parser;
 use runtrue_runner::{
-    apply_authoritative_posture, enroll_runner_from_token_file, load_capsule_trust_store,
+    apply_authoritative_posture, enroll_runner_from_launch_claim_file,
+    enroll_runner_from_token_file, enroll_runner_from_update_claim_file, load_capsule_trust_store,
     probe_inventory_with_backends_for_protocol, CredentialError, EndpointSecurity,
     EnrollmentEndpointSecurity, FirecrackerJobExecutor, OciJobExecutor, RemoteJobExecutor, RunMode,
     RunnerCredentialStore, RunnerDaemon, RunnerDaemonConfig, RunnerError, RunnerStateStore,
@@ -51,12 +52,16 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Err(StartupError::NoExecutionBackend.into());
     }
 
-    if matches!(config.command, Command::Enroll) {
+    let automatic_enrollment = matches!(config.command, Command::EnrollIfNeeded);
+    if matches!(config.command, Command::Enroll | Command::EnrollIfNeeded) {
         if config.runner_id.is_some()
             || config.client_certificate.is_some()
             || config.client_private_key.is_some()
             || config.insecure_loopback
             || config.protocol_version.is_some()
+            || (!automatic_enrollment && config.launch_claim_file.is_some())
+            || (!automatic_enrollment && config.update_claim_file.is_some())
+            || (automatic_enrollment && config.enrollment_token_file.is_some())
         {
             return Err(StartupError::InvalidEnrollmentOptions.into());
         }
@@ -70,32 +75,74 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                 .clone()
                 .ok_or(StartupError::MissingCaCertificate)?,
         };
-        let token_file = config
-            .enrollment_token_file
-            .as_ref()
-            .ok_or(StartupError::MissingEnrollmentTokenFile)?;
         let credential_store = RunnerCredentialStore::open(&config.credential_directory)?;
         match credential_store.load_current() {
-            Ok(_) => return Err(StartupError::CredentialsAlreadyInstalled.into()),
+            Ok(_) if !automatic_enrollment => {
+                return Err(StartupError::CredentialsAlreadyInstalled.into())
+            }
+            Ok(_) => {}
             Err(CredentialError::MissingCredentials(_)) => {}
             Err(error) => return Err(error.into()),
         }
-        let workspaces = WorkspaceManager::open(&config.workspace_directory)?;
-        let inventory = probe_inventory_with_backends_for_protocol(
-            "enrollment-pending",
-            workspaces.root(),
-            config.region.clone(),
-            backends,
-            runtrue_protocol::PROTOCOL_MIN,
-        )?;
-        let installed = enroll_runner_from_token_file(
-            &endpoint,
-            token_file,
-            inventory.wire,
-            &credential_store,
-            config.ephemeral,
-        )
-        .await?;
+        let installed = match credential_store.load_current() {
+            Ok(existing) => existing,
+            Err(CredentialError::MissingCredentials(_)) => {
+                let workspaces = WorkspaceManager::open(&config.workspace_directory)?;
+                let inventory = probe_inventory_with_backends_for_protocol(
+                    "enrollment-pending",
+                    workspaces.root(),
+                    config.region.clone(),
+                    backends.clone(),
+                    config.wasm_max_concurrent_jobs,
+                    runtrue_protocol::PROTOCOL_MIN,
+                )?;
+                if automatic_enrollment {
+                    match (
+                        config.launch_claim_file.as_ref(),
+                        config.update_claim_file.as_ref(),
+                    ) {
+                        (Some(claim_file), None) => {
+                            enroll_runner_from_launch_claim_file(
+                                &endpoint,
+                                claim_file,
+                                inventory.wire,
+                                &credential_store,
+                                config.ephemeral,
+                            )
+                            .await?
+                        }
+                        (None, Some(claim_file)) => {
+                            enroll_runner_from_update_claim_file(
+                                &endpoint,
+                                claim_file,
+                                inventory.wire,
+                                &credential_store,
+                                config.ephemeral,
+                            )
+                            .await?
+                        }
+                        (None, None) => return Err(StartupError::MissingLaunchClaimFile.into()),
+                        (Some(_), Some(_)) => {
+                            return Err(StartupError::InvalidAutomaticEnrollmentClaim.into())
+                        }
+                    }
+                } else {
+                    let token_file = config
+                        .enrollment_token_file
+                        .as_ref()
+                        .ok_or(StartupError::MissingEnrollmentTokenFile)?;
+                    enroll_runner_from_token_file(
+                        &endpoint,
+                        token_file,
+                        inventory.wire,
+                        &credential_store,
+                        config.ephemeral,
+                    )
+                    .await?
+                }
+            }
+            Err(error) => return Err(error.into()),
+        };
         #[derive(Serialize)]
         struct EnrollmentResult<'a> {
             status: &'static str,
@@ -120,10 +167,17 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                 credential_directory: credential_store.root().display().to_string(),
             })?
         );
-        return Ok(());
+        if !automatic_enrollment {
+            return Ok(());
+        }
     }
 
-    if config.enrollment_token_file.is_some() || config.enrollment_endpoint.is_some() {
+    if !automatic_enrollment
+        && (config.enrollment_token_file.is_some()
+            || config.launch_claim_file.is_some()
+            || config.update_claim_file.is_some()
+            || config.enrollment_endpoint.is_some())
+    {
         return Err(StartupError::InvalidEnrollmentOptions.into());
     }
     let endpoint_value = config
@@ -188,6 +242,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         workspaces.root(),
         config.region.clone(),
         backends.clone(),
+        config.wasm_max_concurrent_jobs,
         selected_protocol_version,
     )?;
     if let Some(authoritative) = authoritative_posture.as_ref() {
@@ -227,6 +282,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mode = match config.command {
         Command::Once => RunMode::Once,
         Command::Daemon => RunMode::Daemon,
+        Command::EnrollIfNeeded => RunMode::Daemon,
         Command::Enroll => unreachable!("enroll returned above"),
         Command::Doctor => unreachable!("doctor returned above"),
     };
@@ -275,6 +331,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             workspaces.root(),
             config.region.clone(),
             backends.clone(),
+            config.wasm_max_concurrent_jobs,
             active_protocol_version,
         )?;
         if let Some(authoritative) = active_authoritative_posture.as_ref() {
@@ -289,6 +346,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             max_capsule_bytes: MAX_CAPSULE_BYTES,
             credential_store: credential_store.clone(),
             admission_lock: config.admission_lock.clone(),
+            max_concurrent_wasm_jobs: config.wasm_max_concurrent_jobs,
         };
         match RunnerDaemon::new(
             transport,

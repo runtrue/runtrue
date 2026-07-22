@@ -1,0 +1,15 @@
+{
+  "sequence": 2,
+  "migration_id": "runner-immutable-replacement-v1",
+  "logical_schema_generation": 2,
+  "purpose": "Add backend-neutral durable state for signed runner releases, versioned rollout policy, immutable replacement lineage, fixed-host slots, and bound software-update claims.",
+  "preconditions": [
+    "legacy-baseline-v1-applied",
+    "runner-fleet-schema-present"
+  ],
+  "postconditions": [
+    "automatic-runner-updates-disabled-by-default",
+    "immutable-runner-replacement-lineage-durable",
+    "software-update-claims-exactly-bound"
+  ]
+}

@@ -18,7 +18,7 @@ pub(super) use runtrue_control_plane::{
     HumanUserRecord, NewJob, R9AuditMetadata, RepositoryRecord, RunnerDataCommit,
     RunnerDataCommitKind, RunnerPoolRecord, RunnerPoolStatus, SignedCapsuleRecord,
     SourceSnapshotRecord, SourceSnapshotState, TenantIdentityRecord, TenantMembershipRecord,
-    TenantOidcProviderConfiguration,
+    TenantOidcProviderConfiguration, WorkflowFrontendReportRecord,
 };
 pub(super) use runtrue_lifecycle::JobState;
 pub(super) use runtrue_lock::LockFile;
@@ -60,7 +60,7 @@ pub(super) const GITHUB_CREDENTIAL_REFERENCE: &str =
 
 pub(super) fn application(webhook_secret: Option<&[u8]>) -> (Arc<ControlPlane>, Router) {
     let control_plane = Arc::new(ControlPlane::open_in_memory("test-installation", 1).unwrap());
-    let state = AppState::new(Arc::clone(&control_plane), TOKEN, webhook_secret).unwrap();
+    let state = AppState::new(control_plane.clone(), TOKEN, webhook_secret).unwrap();
     (control_plane, router(state))
 }
 
@@ -822,15 +822,18 @@ pub(super) fn store_tenant_runner(
                 logical_cpus: 2,
                 memory_bytes: 4096,
                 storage_bytes: 8192,
+                max_concurrent_wasm_jobs: 1,
                 region: None,
                 verified_capabilities: BTreeSet::from(["kvm".to_owned()]),
                 self_reported_capabilities: BTreeSet::new(),
                 status: RunnerStatus::Online,
                 active_jobs: 0,
+                active_wasm_jobs: 0,
                 used_cpus: 0,
                 used_memory_bytes: 0,
                 used_storage_bytes: 0,
                 locality: BTreeSet::new(),
+                package_tiers: Default::default(),
                 last_heartbeat_unix_ms: 1,
             },
             1,

@@ -1,4 +1,210 @@
 use super::*;
+use crate::{
+    DurableEventRecord, DurableEventSource, ReplayEventRequest, SCM_EVENT_RECOVERY_WINDOW_MS,
+    SCM_EVENT_TASK_KIND,
+};
+
+#[test]
+fn failed_transient_scm_events_recover_for_one_day_but_permanent_failures_do_not() {
+    let control = ControlPlane::open_in_memory("scm-event-recovery", NOW).unwrap();
+    let transient = DurableTask {
+        id: "scm-transient".to_owned(),
+        kind: SCM_EVENT_TASK_KIND.to_owned(),
+        payload: serde_json::json!({"event_id": "delivery-1", "source": "exact"}),
+        status: DurableTaskStatus::Pending,
+        available_unix_ms: NOW,
+        attempts: 0,
+        lease_owner: None,
+        lease_expires_unix_ms: None,
+        last_error: None,
+        created_unix_ms: NOW,
+        completed_unix_ms: None,
+    };
+    control.enqueue_task(&transient).unwrap();
+    let first = control
+        .claim_task_by_kind("old-worker", SCM_EVENT_TASK_KIND, NOW, 100)
+        .unwrap()
+        .unwrap();
+    control
+        .fail_task(
+            &first.id,
+            "old-worker",
+            "repository-action preparation is temporarily unavailable",
+            NOW + 1,
+            None,
+            None,
+        )
+        .unwrap();
+
+    let recovered = control
+        .claim_task_by_kind("new-worker", SCM_EVENT_TASK_KIND, NOW + 2, 100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.id, transient.id);
+    assert_eq!(recovered.payload, transient.payload);
+    assert_eq!(recovered.created_unix_ms, transient.created_unix_ms);
+    assert_eq!(recovered.attempts, 2);
+    control
+        .complete_task(&recovered.id, "new-worker", NOW + 3)
+        .unwrap();
+
+    for (id, error, created) in [
+        (
+            "scm-permanent",
+            "repository action is not authorized for this tenant and installation",
+            NOW + 4,
+        ),
+        (
+            "scm-expired",
+            "repository-action preparation is temporarily unavailable",
+            NOW,
+        ),
+    ] {
+        let task = DurableTask {
+            id: id.to_owned(),
+            kind: SCM_EVENT_TASK_KIND.to_owned(),
+            payload: serde_json::json!({"event_id": id}),
+            status: DurableTaskStatus::Pending,
+            available_unix_ms: created,
+            attempts: 0,
+            lease_owner: None,
+            lease_expires_unix_ms: None,
+            last_error: None,
+            created_unix_ms: created,
+            completed_unix_ms: None,
+        };
+        control.enqueue_task(&task).unwrap();
+        let claimed = control
+            .claim_task_by_kind("old-worker", SCM_EVENT_TASK_KIND, created, 100)
+            .unwrap()
+            .unwrap();
+        control
+            .fail_task(&claimed.id, "old-worker", error, created + 1, None, None)
+            .unwrap();
+    }
+    assert!(control
+        .claim_task_by_kind(
+            "new-worker",
+            SCM_EVENT_TASK_KIND,
+            NOW + SCM_EVENT_RECOVERY_WINDOW_MS,
+            100,
+        )
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn durable_events_dispatch_atomically_and_replay_failed_deliveries() {
+    let control = ControlPlane::open_in_memory("durable-events", NOW).unwrap();
+    control
+        .put_tenant_identity(&r9_tenant("tenant-1"), None)
+        .unwrap();
+    bootstrap(&control);
+    let payload = runtrue_workflow_ir::canonicalize_value(serde_json::json!({
+        "action": "refresh",
+        "repository_id": "repo-1",
+    }));
+    let event = DurableEventRecord {
+        id: "event-1".to_owned(),
+        tenant_id: "tenant-1".to_owned(),
+        source: DurableEventSource::Frontend,
+        kind: "repository.refresh-requested".to_owned(),
+        handler_kind: "repository.refresh".to_owned(),
+        payload_digest: ContentDigest::sha256(serde_json::to_vec(&payload).unwrap()),
+        payload: payload.clone(),
+        idempotency_identity: "request-1".to_owned(),
+        actor_identity: "user-1".to_owned(),
+        task_id: "event-task-1".to_owned(),
+        created_unix_ms: NOW + 1,
+    };
+
+    let accepted = control.record_event(&event).unwrap();
+    assert!(!accepted.replayed);
+    assert_eq!(accepted.value, event);
+    assert!(control.record_event(&event).unwrap().replayed);
+    let first_task = control.task(&event.task_id).unwrap();
+    assert_eq!(first_task.kind, event.handler_kind);
+    assert_eq!(first_task.payload, payload);
+    assert_eq!(first_task.status, DurableTaskStatus::Pending);
+
+    let claimed = control
+        .claim_task_by_kind("event-worker", &event.handler_kind, NOW + 2, 1_000)
+        .unwrap()
+        .unwrap();
+    control
+        .fail_task(
+            &claimed.id,
+            "event-worker",
+            "temporary provider failure",
+            NOW + 3,
+            None,
+            None,
+        )
+        .unwrap();
+    let replay = ReplayEventRequest {
+        id: "replay-1".to_owned(),
+        event_id: event.id.clone(),
+        requested_by: "user-1".to_owned(),
+        requested_unix_ms: NOW + 4,
+    };
+    let queued = control.replay_event("tenant-1", &replay).unwrap();
+    assert!(!queued.replayed);
+    assert!(control.replay_event("tenant-1", &replay).unwrap().replayed);
+    let replay_task = control.task(&event.task_id).unwrap();
+    assert_eq!(replay_task.kind, event.handler_kind);
+    assert_eq!(replay_task.payload, payload);
+    assert_eq!(replay_task.status, DurableTaskStatus::Pending);
+    assert_eq!(control.event(&event.id).unwrap(), event);
+
+    let mut substituted = replay;
+    substituted.requested_by = "substituted-user".to_owned();
+    assert!(matches!(
+        control.replay_event("tenant-1", &substituted),
+        Err(ControlPlaneError::IdempotencyConflict)
+    ));
+}
+
+#[test]
+fn durable_events_reject_payload_substitution_and_non_failed_replay() {
+    let control = ControlPlane::open_in_memory("durable-event-guards", NOW).unwrap();
+    control
+        .put_tenant_identity(&r9_tenant("tenant-1"), None)
+        .unwrap();
+    bootstrap(&control);
+    let payload = serde_json::json!({"action": "build"});
+    let event = DurableEventRecord {
+        id: "event-guard".to_owned(),
+        tenant_id: "tenant-1".to_owned(),
+        source: DurableEventSource::Backend,
+        kind: "build.requested".to_owned(),
+        handler_kind: "build.event".to_owned(),
+        payload_digest: ContentDigest::sha256(serde_json::to_vec(&payload).unwrap()),
+        payload,
+        idempotency_identity: "delivery-guard".to_owned(),
+        actor_identity: "backend-1".to_owned(),
+        task_id: "event-guard-task".to_owned(),
+        created_unix_ms: NOW + 1,
+    };
+    control.record_event(&event).unwrap();
+
+    let replay = ReplayEventRequest {
+        id: "replay-guard".to_owned(),
+        event_id: event.id.clone(),
+        requested_by: "user-1".to_owned(),
+        requested_unix_ms: NOW + 2,
+    };
+    assert!(matches!(
+        control.replay_event("tenant-1", &replay),
+        Err(ControlPlaneError::InvalidInput(_))
+    ));
+
+    let mut substituted = event;
+    substituted.payload = serde_json::json!({"action": "deploy"});
+    assert!(matches!(
+        control.record_event(&substituted),
+        Err(ControlPlaneError::InvalidInput(_))
+    ));
+}
 
 #[test]
 fn task_completion_fans_out_atomically_and_accepts_exact_replay() {

@@ -1,6 +1,7 @@
 use super::{
-    RunnerSession, MAX_CLOCK_SKEW_MS, MAX_IDENTIFIER_BYTES, MAX_INVENTORY_CAPABILITIES,
-    MAX_INVENTORY_LABELS, MAX_LIST_ITEMS, MAX_STREAM_MESSAGE_BYTES, OBJECT_TRANSFER_IDLE_TIMEOUT,
+    RunnerSession, MAX_ACTIVE_LEASES_PER_RUNNER, MAX_CLOCK_SKEW_MS, MAX_IDENTIFIER_BYTES,
+    MAX_INVENTORY_CAPABILITIES, MAX_INVENTORY_LABELS, MAX_LIST_ITEMS, MAX_STREAM_MESSAGE_BYTES,
+    OBJECT_TRANSFER_IDLE_TIMEOUT,
 };
 use crate::runner_certificates::validate_issued_certificate_chain;
 use runtrue_attest::CAPSULE_MEDIA_TYPE;
@@ -8,7 +9,7 @@ use runtrue_cache::{CacheReadPolicy, CacheSourceTrust, CacheWritePolicy};
 use runtrue_control_plane::{RunnerCertificateRotationRecord, SignedCapsuleRecord};
 use runtrue_model::ContentDigest;
 use runtrue_protocol::v1;
-use runtrue_scheduler::{Lease, RunnerRecord};
+use runtrue_scheduler::{Lease, PackagePreparationTier, RunnerRecord};
 use runtrue_workflow_ir::{
     Architecture, CacheRead, CacheWrite, ExecutionCapsule, Isolation, OperatingSystem,
     RunnerRequirements,
@@ -54,6 +55,7 @@ pub(super) fn validate_inventory(
         || inventory.os != operating_system_name(runner.os)
         || inventory.architecture != architecture_name(runner.arch)
         || optional_string(&inventory.region) != runner.region.as_deref()
+        || wasm_concurrency(inventory)? != runner.max_concurrent_wasm_jobs
     {
         return Err(Status::failed_precondition(
             "runner inventory does not match its provisioned durable record",
@@ -188,6 +190,29 @@ pub(super) fn validate_inventory(
     let bytes = serde_json::to_vec(&binding)
         .map_err(|_| Status::internal("runner inventory binding could not be encoded"))?;
     Ok(ContentDigest::sha256(bytes))
+}
+
+pub(super) fn wasm_concurrency(inventory: &v1::RunnerInventory) -> Result<u32, Status> {
+    let value = inventory
+        .labels
+        .get("runtrue.wasm.max-concurrent-jobs")
+        .map(String::as_str)
+        .unwrap_or("1")
+        .parse::<u32>()
+        .map_err(|_| Status::invalid_argument("invalid Wasm concurrency inventory label"))?;
+    if value == 0
+        || value as usize > MAX_ACTIVE_LEASES_PER_RUNNER
+        || (value > 1
+            && !inventory
+                .isolation_backends
+                .iter()
+                .any(|item| item == "wasm"))
+    {
+        return Err(Status::invalid_argument(
+            "Wasm concurrency must be between 1 and 64 and requires the Wasm backend",
+        ));
+    }
+    Ok(value)
 }
 
 pub(super) fn lease_offer(
@@ -347,11 +372,18 @@ pub(super) fn validate_runner_message_identity(
 
 pub(super) fn validate_locality(
     locality: &v1::LocalitySummary,
-) -> Result<BTreeSet<ContentDigest>, Status> {
+) -> Result<
+    (
+        BTreeSet<ContentDigest>,
+        BTreeMap<ContentDigest, PackagePreparationTier>,
+    ),
+    Status,
+> {
     if locality.tenant_scoped_bloom_filter.len() > MAX_STREAM_MESSAGE_BYTES / 2
         || locality.public_content_bloom_filter.len() > MAX_STREAM_MESSAGE_BYTES / 2
         || locality.classes.len() > MAX_LIST_ITEMS
         || locality.content_digests.len() > MAX_LIST_ITEMS
+        || locality.package_locality.len() > MAX_LIST_ITEMS
     {
         return Err(Status::resource_exhausted(
             "runner locality summary exceeds its bounds",
@@ -372,7 +404,35 @@ pub(super) fn validate_locality(
             "runner locality contains duplicate digests",
         ));
     }
-    Ok(digests)
+    let mut package_tiers = BTreeMap::new();
+    for package in &locality.package_locality {
+        let digest = package
+            .digest
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("package locality digest is missing"))
+            .and_then(|digest| {
+                ContentDigest::try_from(digest)
+                    .map_err(|_| Status::invalid_argument("package locality digest is invalid"))
+            })?;
+        if !digests.contains(&digest) {
+            return Err(Status::invalid_argument(
+                "package locality must also appear in exact locality",
+            ));
+        }
+        let tier = match v1::PackagePreparationTier::try_from(package.tier) {
+            Ok(v1::PackagePreparationTier::Warmish) => PackagePreparationTier::Warmish,
+            Ok(v1::PackagePreparationTier::Warm) => PackagePreparationTier::Warm,
+            Ok(v1::PackagePreparationTier::Unspecified) | Err(_) => {
+                return Err(Status::invalid_argument("package locality tier is invalid"))
+            }
+        };
+        if package_tiers.insert(digest, tier).is_some() {
+            return Err(Status::invalid_argument(
+                "package locality contains duplicate digests",
+            ));
+        }
+    }
+    Ok((digests, package_tiers))
 }
 
 pub(super) fn validate_health(health: &v1::RunnerHealth) -> Result<(), Status> {

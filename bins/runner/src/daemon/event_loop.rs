@@ -11,18 +11,18 @@ use runtrue_protocol::{supports_protocol_version, v1};
 use runtrue_runner_core::{CapsuleTrustStore, LeaseCompletion, RunnerAdmission};
 use runtrue_workflow_ir::Isolation;
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
 };
 use tokio::{sync::mpsc as tokio_mpsc, time::MissedTickBehavior};
 
 const LOG_BATCH_FRAMES: usize = 32;
 const MAX_NATIVE_STEPS: usize = 64;
-const MAX_ADVERTISED_SOURCE_SNAPSHOTS: usize = 256;
+const MAX_ADVERTISED_LOCALITY_ITEMS: usize = 256;
 const LEASE_SHUTDOWN_MARGIN_MILLIS: u64 = 250;
 const ROTATION_SHUTDOWN_MARGIN_MILLIS: u64 = 30_000;
 
@@ -44,6 +44,7 @@ pub struct RunnerDaemonConfig {
     /// Optional host-local gate coordinating reusable OCI image admission with
     /// lease execution. A permit is retained for the complete active lease.
     pub admission_lock: Option<PathBuf>,
+    pub max_concurrent_wasm_jobs: u32,
 }
 
 use super::{
@@ -54,8 +55,8 @@ use super::{
         validate_runner_id, wait_until, ServerClock,
     },
     error::RunnerError,
-    executor::{JobExecutionServices, JobExecutor},
-    lifecycle::{ActiveExecution, CompletedExecution, LoopEvent},
+    executor::{JobExecutionServices, JobExecutor, PreparedContentTier},
+    lifecycle::{ActiveExecution, CompletedExecution, ExecutionTaskMessage, LoopEvent},
     observations::{step_error_code, step_state_name, DaemonStepStateObserver},
     remote::offered_job,
     source::hydrate_source,
@@ -98,6 +99,11 @@ where
         validate_runner_id(&self.config.runner_id)?;
         if self.config.inventory.profile.runner_id != self.config.runner_id {
             return Err(RunnerError::InventoryRunnerMismatch);
+        }
+        if self.config.max_concurrent_wasm_jobs
+            != self.config.inventory.profile.max_concurrent_wasm_jobs
+        {
+            return Err(RunnerError::InventoryWasmConcurrencyMismatch);
         }
         self.config.inventory.profile.validate()?;
         if let Some(gate) = self.admission_gate.as_ref() {
@@ -145,15 +151,27 @@ where
 
         let mut interval = tokio::time::interval(heartbeat_period);
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut active: Option<ActiveExecution> = None;
+        let mut active = BTreeMap::<String, ActiveExecution>::new();
+        let channel_capacity = usize::try_from(self.config.max_concurrent_wasm_jobs)
+            .unwrap_or(1)
+            .max(1)
+            .saturating_mul(8);
+        let (completion_sender, mut completion_receiver) =
+            tokio_mpsc::channel::<ExecutionTaskMessage>(channel_capacity);
+        let (lifecycle_sender, mut lifecycle_receiver) = tokio_mpsc::channel(channel_capacity);
         let mut draining = false;
         let mut drain_deadline = None;
         let mut rotation_requested = false;
         let mut rotation_deadline = None;
-        let mut processed_one = self.state.pending_completion()?.is_some();
+        let mut processed_one = self.state.has_pending_completions();
+        let maximum_active = if self.config.mode == RunMode::Once {
+            1
+        } else {
+            self.config.max_concurrent_wasm_jobs.max(1) as usize
+        };
 
         loop {
-            if rotation_requested && active.is_none() {
+            if rotation_requested && active.is_empty() {
                 self.rotate_credentials().await?;
                 return Err(RunnerError::CertificateRotated);
             }
@@ -162,68 +180,59 @@ where
                 if self.config.mode == RunMode::Once && processed_one {
                     return Ok(());
                 }
-                if draining && active.is_none() {
+                if draining && active.is_empty() {
                     return Ok(());
                 }
             }
 
-            let event = if let Some(execution) = active.as_mut() {
-                tokio::select! {
-                    result = &mut execution.task => LoopEvent::ExecutionFinished(result),
-                    lifecycle = execution.lifecycle.recv(), if execution.lifecycle_open => {
-                        LoopEvent::StepLifecycle(lifecycle)
-                    }
-                    _ = interval.tick() => LoopEvent::Heartbeat,
-                    _ = wait_until(execution.hard_deadline) => LoopEvent::LeaseDeadline,
-                    _ = wait_until(drain_deadline) => LoopEvent::DrainDeadline,
-                    _ = wait_until(rotation_deadline) => LoopEvent::RotationDeadline,
-                    control = self.transport.next_control() => {
-                        LoopEvent::Control(control?)
-                    }
-                }
-            } else {
-                tokio::select! {
-                    _ = interval.tick() => LoopEvent::Heartbeat,
-                    _ = wait_until(drain_deadline) => LoopEvent::DrainDeadline,
-                    _ = wait_until(rotation_deadline) => LoopEvent::RotationDeadline,
-                    control = self.transport.next_control() => {
-                        LoopEvent::Control(control?)
-                    }
-                }
+            let lease_deadline = active
+                .values()
+                .filter_map(|execution| execution.hard_deadline)
+                .min();
+            let event = tokio::select! {
+                result = completion_receiver.recv() => LoopEvent::ExecutionFinished(result),
+                lifecycle = lifecycle_receiver.recv() => LoopEvent::StepLifecycle(lifecycle),
+                _ = interval.tick() => LoopEvent::Heartbeat,
+                _ = wait_until(lease_deadline) => LoopEvent::LeaseDeadline,
+                _ = wait_until(drain_deadline) => LoopEvent::DrainDeadline,
+                _ = wait_until(rotation_deadline) => LoopEvent::RotationDeadline,
+                control = self.transport.next_control() => LoopEvent::Control(control?),
             };
 
             match event {
                 LoopEvent::Heartbeat => {
-                    self.send_heartbeat(&connection_id, active.as_ref()).await?;
+                    self.send_heartbeat(&connection_id, &active).await?;
                 }
                 LoopEvent::Control(None) => return Err(RunnerError::ControlStreamClosed),
                 LoopEvent::Control(Some(message)) => match message.body {
                     Some(v1::control_message::Body::LeaseOffer(offer)) => {
-                        let completion_pending = self.state.pending_completion()?.is_some();
-                        if rotation_requested || draining || active.is_some() || completion_pending
-                        {
+                        if rotation_requested || draining || active.len() >= maximum_active {
                             let code = if rotation_requested {
                                 "certificate_rotation_pending"
                             } else if draining {
                                 "runner_draining"
-                            } else if completion_pending {
-                                "completion_pending"
                             } else {
                                 "runner_busy"
                             };
                             self.reject_offer(&offer, code).await?;
-                        } else if let Some(execution) =
-                            self.prepare_offer(&admission, &clock, *offer).await?
+                        } else if let Some(execution) = self
+                            .prepare_offer(
+                                &admission,
+                                &clock,
+                                *offer,
+                                active.is_empty(),
+                                completion_sender.clone(),
+                                lifecycle_sender.clone(),
+                            )
+                            .await?
                         {
-                            active = Some(execution);
+                            active.insert(execution.offer.lease_id.clone(), execution);
                             processed_one = true;
                         }
                     }
                     Some(v1::control_message::Body::CancelLease(cancel)) => {
-                        if let Some(execution) = active.as_mut() {
-                            if execution.offer.lease_id == cancel.lease_id
-                                && execution.offer.fencing_generation == cancel.fencing_generation
-                            {
+                        if let Some(execution) = active.get_mut(&cancel.lease_id) {
+                            if execution.offer.fencing_generation == cancel.fencing_generation {
                                 execution.guard.authorize_active(
                                     &cancel.lease_id,
                                     cancel.fencing_generation,
@@ -238,8 +247,8 @@ where
                     Some(v1::control_message::Body::DrainRunner(drain)) => {
                         draining = true;
                         if !rotation_requested
-                            && active.is_none()
-                            && self.state.pending_completion()?.is_none()
+                            && active.is_empty()
+                            && !self.state.has_pending_completions()
                         {
                             return Ok(());
                         }
@@ -247,7 +256,7 @@ where
                         match deadline_instant(&clock, deadline, 0) {
                             Ok(deadline) => drain_deadline = Some(deadline),
                             Err(RunnerError::DeadlineElapsed) => {
-                                if let Some(execution) = active.as_ref() {
+                                for execution in active.values() {
                                     execution.cancellation.cancel();
                                 }
                                 drain_deadline = None;
@@ -261,7 +270,7 @@ where
                         match deadline_instant(&clock, deadline, ROTATION_SHUTDOWN_MARGIN_MILLIS) {
                             Ok(deadline) => rotation_deadline = Some(deadline),
                             Err(RunnerError::DeadlineElapsed) => {
-                                if let Some(execution) = active.as_ref() {
+                                for execution in active.values() {
                                     execution.cancellation.cancel();
                                 }
                                 rotation_deadline = None;
@@ -278,7 +287,7 @@ where
                 },
                 LoopEvent::StepLifecycle(Some(message)) => {
                     let execution = active
-                        .as_mut()
+                        .get_mut(&message.lease_id)
                         .expect("step lifecycle event requires active execution");
                     let result = self
                         .send_step_state(&execution.offer, &message.observation)
@@ -296,15 +305,12 @@ where
                         }
                     }
                 }
-                LoopEvent::StepLifecycle(None) => {
-                    if let Some(execution) = active.as_mut() {
-                        execution.lifecycle_open = false;
-                    }
-                }
-                LoopEvent::ExecutionFinished(result) => {
-                    let mut execution = active.take().expect("active task produced event");
-                    self.drain_step_lifecycle(&mut execution).await?;
-                    let completed = match result {
+                LoopEvent::StepLifecycle(None) => return Err(RunnerError::ControlStreamClosed),
+                LoopEvent::ExecutionFinished(Some(message)) => {
+                    let execution = active
+                        .remove(&message.lease_id)
+                        .expect("active task produced event");
+                    let completed = match message.result {
                         Ok(Ok(outcome)) => outcome,
                         Ok(Err(error)) => {
                             eprintln!("runner execution failed: {error}");
@@ -324,30 +330,40 @@ where
                     self.finish_execution(execution, completed, &clock).await?;
                     if !rotation_requested
                         && self.config.mode == RunMode::Once
-                        && self.state.pending_completion()?.is_none()
+                        && !self.state.has_pending_completions()
                     {
                         return Ok(());
                     }
-                    if !rotation_requested && draining && self.state.pending_completion()?.is_none()
+                    if !rotation_requested
+                        && draining
+                        && active.is_empty()
+                        && !self.state.has_pending_completions()
                     {
                         return Ok(());
                     }
                 }
+                LoopEvent::ExecutionFinished(None) => return Err(RunnerError::ControlStreamClosed),
                 LoopEvent::LeaseDeadline => {
-                    if let Some(execution) = active.as_mut() {
-                        execution.hard_deadline = None;
-                        execution.cancellation.cancel();
+                    let now = tokio::time::Instant::now();
+                    for execution in active.values_mut() {
+                        if execution
+                            .hard_deadline
+                            .is_some_and(|deadline| deadline <= now)
+                        {
+                            execution.hard_deadline = None;
+                            execution.cancellation.cancel();
+                        }
                     }
                 }
                 LoopEvent::DrainDeadline => {
                     drain_deadline = None;
-                    if let Some(execution) = active.as_ref() {
+                    for execution in active.values() {
                         execution.cancellation.cancel();
                     }
                 }
                 LoopEvent::RotationDeadline => {
                     rotation_deadline = None;
-                    if let Some(execution) = active.as_ref() {
+                    for execution in active.values() {
                         execution.cancellation.cancel();
                     }
                 }
@@ -396,6 +412,9 @@ where
         admission: &RunnerAdmission,
         clock: &ServerClock,
         offer: v1::LeaseOffer,
+        runner_empty: bool,
+        completion_sender: tokio_mpsc::Sender<ExecutionTaskMessage>,
+        lifecycle_sender: tokio_mpsc::Sender<super::observations::StepLifecycleMessage>,
     ) -> Result<Option<ActiveExecution>, RunnerError> {
         if offer.runner_id != self.config.runner_id {
             self.reject_offer(&offer, "wrong_runner").await?;
@@ -468,6 +487,10 @@ where
             self.reject_offer(&offer, "unsupported_isolation").await?;
             return Ok(None);
         }
+        if !runner_empty && job.runner.isolation != Isolation::Wasm {
+            self.reject_offer(&offer, "runner_busy").await?;
+            return Ok(None);
+        }
         if job.runner.isolation == Isolation::Native && !self.config.allow_trusted_native {
             self.reject_offer(&offer, "trusted_native_disabled").await?;
             return Ok(None);
@@ -528,7 +551,7 @@ where
             clock.now()?,
         )?;
         if let Err(error) = self.send_decision(&offer, true, "", "").await {
-            self.state.clear_active()?;
+            self.state.clear_active_lease(&offer.lease_id)?;
             self.workspaces.cleanup(&workspace)?;
             return Err(error);
         }
@@ -643,7 +666,7 @@ where
                         Vec::new(),
                         runtrue_engine::CredentialTaint::None,
                     )?;
-                    self.state.clear_active()?;
+                    self.state.clear_active_lease(&offer.lease_id)?;
                     self.workspaces.cleanup(&workspace)?;
                     let _ = self
                         .send_job_state(&offer, final_state, error_code, "")
@@ -664,8 +687,8 @@ where
         let task_workspace = workspace.clone();
         let task_admission_permit = admission_permit.clone();
         let executor = self.executor.clone();
-        let (lifecycle_sender, lifecycle) = tokio_mpsc::channel(8);
         let lifecycle_observer: Arc<dyn StepStateObserver> = Arc::new(DaemonStepStateObserver {
+            lease_id: offer.lease_id.clone(),
             sender: lifecycle_sender,
         });
         let needs_data_plane = offered_job(&task_lease)?
@@ -692,7 +715,7 @@ where
             broker,
             step_state_observer: Some(observer),
         };
-        let task = spawn_admission_bound_blocking(task_admission_permit, move || {
+        let execution_task = spawn_admission_bound_blocking(task_admission_permit, move || {
             let mut outcome = executor.execute_with_services(
                 &task_lease,
                 &task_workspace,
@@ -720,6 +743,16 @@ where
                 committed_objects,
             })
         });
+        let task_lease_id = offer.lease_id.clone();
+        let task = tokio::spawn(async move {
+            let result = execution_task.await;
+            let _ = completion_sender
+                .send(ExecutionTaskMessage {
+                    lease_id: task_lease_id,
+                    result,
+                })
+                .await;
+        });
         Ok(Some(ActiveExecution {
             _admission_permit: admission_permit,
             offer,
@@ -728,8 +761,6 @@ where
             hard_deadline: Some(hard_deadline),
             workspace,
             task,
-            lifecycle,
-            lifecycle_open: true,
             last_job_attempt: 0,
         }))
     }
@@ -803,55 +834,60 @@ where
     }
 
     async fn retry_pending_completion(&mut self) -> Result<bool, RunnerError> {
-        let Some(persisted) = self.state.pending_completion_record() else {
+        let pending = self.state.pending_completion_records();
+        if pending.is_empty() {
             return Ok(false);
-        };
-        let accepted = if self.config.inventory.wire.protocol_version >= 2 {
-            match persisted.to_wire_v2()? {
-                Some(request) => self
-                    .transport
-                    .complete_lease_v2(request)
-                    .await
-                    .map(|response| response.accepted),
-                None => self
-                    .transport
+        }
+        let mut accepted_any = false;
+        for persisted in pending {
+            let lease_id = persisted.lease_id.clone();
+            let accepted = if self.config.inventory.wire.protocol_version >= 2 {
+                match persisted.to_wire_v2()? {
+                    Some(request) => self
+                        .transport
+                        .complete_lease_v2(request)
+                        .await
+                        .map(|response| response.accepted),
+                    None => self
+                        .transport
+                        .complete_lease(persisted.to_wire()?)
+                        .await
+                        .map(|response| response.accepted),
+                }
+            } else {
+                self.transport
                     .complete_lease(persisted.to_wire()?)
                     .await
-                    .map(|response| response.accepted),
-            }
-        } else {
-            self.transport
-                .complete_lease(persisted.to_wire()?)
-                .await
-                .map(|response| response.accepted)
-        };
-        match accepted {
-            Ok(true) => {
-                self.state.clear_pending_completion()?;
-                Ok(true)
-            }
-            Ok(false) => Err(RunnerError::CompletionRejected),
-            Err(error) => {
-                eprintln!("runner completion delivery failed: {error}");
-                Ok(false)
+                    .map(|response| response.accepted)
+            };
+            match accepted {
+                Ok(true) => {
+                    self.state.clear_pending_completion_lease(&lease_id)?;
+                    accepted_any = true;
+                }
+                Ok(false) => return Err(RunnerError::CompletionRejected),
+                Err(error) => {
+                    eprintln!("runner completion delivery failed: {error}");
+                    return Ok(accepted_any);
+                }
             }
         }
+        Ok(accepted_any)
     }
 
     async fn send_heartbeat(
         &mut self,
         connection_id: &str,
-        active: Option<&ActiveExecution>,
+        active: &BTreeMap<String, ActiveExecution>,
     ) -> Result<(), RunnerError> {
         let active_leases = active
-            .map(|execution| {
-                vec![v1::ActiveLease {
-                    lease_id: execution.offer.lease_id.clone(),
-                    fencing_generation: execution.offer.fencing_generation,
-                    state: "running".to_owned(),
-                }]
+            .values()
+            .map(|execution| v1::ActiveLease {
+                lease_id: execution.offer.lease_id.clone(),
+                fencing_generation: execution.offer.fencing_generation,
+                state: "running".to_owned(),
             })
-            .unwrap_or_default();
+            .collect();
         self.transport
             .send(v1::RunnerMessage {
                 body: Some(v1::runner_message::Body::Heartbeat(v1::Heartbeat {
@@ -866,10 +902,45 @@ where
     }
 
     async fn send_locality(&mut self) -> Result<(), RunnerError> {
-        let content_digests = self
-            .workspaces
-            .source_cache()
-            .locality(MAX_ADVERTISED_SOURCE_SNAPSHOTS)?
+        let mut exact = std::collections::BTreeSet::new();
+        let mut classes = Vec::new();
+        let mut package_locality = Vec::new();
+        for prepared in self.executor.prepared_content()? {
+            let before = exact.len();
+            for digest in prepared.digests {
+                if exact.len() == MAX_ADVERTISED_LOCALITY_ITEMS {
+                    break;
+                }
+                if exact.insert(digest.clone()) {
+                    if let Some(tier) = prepared.tier {
+                        let tier = match tier {
+                            PreparedContentTier::Warmish => v1::PackagePreparationTier::Warmish,
+                            PreparedContentTier::Warm => v1::PackagePreparationTier::Warm,
+                        };
+                        package_locality.push(v1::PackageLocality {
+                            digest: Some(v1::Digest::try_from(&digest)?),
+                            tier: tier.into(),
+                        });
+                    }
+                }
+            }
+            let added = exact.len().saturating_sub(before);
+            classes.push(v1::LocalityClass {
+                kind: prepared.kind,
+                bytes: 0,
+                item_count: u64::try_from(added).unwrap_or(u64::MAX),
+            });
+        }
+        let remaining = MAX_ADVERTISED_LOCALITY_ITEMS.saturating_sub(exact.len());
+        let source_digests = self.workspaces.source_cache().locality(remaining)?;
+        let source_count = source_digests.len();
+        exact.extend(source_digests);
+        classes.push(v1::LocalityClass {
+            kind: "source-snapshot".to_owned(),
+            bytes: 0,
+            item_count: u64::try_from(source_count).unwrap_or(u64::MAX),
+        });
+        let content_digests = exact
             .iter()
             .map(v1::Digest::try_from)
             .collect::<Result<Vec<_>, _>>()?;
@@ -879,13 +950,10 @@ where
                     runner_id: self.config.runner_id.clone(),
                     tenant_scoped_bloom_filter: Vec::new(),
                     public_content_bloom_filter: Vec::new(),
-                    classes: vec![v1::LocalityClass {
-                        kind: "source-snapshot".to_owned(),
-                        bytes: 0,
-                        item_count: content_digests.len() as u64,
-                    }],
+                    classes,
                     generated_at: Some(timestamp(now_unix_ms()?)),
                     content_digests,
+                    package_locality,
                 })),
             })
             .await?;
@@ -973,39 +1041,6 @@ where
             })
             .await?;
         Ok(())
-    }
-
-    async fn drain_step_lifecycle(
-        &mut self,
-        execution: &mut ActiveExecution,
-    ) -> Result<(), RunnerError> {
-        if !execution.lifecycle_open {
-            return Ok(());
-        }
-        let drain = async {
-            while let Some(message) = execution.lifecycle.recv().await {
-                let result = self
-                    .send_step_state(&execution.offer, &message.observation)
-                    .await;
-                match result {
-                    Ok(()) => {
-                        execution.last_job_attempt = execution
-                            .last_job_attempt
-                            .max(message.observation.job_attempt);
-                        let _ = message.response.send(Ok(()));
-                    }
-                    Err(error) => {
-                        let _ = message.response.send(Err(error.to_string()));
-                        return Err(error);
-                    }
-                }
-            }
-            execution.lifecycle_open = false;
-            Ok(())
-        };
-        tokio::time::timeout(Duration::from_secs(5), drain)
-            .await
-            .map_err(|_| RunnerError::StepLifecycleDrainTimeout)?
     }
 
     async fn send_cancellation_ack(&mut self, cancel: &v1::CancelLease) -> Result<(), RunnerError> {

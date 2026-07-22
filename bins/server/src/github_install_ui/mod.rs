@@ -14,6 +14,7 @@ pub use model::{
     GitHubUiAlert, RepositoryLinkState, RepositorySelection, RepositoryVisibility,
 };
 pub use payload::github_installations_payload;
+pub(crate) use payload::repository_url;
 
 /// The response contains a session-bound CSRF proof and one-use idempotency key.
 pub const GITHUB_BROWSER_API_CACHE_CONTROL: &str = "no-store";

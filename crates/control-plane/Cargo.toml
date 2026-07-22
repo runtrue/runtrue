@@ -6,6 +6,10 @@ license.workspace = true
 publish = false
 rust-version.workspace = true
 
+[features]
+default = []
+postgres = ["dep:sqlx", "dep:tokio"]
+
 [dependencies]
 runtrue-attest.workspace = true
 runtrue-auth.workspace = true
@@ -16,19 +20,24 @@ runtrue-oidc.workspace = true
 runtrue-policy.workspace = true
 runtrue-scheduler.workspace = true
 runtrue-secrets.workspace = true
+runtrue-update.workspace = true
 runtrue-workflow-ir.workspace = true
 hex.workspace = true
 libc.workspace = true
+nix = { workspace = true, features = ["user"] }
 rand_core.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sqlx = { workspace = true, optional = true }
 thiserror.workspace = true
+tokio = { workspace = true, optional = true }
 zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

@@ -95,6 +95,7 @@ pub(super) fn profile(capabilities: BTreeSet<String>) -> VerifiedRunnerProfile {
         logical_cpus: 4,
         memory_bytes: 4096,
         storage_bytes: 8192,
+        max_concurrent_wasm_jobs: 1,
         isolation_backends: BTreeSet::from([Isolation::Native]),
         capabilities,
         region: Some("test-region".to_owned()),

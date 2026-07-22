@@ -227,6 +227,7 @@ pub(crate) fn capture_one_artifact(
         source_commit: capsule.context.source_commit.clone(),
         workflow_digest: capsule.workflow.digest.clone(),
         capsule_digest: capsule_digest.clone(),
+        workflow_frontend: capsule.context.workflow_frontend.clone(),
         builder_id: config.runner_id.clone(),
         runner_image_digest: config.runner_image_digest.clone(),
         parity_grade: capsule.expected_parity,

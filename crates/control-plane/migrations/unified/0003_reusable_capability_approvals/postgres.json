@@ -1,0 +1,6 @@
+{
+  "backend": "postgres",
+  "trust_sql": "CREATE INDEX approval_requests_reusable_subject ON approval_requests(repository_id, subject_digest, status, expires_unix_ms, created_unix_ms, id);",
+  "sql": "UPDATE run_approval_authorizations AS authorization SET subject_digest = metadata.approval_subject_digest FROM runs JOIN capsule_api_metadata AS metadata ON metadata.capsule_id = runs.capsule_id WHERE runs.id = authorization.run_id AND authorization.kind = 'privileged-execution' AND authorization.one_shot = FALSE AND metadata.approval_subject_digest <> authorization.subject_digest;",
+  "post_sql": "SELECT 1;"
+}

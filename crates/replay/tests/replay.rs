@@ -6,7 +6,8 @@ use runtrue_model::ContentDigest;
 use runtrue_replay::{ReplayBundle, ReplayEnvelope, ReplayError};
 use runtrue_workflow_ir::{
     ApprovalRequirements, CapsuleContext, ExecutionCapsule, ParityGrade, PermissionSet,
-    WorkflowIdentity, CAPSULE_SCHEMA_VERSION, ENGINE_COMPATIBILITY_VERSION,
+    WorkflowFrontendProvenance, WorkflowFrontendReportArtifact, WorkflowIdentity,
+    CAPSULE_SCHEMA_VERSION, ENGINE_COMPATIBILITY_VERSION,
 };
 use std::collections::BTreeMap;
 
@@ -119,6 +120,50 @@ fn replay_bundle_uses_the_capsule_wire_vocabulary() {
     let value = serde_json::to_value(bundle).unwrap();
     assert!(value.get("capsule").is_some());
     assert!(value.get("plan").is_none());
+}
+
+#[test]
+fn frontend_report_round_trips_and_must_match_signed_capsule_digest() {
+    let bytes = br#"{"status":"partial"}"#.to_vec();
+    let digest = ContentDigest::sha256(&bytes);
+    let mut capsule = capsule();
+    capsule.context.workflow_frontend = Some(WorkflowFrontendProvenance {
+        frontend_id: "runtrue.github-actions".to_owned(),
+        contract_generation: 1,
+        frontend_generation: 2,
+        configuration_digest: ContentDigest::sha256(b"frontend config"),
+        input_digest: ContentDigest::sha256(b"source"),
+        native_digest: ContentDigest::sha256(b"native"),
+        report_digest: Some(digest.clone()),
+    });
+    let report = WorkflowFrontendReportArtifact {
+        media_type: "application/vnd.runtrue.frontend-compatibility+json".to_owned(),
+        digest,
+        bytes,
+    };
+    let envelope = ReplayBundle::new(capsule, ContentDigest::sha256(b"approval"), None)
+        .unwrap()
+        .with_workflow_frontend_report(report)
+        .seal()
+        .unwrap();
+    let canonical = envelope.canonical_bytes().unwrap();
+    assert_eq!(
+        ReplayEnvelope::from_canonical_bytes(&canonical).unwrap(),
+        envelope
+    );
+
+    let mut tampered = envelope;
+    tampered
+        .bundle
+        .workflow_frontend_report
+        .as_mut()
+        .unwrap()
+        .bytes
+        .push(b' ');
+    assert!(matches!(
+        tampered.verify(),
+        Err(ReplayError::WorkflowFrontendReportMismatch)
+    ));
 }
 
 #[test]

@@ -1,0 +1,36 @@
+# Development-only single-Docker-host autoscaling overlay. This repairs a
+# failed runner container, not failure of the Docker host or its storage.
+services:
+  autoscaler:
+    image: "${RUNTRUE_IMAGE_REPOSITORY:-local/runtrue}-autoscaler:${RUNTRUE_IMAGE_TAG:-0.1.0}"
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile.autoscaler
+    user: "${RUNTRUE_RUNTIME_UID:?run deploy/bootstrap.sh first}:${RUNTRUE_RUNTIME_GID:?run deploy/bootstrap.sh first}"
+    group_add:
+      - "${RUNTRUE_DOCKER_GID:?set this to the group id owning /var/run/docker.sock}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      RUNTRUE_AUTOSCALER_CONTROL_PLANE: http://server:8080
+      RUNTRUE_AUTOSCALER_POOL_ID: "${RUNTRUE_AUTOSCALER_POOL_ID:?configure runner pool}"
+      RUNTRUE_AUTOSCALER_TOKEN_FILE: /run/secrets/runtrue-autoscaler-token
+      RUNTRUE_AUTOSCALER_DOCKER_TEMPLATE_FILE: /run/runtrue-autoscaler/docker-template.json
+      # This exact host path is required because Docker Engine resolves bind
+      # sources on the host, not in this container's mount namespace.
+      RUNTRUE_AUTOSCALER_CLAIM_ROOT: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/autoscaler/claims"
+      RUNTRUE_AUTOSCALER_TRUST_ROOT: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - "${RUNTRUE_STATE_DIR}/autoscaler:${RUNTRUE_STATE_DIR}/autoscaler"
+      - "${RUNTRUE_STATE_DIR}/runner-secrets/autoscaler.token:/run/secrets/runtrue-autoscaler-token:ro"
+      - "${RUNTRUE_STATE_DIR}/autoscaler/docker-template.json:/run/runtrue-autoscaler/docker-template.json:ro"
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    networks: [control]

@@ -251,6 +251,56 @@ fn exact_completion_survives_restart_and_new_epoch_invalidates_it() {
 }
 
 #[test]
+fn concurrent_active_leases_and_completions_survive_restart_independently() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("concurrent-state");
+    let mut store = RunnerStateStore::open(&root).unwrap();
+    store.accept_installation_epoch(8).unwrap();
+    for lease_id in ["lease-a", "lease-b"] {
+        store
+            .mark_active(ActiveLeaseMarker {
+                lease_id: lease_id.to_owned(),
+                fencing_generation: 1,
+                installation_fencing_epoch: 8,
+                workspace_name: format!("workspace-{lease_id}"),
+            })
+            .unwrap();
+        let completion = v1::CompleteLeaseRequest {
+            lease_id: lease_id.to_owned(),
+            fencing_generation: 1,
+            installation_fencing_epoch: 8,
+            final_state: "succeeded".to_owned(),
+            exit_code: Some(0),
+            error_code: String::new(),
+            result_digest: Some(
+                v1::Digest::try_from(ContentDigest::sha256(lease_id.as_bytes())).unwrap(),
+            ),
+            artifact_ids: Vec::new(),
+            cache_entry_ids: Vec::new(),
+            completed_at: Some(timestamp(123_456)),
+            final_job_attempt: 1,
+            expected_log_frames: 0,
+        };
+        store
+            .set_pending_completion_with_objects(
+                &completion,
+                Vec::new(),
+                runtrue_engine::CredentialTaint::CredentialReleased,
+            )
+            .unwrap();
+    }
+    drop(store);
+
+    let mut reopened = RunnerStateStore::open(&root).unwrap();
+    let records = reopened.pending_completion_records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].lease_id, "lease-a");
+    assert_eq!(records[1].lease_id, "lease-b");
+    reopened.clear_pending_completion_lease("lease-a").unwrap();
+    assert_eq!(reopened.pending_completion_records()[0].lease_id, "lease-b");
+}
+
+#[test]
 fn typed_completion_claims_survive_restart_and_legacy_records_stay_v1() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("typed-state");

@@ -1,21 +1,18 @@
-use crate::AppState;
+use crate::{workflow_frontends, AppState};
 use base64ct::{Base64, Encoding as _};
 use runtrue_attest::CapsuleSigningKey;
 use runtrue_compiler::Compilation;
-use runtrue_control_plane::{
-    CapsuleApiMetadata, ControlPlane, ControlPlaneError, CreateRunRequest, DurableTask,
-    DurableTaskStatus, GitHubInstallationRecord, NewJob, PreparedScmExecution,
-    RecordScmCheckFailure, RecordScmCheckProgress, RecordScmFetchSnapshotReady, RepositoryRecord,
-    ReserveScmCheckPublication, ReserveScmSourceFetch, ScmCheckPublicationState,
-    ScmCheckPublishTask, ScmContinuationCommit, ScmContinuationContext, ScmContinuationResolution,
-    ScmExecutionRole, ScmInstallationRecord, ScmProposedAnalysisRecord, ScmProposedAnalysisStatus,
-    ScmRepositoryLinkRecord, ScmSourceIdentity, SignedCapsuleRecord, SourceSnapshotRecord,
-    SourceSnapshotState,
-};
 #[cfg(feature = "github-actions")]
-use runtrue_gha_import::{
-    parse_repository_action_metadata, parse_runtrue_repository_action_metadata,
-    pinned_repository_action_references, GithubActionsFrontend,
+use runtrue_control_plane::GitHubInstallationRecord;
+use runtrue_control_plane::{
+    CapsuleApiMetadata, ControlPlaneError, ControlPlaneStore, CreateRunRequest, DurableTask,
+    DurableTaskStatus, NewJob, PreparedScmExecution, RecordScmCheckFailure, RecordScmCheckProgress,
+    RecordScmFetchSnapshotReady, RepositoryRecord, ReserveScmCheckPublication,
+    ReserveScmSourceFetch, ScmCheckPublicationState, ScmCheckPublishTask, ScmContinuationCommit,
+    ScmContinuationContext, ScmContinuationResolution, ScmExecutionRole, ScmInstallationRecord,
+    ScmProposedAnalysisRecord, ScmProposedAnalysisStatus, ScmRepositoryLinkRecord,
+    ScmSourceIdentity, SignedCapsuleRecord, SourceSnapshotRecord, SourceSnapshotState,
+    WorkflowFrontendReportRecord, SCM_EVENT_RECOVERY_WINDOW_MS, SCM_EVENT_TASK_KIND,
 };
 use runtrue_git::{
     CredentialRequest, GitCredential, GitCredentialProvider, GitError, GitLimits, GitRepository,
@@ -42,12 +39,15 @@ use runtrue_scm::{
 use runtrue_storage::FsCas;
 use runtrue_trusted_planner::{
     ProposedAnalysisFailure, ProposedWorkflowAnalysis, ReusableWorkflowProviderError,
-    ReusableWorkflowSourceProvider, TrustedPlanner, TrustedPlannerError, DEFAULT_LOCKFILE_PATH,
+    ReusableWorkflowSourceProvider, SecretMetadataResolver, SecretResolutionError, TrustedPlanner,
+    TrustedPlannerError, DEFAULT_LOCKFILE_PATH,
 };
 use runtrue_workflow_frontend::{
-    ResolvedRepositoryAction, ResolvedRepositoryProgram, WorkflowFrontendRegistry,
-    WorkflowSourceFrontend,
+    ResolvedActionInput, ResolvedProgram, ResolvedProgramRef, ResolvedSourceAction,
+    SourceActionResolutionRequest, WorkflowFrontendOptions, WorkflowSourceFrontend,
 };
+#[cfg(feature = "github-actions")]
+use runtrue_workflow_frontend::{SourceActionDescriptors, SourceActionProgramDeclaration};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -68,7 +68,7 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
 pub const DEFAULT_SCM_WORKFLOW_DIRECTORY: &str = ".runtrue/workflows";
 const MAX_SCM_WORKFLOWS: usize = 64;
-const SCM_TASK_KIND: &str = "scm.event";
+const SCM_TASK_KIND: &str = SCM_EVENT_TASK_KIND;
 const SCM_CONTINUATION_TASK_KIND: &str = "scm.approval.continue";
 const SCM_CHECK_TASK_KIND: &str = "scm.check.publish";
 const DEFAULT_POLICY_VERSION: &str = "server-default-deny-v1";
@@ -81,30 +81,124 @@ const APPROVAL_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
 const CAPABILITY_GRANT_LIFETIME_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 #[cfg(feature = "github-actions")]
 const GITHUB_INSTALLATION_PAGE_SIZE: usize = 100;
-#[cfg(feature = "github-actions")]
-static GITHUB_ACTIONS_FRONTEND: GithubActionsFrontend = GithubActionsFrontend;
-#[cfg(feature = "github-actions")]
-static REGISTERED_WORKFLOW_FRONTENDS: [&'static dyn WorkflowSourceFrontend; 1] =
-    [&GITHUB_ACTIONS_FRONTEND];
-#[cfg(not(feature = "github-actions"))]
-static REGISTERED_WORKFLOW_FRONTENDS: [&'static dyn WorkflowSourceFrontend; 0] = [];
 
-#[cfg(feature = "github-actions")]
-fn discover_pinned_repository_actions(source: &str) -> Result<Vec<String>, ()> {
-    pinned_repository_action_references(source).map_err(|_| ())
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableResolvedAction {
+    program: DurableResolvedProgram,
+    inputs: BTreeMap<String, DurableResolvedInput>,
 }
 
-#[cfg(not(feature = "github-actions"))]
-fn discover_pinned_repository_actions(_source: &str) -> Result<Vec<String>, ()> {
-    Ok(Vec::new())
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum DurableResolvedProgram {
+    Container {
+        image: String,
+        entrypoint: Option<String>,
+        arguments: Option<Vec<String>>,
+    },
+    Component {
+        reference: String,
+        api_url: String,
+        signature_identity: String,
+        interface: String,
+    },
 }
 
-fn workflow_frontends() -> &'static WorkflowFrontendRegistry<'static> {
-    static REGISTRY: OnceLock<WorkflowFrontendRegistry<'static>> = OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        WorkflowFrontendRegistry::new(&REGISTERED_WORKFLOW_FRONTENDS)
-            .expect("compiled workflow frontend registry must be valid")
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableResolvedInput {
+    required: bool,
+    default: Option<String>,
+}
+
+fn durable_resolved_actions(
+    options: &WorkflowFrontendOptions,
+) -> Result<serde_json::Value, ProcessError> {
+    let actions = options
+        .resolved_actions()
+        .map(|(reference, action)| {
+            let program = match action.program() {
+                ResolvedProgramRef::Container {
+                    image,
+                    entrypoint,
+                    arguments,
+                } => DurableResolvedProgram::Container {
+                    image: image.to_owned(),
+                    entrypoint: entrypoint.map(str::to_owned),
+                    arguments: arguments.map(<[String]>::to_vec),
+                },
+                ResolvedProgramRef::Component {
+                    reference,
+                    api_url,
+                    signature_identity,
+                    interface,
+                } => DurableResolvedProgram::Component {
+                    reference: reference.to_owned(),
+                    api_url: api_url.to_owned(),
+                    signature_identity: signature_identity.to_owned(),
+                    interface: interface.to_owned(),
+                },
+            };
+            let inputs = action
+                .inputs()
+                .map(|(name, input)| {
+                    (
+                        name.to_owned(),
+                        DurableResolvedInput {
+                            required: input.required(),
+                            default: input.default_value().map(str::to_owned),
+                        },
+                    )
+                })
+                .collect();
+            (
+                reference.to_owned(),
+                DurableResolvedAction { program, inputs },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    serde_json::to_value(actions).map_err(|_| {
+        TaskFailure::terminal("prepared repository-action mapping is not durable").into()
     })
+}
+
+fn restore_resolved_actions(
+    mut options: WorkflowFrontendOptions,
+    encoded: serde_json::Value,
+) -> Result<WorkflowFrontendOptions, ProcessError> {
+    let actions: BTreeMap<String, DurableResolvedAction> = serde_json::from_value(encoded)
+        .map_err(|_| TaskFailure::terminal("durable repository-action mapping is invalid"))?;
+    for (reference, action) in actions {
+        let program = match action.program {
+            DurableResolvedProgram::Container {
+                image,
+                entrypoint,
+                arguments,
+            } => ResolvedProgram::container(image, entrypoint, arguments),
+            DurableResolvedProgram::Component {
+                reference,
+                api_url,
+                signature_identity,
+                interface,
+            } => ResolvedProgram::component(reference, api_url, signature_identity, interface),
+        }
+        .map_err(|_| TaskFailure::terminal("durable repository-action program is invalid"))?;
+        let mut resolved = ResolvedSourceAction::new(program);
+        for (name, input) in action.inputs {
+            let input = ResolvedActionInput::new(input.required, input.default)
+                .map_err(|_| TaskFailure::terminal("durable repository-action input is invalid"))?;
+            resolved.insert_input(name, input).map_err(|_| {
+                TaskFailure::terminal("durable repository-action inputs are invalid")
+            })?;
+        }
+        options
+            .insert_resolved_action(reference, resolved)
+            .map_err(|_| {
+                TaskFailure::terminal("durable repository-action mapping exceeds its bounds")
+            })?;
+    }
+    Ok(options)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -829,9 +923,8 @@ pub trait ScmSourceFetcher: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRepositoryAction {
     pub reference: String,
-    pub program: ResolvedRepositoryProgram,
+    pub action: ResolvedSourceAction,
     pub metadata_digest: ContentDigest,
-    pub inputs: std::collections::BTreeMap<String, runtrue_workflow_frontend::ResolvedActionInput>,
 }
 
 #[derive(Debug, Error)]
@@ -920,7 +1013,8 @@ pub trait RepositoryActionResolver: Send + Sync {
         &self,
         tenant_id: &str,
         installation_id: &str,
-        reference: &str,
+        request: &SourceActionResolutionRequest,
+        frontend: &dyn WorkflowSourceFrontend,
     ) -> Result<PreparedRepositoryAction, RepositoryActionResolveError>;
 }
 
@@ -941,13 +1035,91 @@ pub trait RepositoryActionBuilder: Send + Sync {
     ) -> Result<String, RepositoryActionResolveError>;
 }
 
+#[derive(Clone, Copy)]
+struct StoreExecutor {
+    runtime: &'static tokio::runtime::Runtime,
+}
+
+impl StoreExecutor {
+    fn new() -> Result<Self, ScmWorkerBuildError> {
+        static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+        let runtime = RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+        });
+        match runtime {
+            Ok(runtime) => Ok(Self { runtime }),
+            Err(error) => Err(ScmWorkerBuildError::PersistenceExecutor(io::Error::other(
+                error.clone(),
+            ))),
+        }
+    }
+
+    fn execute<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, ControlPlaneError>>,
+    ) -> Result<T, ControlPlaneError> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(ControlPlaneError::InvalidInput(
+                "synchronous SCM persistence executor entered from a Tokio runtime",
+            ));
+        }
+        self.runtime.block_on(future)
+    }
+}
+
+struct StoreSecretResolver<'a> {
+    store: &'a dyn ControlPlaneStore,
+    store_executor: &'a StoreExecutor,
+    repository: &'a RepositoryRecord,
+}
+
+impl<'a> StoreSecretResolver<'a> {
+    const fn new(
+        store: &'a dyn ControlPlaneStore,
+        store_executor: &'a StoreExecutor,
+        repository: &'a RepositoryRecord,
+    ) -> Self {
+        Self {
+            store,
+            store_executor,
+            repository,
+        }
+    }
+}
+
+impl SecretMetadataResolver for StoreSecretResolver<'_> {
+    fn bind_exact(&self, compilation: &mut Compilation) -> Result<(), SecretResolutionError> {
+        self.store_executor
+            .execute(crate::secret_resolution::bind_compilation_secrets(
+                self.store,
+                self.repository,
+                compilation,
+            ))
+            .map_err(|error| match error {
+                ControlPlaneError::NotFound { .. } => SecretResolutionError::Missing,
+                ControlPlaneError::AmbiguousSecretResolution { .. } => {
+                    SecretResolutionError::Ambiguous
+                }
+                ControlPlaneError::StaleSecretResolution { .. }
+                | ControlPlaneError::ConfigurationProjectVersionConflict { .. } => {
+                    SecretResolutionError::Stale
+                }
+                _ => SecretResolutionError::Unavailable,
+            })
+    }
+}
+
 #[cfg(feature = "github-actions")]
 pub struct GitHubRepositoryActionResolver {
-    control_plane: Arc<ControlPlane>,
+    control_plane: Arc<dyn ControlPlaneStore>,
+    store_executor: StoreExecutor,
     fetcher: Arc<dyn ScmSourceFetcher>,
     installation_provider: SharedGitHubInstallationProvider,
     endpoints: GitHubProviderEndpoints,
-    builder: Arc<dyn RepositoryActionBuilder>,
+    builder: Option<Arc<dyn RepositoryActionBuilder>>,
 }
 
 #[cfg(feature = "github-actions")]
@@ -958,7 +1130,7 @@ impl std::fmt::Debug for GitHubRepositoryActionResolver {
             .field("fetcher", &"[AUTHENTICATED SCM FETCHER]")
             .field("installation_provider", &"[GITHUB INSTALLATION CATALOG]")
             .field("endpoints", &self.endpoints)
-            .field("builder", &"[ISOLATED ACTION BUILDER]")
+            .field("builder_configured", &self.builder.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -966,20 +1138,63 @@ impl std::fmt::Debug for GitHubRepositoryActionResolver {
 #[cfg(feature = "github-actions")]
 impl GitHubRepositoryActionResolver {
     #[must_use]
-    pub fn new(
-        control_plane: Arc<ControlPlane>,
+    pub fn new<S>(
+        control_plane: Arc<S>,
         fetcher: Arc<dyn ScmSourceFetcher>,
         installation_provider: SharedGitHubInstallationProvider,
         endpoints: GitHubProviderEndpoints,
         builder: Arc<dyn RepositoryActionBuilder>,
-    ) -> Self {
-        Self {
+    ) -> Self
+    where
+        S: ControlPlaneStore + 'static,
+    {
+        let control_plane: Arc<dyn ControlPlaneStore> = control_plane;
+        Self::try_new(
             control_plane,
             fetcher,
             installation_provider,
             endpoints,
+            Some(builder),
+        )
+        .expect("SCM persistence executor must be available")
+    }
+
+    #[must_use]
+    pub fn without_builder<S>(
+        control_plane: Arc<S>,
+        fetcher: Arc<dyn ScmSourceFetcher>,
+        installation_provider: SharedGitHubInstallationProvider,
+        endpoints: GitHubProviderEndpoints,
+    ) -> Self
+    where
+        S: ControlPlaneStore + 'static,
+    {
+        let control_plane: Arc<dyn ControlPlaneStore> = control_plane;
+        Self::try_new(
+            control_plane,
+            fetcher,
+            installation_provider,
+            endpoints,
+            None,
+        )
+        .expect("SCM persistence executor must be available")
+    }
+
+    fn try_new(
+        control_plane: Arc<dyn ControlPlaneStore>,
+        fetcher: Arc<dyn ScmSourceFetcher>,
+        installation_provider: SharedGitHubInstallationProvider,
+        endpoints: GitHubProviderEndpoints,
+        builder: Option<Arc<dyn RepositoryActionBuilder>>,
+    ) -> Result<Self, ScmWorkerBuildError> {
+        Ok(Self {
+            control_plane,
+            store_executor: StoreExecutor::new()?,
+            fetcher,
+            installation_provider,
+            endpoints,
             builder,
-        }
+        })
     }
 }
 
@@ -989,12 +1204,13 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
         &self,
         tenant_id: &str,
         installation_id: &str,
-        reference: &str,
+        request: &SourceActionResolutionRequest,
+        frontend: &dyn WorkflowSourceFrontend,
     ) -> Result<PreparedRepositoryAction, RepositoryActionResolveError> {
-        let (locator, commit) = reference
-            .rsplit_once('@')
-            .ok_or(RepositoryActionResolveError::Rejected)?;
-        let (owner, name) = locator
+        let reference = request.source_reference();
+        let commit = request.revision();
+        let (owner, name) = request
+            .repository()
             .split_once('/')
             .filter(|(_, name)| !name.contains('/'))
             .ok_or(RepositoryActionResolveError::Rejected)?;
@@ -1006,8 +1222,11 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
             return Err(RepositoryActionResolveError::Rejected);
         }
         let consumer_installation = self
-            .control_plane
-            .github_installation_for_tenant(tenant_id, installation_id)
+            .store_executor
+            .execute(
+                self.control_plane
+                    .github_installation_for_tenant(tenant_id, installation_id),
+            )
             .map_err(|_| {
                 eprintln!("repository action authorization failed: consumer installation lookup");
                 RepositoryActionResolveError::Unauthorized
@@ -1026,12 +1245,12 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
         let mut inspected = Vec::new();
         loop {
             let page = self
-                .control_plane
-                .list_github_installations_for_tenant(
+                .store_executor
+                .execute(self.control_plane.github_installations_for_tenant(
                     tenant_id,
                     after_id.as_deref(),
                     GITHUB_INSTALLATION_PAGE_SIZE,
-                )
+                ))
                 .map_err(|_| RepositoryActionResolveError::Unavailable)?;
             let page_len = page.len();
             for installation in page {
@@ -1127,61 +1346,104 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
                 }
                 ScmSourceFetchError::Rejected => RepositoryActionResolveError::Rejected,
             })?;
-        match fetched.repository.read_blob(commit, "runtrue-action.yml") {
-            Ok(blob) => {
-                let metadata = parse_runtrue_repository_action_metadata(&blob.bytes)
-                    .map_err(|_| RepositoryActionResolveError::Rejected)?;
-                return Ok(PreparedRepositoryAction {
-                    reference: reference.to_owned(),
-                    program: ResolvedRepositoryProgram::Component {
-                        reference: metadata.component,
-                        scm_api_url: self.endpoints.api_origin().to_owned(),
-                        signature_identity: metadata.signature_identity,
-                        wit_world: metadata.wit_world,
-                    },
-                    metadata_digest: metadata.digest,
-                    inputs: metadata.inputs,
-                });
+        let mut descriptors = SourceActionDescriptors::for_request(request);
+        for candidate in request.descriptor_candidates() {
+            let path = action_source_path(request.subpath(), candidate)?;
+            match fetched.repository.read_blob(commit, &path) {
+                Ok(blob) => {
+                    descriptors
+                        .insert(candidate.clone(), blob.bytes)
+                        .map_err(|_| RepositoryActionResolveError::Rejected)?;
+                    // Candidate order is owned by the frontend. Selecting the
+                    // first present descriptor lets a native Runtrue manifest
+                    // coexist with a lower-priority compatibility manifest,
+                    // while a malformed preferred descriptor still fails
+                    // closed instead of silently falling back.
+                    break;
+                }
+                Err(GitError::PathNotFound) => {}
+                Err(_) => return Err(RepositoryActionResolveError::Rejected),
             }
-            Err(GitError::PathNotFound) => {}
-            Err(_) => return Err(RepositoryActionResolveError::Rejected),
         }
-        let yml = fetched.repository.read_blob(commit, "action.yml");
-        let yaml = fetched.repository.read_blob(commit, "action.yaml");
-        let metadata_blob = match (yml, yaml) {
-            (Ok(blob), Err(GitError::PathNotFound)) | (Err(GitError::PathNotFound), Ok(blob)) => {
-                blob
+        let declaration = frontend
+            .parse_action_descriptor(request, &descriptors)
+            .map_err(|_| RepositoryActionResolveError::Rejected)?;
+        if declaration.source_reference() != reference {
+            return Err(RepositoryActionResolveError::Rejected);
+        }
+        let metadata_digest = ContentDigest::sha256(
+            descriptors
+                .selected_descriptor(&declaration)
+                .map_err(|_| RepositoryActionResolveError::Rejected)?,
+        );
+        let program = match declaration.program() {
+            SourceActionProgramDeclaration::ContainerBuild {
+                build_file,
+                entrypoint,
+                arguments,
+            } => {
+                let dockerfile = action_source_path(request.subpath(), build_file)?;
+                fetched
+                    .repository
+                    .read_blob(commit, &dockerfile)
+                    .map_err(|_| RepositoryActionResolveError::Rejected)?;
+                let builder = self
+                    .builder
+                    .as_ref()
+                    .ok_or(RepositoryActionResolveError::Rejected)?;
+                let image = builder.build(RepositoryActionBuildRequest {
+                    tenant_id,
+                    repository_id: &repository_id,
+                    reference,
+                    commit,
+                    repository: &fetched.repository,
+                    metadata_digest: &metadata_digest,
+                    dockerfile: &dockerfile,
+                })?;
+                ResolvedProgram::container(image, entrypoint.clone(), arguments.clone())
             }
-            _ => return Err(RepositoryActionResolveError::Rejected),
-        };
-        let metadata = parse_repository_action_metadata(&metadata_blob.bytes)
-            .map_err(|_| RepositoryActionResolveError::Rejected)?;
-        fetched
-            .repository
-            .read_blob(commit, &metadata.dockerfile)
-            .map_err(|_| RepositoryActionResolveError::Rejected)?;
-        let image = self.builder.build(RepositoryActionBuildRequest {
-            tenant_id,
-            repository_id: &repository_id,
-            reference,
-            commit,
-            repository: &fetched.repository,
-            metadata_digest: &metadata.digest,
-            dockerfile: &metadata.dockerfile,
-        })?;
+            SourceActionProgramDeclaration::Component {
+                reference,
+                signature_identity,
+                interface,
+            } => ResolvedProgram::component(
+                reference.clone(),
+                self.endpoints.api_origin().to_owned(),
+                signature_identity.clone(),
+                interface.clone(),
+            ),
+        }
+        .map_err(|_| RepositoryActionResolveError::Rejected)?;
+        let mut action = ResolvedSourceAction::new(program);
+        for (name, input) in declaration.inputs() {
+            action
+                .insert_input(name, input.clone())
+                .map_err(|_| RepositoryActionResolveError::Rejected)?;
+        }
         Ok(PreparedRepositoryAction {
             reference: reference.to_owned(),
-            program: ResolvedRepositoryProgram::Container {
-                image,
-                entrypoint: metadata.entrypoint,
-                args: metadata.args,
-            },
-            metadata_digest: metadata.digest,
-            inputs: metadata.inputs,
+            action,
+            metadata_digest,
         })
     }
 }
 
+#[cfg(feature = "github-actions")]
+fn action_source_path(subpath: &str, path: &str) -> Result<String, RepositoryActionResolveError> {
+    let joined = if subpath.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{subpath}/{path}")
+    };
+    let normalized =
+        normalize_relative_path(&joined).map_err(|_| RepositoryActionResolveError::Rejected)?;
+    if normalized != joined {
+        return Err(RepositoryActionResolveError::Rejected);
+    }
+    Ok(normalized)
+}
+
+#[cfg(any(feature = "github-actions", test))]
 fn classify_repository_action_inspection_error(
     error: &GitHubError,
 ) -> RepositoryActionResolveError {
@@ -1486,6 +1748,8 @@ pub enum ScmWorkerBuildError {
     Git(#[source] GitError),
     #[error("configured SCM source fetching requires the runner data-plane CAS")]
     MissingSourceCas,
+    #[error("SCM persistence executor could not be created: {0}")]
+    PersistenceExecutor(#[source] io::Error),
 }
 
 #[derive(Debug, Error)]
@@ -1498,7 +1762,8 @@ pub enum ScmWorkerError {
 
 #[derive(Clone)]
 pub struct ScmTaskWorker {
-    control_plane: Arc<ControlPlane>,
+    control_plane: Arc<dyn ControlPlaneStore>,
+    store_executor: StoreExecutor,
     signing_key: Arc<CapsuleSigningKey>,
     mirror_root: Option<SecureMirrorRoot>,
     source_fetcher: Option<Arc<dyn ScmSourceFetcher>>,
@@ -1551,7 +1816,7 @@ impl AppState {
         config: ScmWorkerConfig,
     ) -> Result<ScmTaskWorker, ScmWorkerBuildError> {
         ScmTaskWorker::new(
-            Arc::clone(&self.control_plane),
+            Arc::clone(&self.store),
             Arc::clone(&self.capsule_signing_key),
             config,
             None,
@@ -1600,12 +1865,12 @@ impl AppState {
     }
 
     #[cfg(feature = "github-actions")]
-    pub fn scm_task_worker_with_github_app_and_action_builder<P>(
+    pub fn scm_task_worker_with_github_repository_actions<P>(
         &self,
         config: ScmWorkerConfig,
         provider: Arc<P>,
         installation_provider: SharedGitHubInstallationProvider,
-        builder: Arc<dyn RepositoryActionBuilder>,
+        builder: Option<Arc<dyn RepositoryActionBuilder>>,
     ) -> Result<ScmTaskWorker, ScmWorkerBuildError>
     where
         P: GitHubInstallationTokenProvider + GitHubCheckPublisher + 'static,
@@ -1620,13 +1885,13 @@ impl AppState {
             config.github_provider_endpoints.clone(),
         )?);
         let resolver: Arc<dyn RepositoryActionResolver> =
-            Arc::new(GitHubRepositoryActionResolver::new(
-                Arc::clone(&self.control_plane),
+            Arc::new(GitHubRepositoryActionResolver::try_new(
+                Arc::clone(&self.store),
                 Arc::clone(&fetcher),
                 installation_provider,
                 config.github_provider_endpoints.clone(),
                 builder,
-            ));
+            )?);
         let mut worker = self.scm_task_worker_with_source_fetcher(config, fetcher)?;
         worker.check_publisher = Some(publisher);
         worker.approval_authorizer = Some(approval_authorizer);
@@ -1641,7 +1906,7 @@ impl AppState {
         fetcher: Arc<dyn ScmSourceFetcher>,
     ) -> Result<ScmTaskWorker, ScmWorkerBuildError> {
         ScmTaskWorker::new(
-            Arc::clone(&self.control_plane),
+            Arc::clone(&self.store),
             Arc::clone(&self.capsule_signing_key),
             config,
             Some(fetcher),
@@ -1664,7 +1929,7 @@ impl AppState {
 
 impl ScmTaskWorker {
     fn new(
-        control_plane: Arc<ControlPlane>,
+        control_plane: Arc<dyn ControlPlaneStore>,
         signing_key: Arc<CapsuleSigningKey>,
         config: ScmWorkerConfig,
         source_fetcher: Option<Arc<dyn ScmSourceFetcher>>,
@@ -1680,6 +1945,7 @@ impl ScmTaskWorker {
             .transpose()?;
         Ok(Self {
             control_plane,
+            store_executor: StoreExecutor::new()?,
             signing_key,
             mirror_root,
             source_fetcher,
@@ -1729,35 +1995,46 @@ impl ScmTaskWorker {
         claim_now: u64,
         finish_clock: impl Fn() -> Result<u64, ScmWorkerError>,
     ) -> Result<ScmWorkerTick, ScmWorkerError> {
-        if self.control_plane.recovery_state()?.safe_mode {
+        if self
+            .store_executor
+            .execute(self.control_plane.recovery_state())?
+            .safe_mode
+        {
             return Ok(ScmWorkerTick::PausedSafeMode);
         }
         let lease_ms = duration_ms(self.config.lease_duration)?;
         let check_task = if self.check_publisher.is_some() {
-            self.control_plane.claim_task_by_kind(
-                &self.config.worker_id,
-                SCM_CHECK_TASK_KIND,
-                claim_now,
-                lease_ms,
-            )?
+            self.store_executor
+                .execute(self.control_plane.claim_task_by_kind(
+                    &self.config.worker_id,
+                    SCM_CHECK_TASK_KIND,
+                    claim_now,
+                    lease_ms,
+                ))?
         } else {
             None
         };
         let task = if let Some(task) = check_task {
             task
-        } else if let Some(task) = self.control_plane.claim_task_by_kind(
-            &self.config.worker_id,
-            SCM_CONTINUATION_TASK_KIND,
-            claim_now,
-            lease_ms,
-        )? {
+        } else if let Some(task) =
+            self.store_executor
+                .execute(self.control_plane.claim_task_by_kind(
+                    &self.config.worker_id,
+                    SCM_CONTINUATION_TASK_KIND,
+                    claim_now,
+                    lease_ms,
+                ))?
+        {
             task
-        } else if let Some(task) = self.control_plane.claim_task_by_kind(
-            &self.config.worker_id,
-            SCM_TASK_KIND,
-            claim_now,
-            lease_ms,
-        )? {
+        } else if let Some(task) =
+            self.store_executor
+                .execute(self.control_plane.claim_task_by_kind(
+                    &self.config.worker_id,
+                    SCM_TASK_KIND,
+                    claim_now,
+                    lease_ms,
+                ))?
+        {
             task
         } else {
             return Ok(ScmWorkerTick::Idle);
@@ -1796,13 +2073,13 @@ impl ScmTaskWorker {
         let payload: ScmCheckPublishTask = serde_json::from_slice(&encoded)
             .map_err(|_| TaskFailure::terminal("invalid SCM check task payload"))?;
         let (repository, installation, repository_link) = self
-            .control_plane
-            .github_repository_for_event(
+            .store_executor
+            .execute(self.control_plane.github_repository_for_event(
                 &payload.installation_external_id,
                 &payload.external_repository_id,
                 &payload.owner,
                 &payload.repository,
-            )
+            ))
             .map_err(TaskFailure::from_repository_lookup)?;
         if repository.id != payload.repository_id
             || repository.tenant_id != payload.tenant_id
@@ -1862,29 +2139,35 @@ impl ScmTaskWorker {
         let request_digest = ContentDigest::sha256(&encoded);
         let begin_now = finish_clock()?;
         let reservation = self
-            .control_plane
-            .reserve_scm_check_publication(&ReserveScmCheckPublication {
-                id: payload.publication_id.clone(),
-                tenant_id: payload.tenant_id.clone(),
-                repository_id: payload.repository_id.clone(),
-                installation_id: payload.installation_id.clone(),
-                run_id: payload.run_id.clone(),
-                task_id: task.id.clone(),
-                worker_id: self.config.worker_id.clone(),
-                commit_sha: payload.commit_sha.clone(),
-                logical_name: payload.logical_name.clone(),
-                external_id: payload.external_id.clone(),
-                request_digest,
-                annotation_count: 0,
-                now_unix_ms: begin_now,
-            })
+            .store_executor
+            .execute(self.control_plane.reserve_scm_check_publication(
+                &ReserveScmCheckPublication {
+                    id: payload.publication_id.clone(),
+                    tenant_id: payload.tenant_id.clone(),
+                    repository_id: payload.repository_id.clone(),
+                    installation_id: payload.installation_id.clone(),
+                    run_id: payload.run_id.clone(),
+                    task_id: task.id.clone(),
+                    worker_id: self.config.worker_id.clone(),
+                    commit_sha: payload.commit_sha.clone(),
+                    logical_name: payload.logical_name.clone(),
+                    external_id: payload.external_id.clone(),
+                    request_digest,
+                    annotation_count: 0,
+                    now_unix_ms: begin_now,
+                },
+            ))
             .map_err(TaskFailure::control)?;
         self.metrics
             .check_publish_attempts
             .fetch_add(1, Ordering::Relaxed);
         if reservation.value.state == ScmCheckPublicationState::Published {
-            self.control_plane
-                .complete_task(&task.id, &self.config.worker_id, begin_now)
+            self.store_executor
+                .execute(self.control_plane.complete_task(
+                    &task.id,
+                    &self.config.worker_id,
+                    begin_now,
+                ))
                 .map_err(TaskFailure::control)?;
             self.metrics
                 .check_reconciliations
@@ -1929,43 +2212,51 @@ impl ScmTaskWorker {
                         }
                     };
                     let terminal = !failure.retryable || task.attempts >= self.config.max_attempts;
-                    self.control_plane
-                        .record_scm_check_failure(&RecordScmCheckFailure {
-                            tenant_id: payload.tenant_id.clone(),
-                            publication_id: payload.publication_id.clone(),
-                            task_id: task.id.clone(),
-                            worker_id: self.config.worker_id.clone(),
-                            error_code: error_code.to_owned(),
-                            terminal,
-                            now_unix_ms: finish_clock()?,
-                        })
+                    self.store_executor
+                        .execute(self.control_plane.record_scm_check_failure(
+                            &RecordScmCheckFailure {
+                                tenant_id: payload.tenant_id.clone(),
+                                publication_id: payload.publication_id.clone(),
+                                task_id: task.id.clone(),
+                                worker_id: self.config.worker_id.clone(),
+                                error_code: error_code.to_owned(),
+                                terminal,
+                                now_unix_ms: finish_clock()?,
+                            },
+                        ))
                         .map_err(TaskFailure::control)?;
                     return Err(failure.into());
                 }
             };
         let finish_now = finish_clock()?;
-        self.control_plane
-            .record_scm_check_progress(&RecordScmCheckProgress {
-                tenant_id: payload.tenant_id.clone(),
-                publication_id: payload.publication_id.clone(),
-                task_id: task.id.clone(),
-                worker_id: self.config.worker_id.clone(),
-                provider_check_run_id: published.provider_check_run_id,
-                confirmed_annotations: published.confirmed_annotations,
-                now_unix_ms: finish_now,
-            })
+        self.store_executor
+            .execute(
+                self.control_plane
+                    .record_scm_check_progress(&RecordScmCheckProgress {
+                        tenant_id: payload.tenant_id.clone(),
+                        publication_id: payload.publication_id.clone(),
+                        task_id: task.id.clone(),
+                        worker_id: self.config.worker_id.clone(),
+                        provider_check_run_id: published.provider_check_run_id,
+                        confirmed_annotations: published.confirmed_annotations,
+                        now_unix_ms: finish_now,
+                    }),
+            )
             .map_err(TaskFailure::control)?;
-        self.control_plane
-            .mark_scm_check_published(
+        self.store_executor
+            .execute(self.control_plane.mark_scm_check_published(
                 &payload.tenant_id,
                 &payload.publication_id,
                 &task.id,
                 &self.config.worker_id,
                 finish_now,
-            )
+            ))
             .map_err(TaskFailure::control)?;
-        self.control_plane
-            .complete_task(&task.id, &self.config.worker_id, finish_now)
+        self.store_executor
+            .execute(
+                self.control_plane
+                    .complete_task(&task.id, &self.config.worker_id, finish_now),
+            )
             .map_err(TaskFailure::control)?;
         self.metrics
             .checks_published
@@ -1997,10 +2288,10 @@ impl ScmTaskWorker {
         }
         let identity = StableIdentity::new(event, repository);
         let fetch_id = identity.id("scm-fetch", b"source-fetch", b"");
-        match self
-            .control_plane
-            .scm_source_fetch(&repository.tenant_id, &fetch_id)
-        {
+        match self.store_executor.execute(
+            self.control_plane
+                .scm_source_fetch(&repository.tenant_id, &fetch_id),
+        ) {
             Ok(existing) => {
                 if existing.repository_id != repository.id
                     || existing.normalized_event_digest != event.normalized_digest
@@ -2055,7 +2346,14 @@ impl ScmTaskWorker {
         workflow_path: &str,
         tenant_id: &str,
         installation_id: &str,
-    ) -> Result<std::collections::BTreeMap<String, ResolvedRepositoryAction>, ProcessError> {
+        mut options: WorkflowFrontendOptions,
+    ) -> Result<WorkflowFrontendOptions, ProcessError> {
+        let Some(frontend) = workflow_frontends::registry()
+            .frontend_for(workflow_path)
+            .map_err(|_| TaskFailure::terminal("workflow frontend selection is invalid"))?
+        else {
+            return Ok(options);
+        };
         let workflow = repository.read_blob(commit, workflow_path).map_err(|_| {
             TaskFailure::terminal(
                 "trusted workflow source is unavailable for repository-action discovery",
@@ -2064,21 +2362,22 @@ impl ScmTaskWorker {
         let source = std::str::from_utf8(&workflow.bytes).map_err(|_| {
             TaskFailure::terminal("trusted workflow is not UTF-8 for repository-action discovery")
         })?;
-        let references = discover_pinned_repository_actions(source).map_err(|()| {
-            TaskFailure::terminal("trusted workflow is invalid for repository-action discovery")
-        })?;
-        if references.is_empty() {
-            return Ok(std::collections::BTreeMap::new());
+        let requests = frontend
+            .action_resolution_requests(source, workflow_path)
+            .map_err(|_| {
+                TaskFailure::terminal("trusted workflow is invalid for source-action discovery")
+            })?;
+        if requests.is_empty() {
+            return Ok(options);
         }
         let resolver = self.repository_action_resolver.as_ref().ok_or_else(|| {
             TaskFailure::terminal(
                 "workflow requires immutable repository actions but no trusted preparation provider is configured",
             )
         })?;
-        let mut resolved = std::collections::BTreeMap::new();
-        for reference in references {
+        for request in requests.iter() {
             let prepared = resolver
-                .resolve(tenant_id, installation_id, &reference)
+                .resolve(tenant_id, installation_id, request, frontend)
                 .map_err(|error| match error {
                     RepositoryActionResolveError::Unavailable => TaskFailure::retryable(
                         "repository-action preparation is temporarily unavailable",
@@ -2090,21 +2389,19 @@ impl ScmTaskWorker {
                         "repository action source, metadata, or build was rejected",
                     ),
                 })?;
-            if prepared.reference != reference {
+            if prepared.reference != request.source_reference() {
                 return Err(TaskFailure::terminal(
                     "repository-action resolver substituted the requested source identity",
                 )
                 .into());
             }
-            resolved.insert(
-                reference,
-                ResolvedRepositoryAction {
-                    program: prepared.program,
-                    inputs: prepared.inputs,
-                },
-            );
+            options
+                .insert_resolved_action(prepared.reference, prepared.action)
+                .map_err(|_| {
+                    TaskFailure::terminal("trusted source-action resolutions exceed their bounds")
+                })?;
         }
-        Ok(resolved)
+        Ok(options)
     }
 
     fn handle_proposed_workflow_action<F>(
@@ -2155,13 +2452,13 @@ impl ScmTaskWorker {
         let repository_link = repository_link
             .ok_or_else(|| TaskFailure::terminal("SCM repository binding is missing"))?;
         let publication = self
-            .control_plane
-            .scm_check_publication_by_provider_run(
+            .store_executor
+            .execute(self.control_plane.scm_check_publication_by_provider_run(
                 &repository.tenant_id,
                 &repository.id,
                 &installation.id,
                 check.check_run_id,
-            )
+            ))
             .map_err(TaskFailure::control)?;
         if publication.state != ScmCheckPublicationState::Published
             || !publication.logical_name.starts_with("proposed-workflow:")
@@ -2172,8 +2469,8 @@ impl ScmTaskWorker {
             .into());
         }
         let check_task = self
-            .control_plane
-            .task(&publication.task_id)
+            .store_executor
+            .execute(self.control_plane.task(&publication.task_id))
             .map_err(TaskFailure::control)?;
         let payload: ScmCheckPublishTask = serde_json::from_value(check_task.payload)
             .map_err(|_| TaskFailure::terminal("proposed-workflow check payload is invalid"))?;
@@ -2195,8 +2492,8 @@ impl ScmTaskWorker {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| TaskFailure::terminal("proposed-workflow approval id is invalid"))?;
         let approval = self
-            .control_plane
-            .approval_request(approval_id)
+            .store_executor
+            .execute(self.control_plane.approval_request(approval_id))
             .map_err(TaskFailure::control)?;
         if approval.kind != ApprovalKind::WorkflowDefinition
             || payload.external_id != format!("runtrue:proposed-workflow:{approval_id}")
@@ -2236,8 +2533,8 @@ impl ScmTaskWorker {
         let finish_now = finish_clock()?;
         let idempotency_key = format!("github-check-action:{}", event.normalized_digest);
         let decision_result = self
-            .control_plane
-            .decide_approval_idempotent(
+            .store_executor
+            .execute(self.control_plane.decide_approval_idempotent(
                 &idempotency_key,
                 approval_id,
                 ApprovalDecision {
@@ -2252,7 +2549,7 @@ impl ScmTaskWorker {
                     decided_unix_ms: finish_now,
                 },
                 finish_now,
-            )
+            ))
             .map_err(TaskFailure::control)?;
         let approved = decision_result.value.status == ApprovalStatus::Approved;
         let revision = ContentDigest::sha256(format!(
@@ -2289,8 +2586,8 @@ impl ScmTaskWorker {
             }
         );
         updated_payload.actions.clear();
-        self.control_plane
-            .enqueue_task(&DurableTask {
+        self.store_executor
+            .execute(self.control_plane.enqueue_task(&DurableTask {
                 id: format!("scm-check-task-{suffix}"),
                 kind: SCM_CHECK_TASK_KIND.to_owned(),
                 payload: serde_json::to_value(updated_payload).map_err(|_| {
@@ -2304,10 +2601,13 @@ impl ScmTaskWorker {
                 last_error: None,
                 created_unix_ms: finish_now,
                 completed_unix_ms: None,
-            })
+            }))
             .map_err(TaskFailure::control)?;
-        self.control_plane
-            .complete_task(&task.id, &self.config.worker_id, finish_now)
+        self.store_executor
+            .execute(
+                self.control_plane
+                    .complete_task(&task.id, &self.config.worker_id, finish_now),
+            )
             .map_err(TaskFailure::control)?;
         Ok(Some(ScmWorkerTick::Completed {
             task_id: task.id.clone(),
@@ -2351,19 +2651,22 @@ impl ScmTaskWorker {
         let identity = StableIdentity::new(event, repository);
         let fetch_id = identity.id("scm-fetch", b"source-fetch", b"");
         let reservation = self
-            .control_plane
-            .reserve_scm_source_fetch(&ReserveScmSourceFetch {
-                id: fetch_id.clone(),
-                tenant_id: repository.tenant_id.clone(),
-                repository_id: repository.id.clone(),
-                installation_id: installation.id.clone(),
-                origin_task_id: task.id.clone(),
-                normalized_event_digest: event.normalized_digest.clone(),
-                source_commit: execution_revision.commit.clone(),
-                base_commit: event.base.as_ref().map(|base| base.commit.clone()),
-                origin_digest: ContentDigest::sha256(repository_link.clone_url.as_bytes()),
-                now_unix_ms: task.created_unix_ms,
-            })
+            .store_executor
+            .execute(
+                self.control_plane
+                    .reserve_scm_source_fetch(&ReserveScmSourceFetch {
+                        id: fetch_id.clone(),
+                        tenant_id: repository.tenant_id.clone(),
+                        repository_id: repository.id.clone(),
+                        installation_id: installation.id.clone(),
+                        origin_task_id: task.id.clone(),
+                        normalized_event_digest: event.normalized_digest.clone(),
+                        source_commit: execution_revision.commit.clone(),
+                        base_commit: event.base.as_ref().map(|base| base.commit.clone()),
+                        origin_digest: ContentDigest::sha256(repository_link.clone_url.as_bytes()),
+                        now_unix_ms: task.created_unix_ms,
+                    }),
+            )
             .map_err(TaskFailure::control)?;
         self.metrics
             .source_fetch_attempts
@@ -2447,14 +2750,14 @@ impl ScmTaskWorker {
             created_unix_ms: task.created_unix_ms,
             verified_unix_ms: None,
         };
-        let snapshot = match self
-            .control_plane
-            .source_snapshot(&repository.tenant_id, &snapshot_id)
-        {
+        let snapshot = match self.store_executor.execute(
+            self.control_plane
+                .source_snapshot(&repository.tenant_id, &snapshot_id),
+        ) {
             Ok(existing) => existing,
             Err(ControlPlaneError::NotFound { .. }) => {
-                self.control_plane
-                    .create_source_snapshot(&building)
+                self.store_executor
+                    .execute(self.control_plane.create_source_snapshot(&building))
                     .map_err(TaskFailure::control)?
                     .value
             }
@@ -2468,29 +2771,31 @@ impl ScmTaskWorker {
         }
         let ready = match snapshot.state {
             SourceSnapshotState::Building => self
-                .control_plane
-                .mark_source_snapshot_ready(
+                .store_executor
+                .execute(self.control_plane.mark_source_snapshot_ready(
                     &repository.tenant_id,
                     &snapshot_id,
                     &manifest_digest,
                     task.created_unix_ms,
-                )
+                ))
                 .map_err(TaskFailure::control)?,
             SourceSnapshotState::Ready => snapshot,
             SourceSnapshotState::Failed | SourceSnapshotState::Retired => {
                 return Err(TaskFailure::terminal("durable source snapshot is unavailable").into())
             }
         };
-        self.control_plane
-            .record_scm_fetch_snapshot_ready(&RecordScmFetchSnapshotReady {
-                tenant_id: repository.tenant_id.clone(),
-                fetch_id: fetch_id.clone(),
-                token_scope_digest: fetched.token_scope_digest.clone(),
-                mirror_identity_digest: fetched.mirror_identity_digest.clone(),
-                tree_manifest_digest: manifest_digest.clone(),
-                source_snapshot_id: snapshot_id.clone(),
-                now_unix_ms: task.created_unix_ms,
-            })
+        self.store_executor
+            .execute(self.control_plane.record_scm_fetch_snapshot_ready(
+                &RecordScmFetchSnapshotReady {
+                    tenant_id: repository.tenant_id.clone(),
+                    fetch_id: fetch_id.clone(),
+                    token_scope_digest: fetched.token_scope_digest.clone(),
+                    mirror_identity_digest: fetched.mirror_identity_digest.clone(),
+                    tree_manifest_digest: manifest_digest.clone(),
+                    source_snapshot_id: snapshot_id.clone(),
+                    now_unix_ms: task.created_unix_ms,
+                },
+            ))
             .map_err(TaskFailure::control)?;
         let mut requested_commits = vec![execution_revision.commit.clone()];
         if let Some(base) = &event.base {
@@ -2537,13 +2842,13 @@ impl ScmTaskWorker {
         }
         let (repository, installation, repository_link) = if self.source_fetcher.is_some() {
             let (repository, installation, link) = self
-                .control_plane
-                .github_repository_for_event(
+                .store_executor
+                .execute(self.control_plane.github_repository_for_event(
                     &event.installation_id,
                     &event.repository.external_id,
                     &event.repository.owner,
                     &event.repository.name,
-                )
+                ))
                 .map_err(TaskFailure::from_repository_lookup)?;
             (repository, Some(installation), Some(link))
         } else {
@@ -2553,8 +2858,13 @@ impl ScmTaskWorker {
                 );
             }
             (
-                self.control_plane
-                    .repository_by_owner_name(&event.repository.owner, &event.repository.name)
+                self.store_executor
+                    .execute(
+                        self.control_plane.repository_by_owner_name(
+                            &event.repository.owner,
+                            &event.repository.name,
+                        ),
+                    )
                     .map_err(TaskFailure::from_repository_lookup)?,
                 None,
                 None,
@@ -2569,8 +2879,11 @@ impl ScmTaskWorker {
             );
         }
         let configured_workflow_directory = self
-            .control_plane
-            .repository_workflow_directory(&repository.tenant_id, &repository.id)
+            .store_executor
+            .execute(
+                self.control_plane
+                    .repository_workflow_directory(&repository.tenant_id, &repository.id),
+            )
             .map_err(TaskFailure::control)?
             .unwrap_or_else(|| self.config.workflow_directory.clone());
         if requested_workflow_path
@@ -2593,11 +2906,19 @@ impl ScmTaskWorker {
 
         if matches!(event.event_type, EventType::Ping) {
             let finish_now = finish_clock()?;
-            if self.control_plane.recovery_state()?.safe_mode {
+            if self
+                .store_executor
+                .execute(self.control_plane.recovery_state())?
+                .safe_mode
+            {
                 return Err(TaskFailure::control(ControlPlaneError::InstallationSafeMode).into());
             }
-            self.control_plane
-                .complete_task(&task.id, &self.config.worker_id, finish_now)
+            self.store_executor
+                .execute(self.control_plane.complete_task(
+                    &task.id,
+                    &self.config.worker_id,
+                    finish_now,
+                ))
                 .map_err(TaskFailure::control)?;
             return Ok(ScmWorkerTick::Completed {
                 task_id: task.id.clone(),
@@ -2674,18 +2995,22 @@ impl ScmTaskWorker {
                     })
                     .collect::<Result<Vec<_>, TaskFailure>>()?;
                 let finish_now = finish_clock()?;
-                if self.control_plane.recovery_state()?.safe_mode {
+                if self
+                    .store_executor
+                    .execute(self.control_plane.recovery_state())?
+                    .safe_mode
+                {
                     return Err(
                         TaskFailure::control(ControlPlaneError::InstallationSafeMode).into(),
                     );
                 }
-                self.control_plane
-                    .complete_task_with_followups(
+                self.store_executor
+                    .execute(self.control_plane.complete_task_with_followups(
                         &task.id,
                         &self.config.worker_id,
                         &followups,
                         finish_now,
-                    )
+                    ))
                     .map_err(TaskFailure::control)?;
                 return Ok(ScmWorkerTick::Completed {
                     task_id: task.id.clone(),
@@ -2708,17 +3033,18 @@ impl ScmTaskWorker {
         } else {
             execution_revision.commit.as_str()
         };
-        let resolved_repository_actions = self.resolve_repository_actions(
+        let frontend_options =
+            workflow_frontends::options(self.config.default_job_container_image.as_deref())
+                .map_err(|_| TaskFailure::terminal("workflow frontend configuration is invalid"))?;
+        let frontend_options = self.resolve_repository_actions(
             prepared_source.repository.repository(),
             action_revision,
             &workflow_path,
             &repository.tenant_id,
             &action_installation_id,
+            frontend_options,
         )?;
-        let durable_repository_actions = serde_json::to_value(&resolved_repository_actions)
-            .map_err(|_| {
-                TaskFailure::terminal("prepared repository-action mapping is not durable")
-            })?;
+        let durable_repository_actions = durable_resolved_actions(&frontend_options)?;
         let reusable_source_provider = MirrorReusableSourceProvider {
             mirror_root: self.mirror_root.as_ref(),
             current_repository: prepared_source.repository.repository(),
@@ -2726,14 +3052,17 @@ impl ScmTaskWorker {
             current_name: &repository.name,
             endpoints: &self.config.github_provider_endpoints,
         };
+        let secret_resolver = StoreSecretResolver::new(
+            self.control_plane.as_ref(),
+            &self.store_executor,
+            &repository,
+        );
         let mut planner = TrustedPlanner::new(prepared_source.repository.repository())
-            .with_source_frontends(workflow_frontends())
+            .with_source_frontends(workflow_frontends::registry())
+            .with_source_frontend_options(frontend_options)
             .with_reusable_source_provider(&reusable_source_provider)
-            .with_resolved_repository_actions(resolved_repository_actions)
+            .with_secret_metadata_resolver(&secret_resolver)
             .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
-        if let Some(image) = &self.config.default_job_container_image {
-            planner = planner.with_default_job_container_image(image.clone());
-        }
         if let Some(snapshot) = &prepared_source.source_snapshot {
             planner = planner.with_source_snapshot_digest(snapshot.tree_manifest_digest.clone());
         }
@@ -2773,11 +3102,19 @@ impl ScmTaskWorker {
 
         if !workflow_watches_event(&planned.execution.triggers, &event) {
             let finish_now = finish_clock()?;
-            if self.control_plane.recovery_state()?.safe_mode {
+            if self
+                .store_executor
+                .execute(self.control_plane.recovery_state())?
+                .safe_mode
+            {
                 return Err(TaskFailure::control(ControlPlaneError::InstallationSafeMode).into());
             }
-            self.control_plane
-                .complete_task(&task.id, &self.config.worker_id, finish_now)
+            self.store_executor
+                .execute(self.control_plane.complete_task(
+                    &task.id,
+                    &self.config.worker_id,
+                    finish_now,
+                ))
                 .map_err(TaskFailure::control)?;
             return Ok(ScmWorkerTick::Completed {
                 task_id: task.id.clone(),
@@ -2842,7 +3179,7 @@ impl ScmTaskWorker {
                         &event,
                         &repository,
                         &identity,
-                        compilation,
+                        compilation.as_ref(),
                         &planned.source_inputs,
                         ScmExecutionRole::ProposedDefinition,
                         &proposed_identity_suffix(workflow_suffix),
@@ -2928,15 +3265,18 @@ impl ScmTaskWorker {
         let idempotency_key = identity.id("scm", b"idempotency", workflow_suffix);
         let finish_now = finish_clock()?;
         let result = self
-            .control_plane
-            .complete_scm_task_with_executions_idempotent(
-                &task.id,
-                &self.config.worker_id,
-                finish_now,
-                &idempotency_key,
-                &executions,
-                proposed_analysis.as_ref(),
-                &self.signing_key.verifying_key(),
+            .store_executor
+            .execute(
+                self.control_plane
+                    .complete_scm_task_with_executions_idempotent(
+                        &task.id,
+                        &self.config.worker_id,
+                        finish_now,
+                        &idempotency_key,
+                        &executions,
+                        proposed_analysis.as_ref(),
+                        &self.signing_key.verifying_key(),
+                    ),
             )
             .map_err(TaskFailure::control)?;
         if prepared_source.fetch_id.is_some() {
@@ -3021,6 +3361,22 @@ impl ScmTaskWorker {
             approval_subject_digest: compilation.approval_subject_digest.clone(),
             risk_score: compilation.risk_report.score,
         };
+        let workflow_frontend_report = compilation
+            .workflow_frontend_report
+            .as_ref()
+            .map(|report| {
+                if compilation.capsule.context.workflow_frontend.is_none() {
+                    return Err(TaskFailure::terminal(
+                        "workflow frontend report is missing signed provenance",
+                    ));
+                }
+                Ok::<WorkflowFrontendReportRecord, TaskFailure>(WorkflowFrontendReportRecord {
+                    capsule_id: capsule_id.clone(),
+                    media_type: report.media_type.clone(),
+                    bytes: report.bytes.clone(),
+                })
+            })
+            .transpose()?;
         let jobs = compilation
             .capsule
             .jobs
@@ -3152,6 +3508,7 @@ impl ScmTaskWorker {
         Ok(PreparedScmExecution {
             capsule,
             metadata,
+            workflow_frontend_report,
             approvals,
             run,
             continuation,
@@ -3174,35 +3531,41 @@ impl ScmTaskWorker {
             return Err(TaskFailure::terminal("invalid SCM continuation approval id").into());
         }
         let begin_now = finish_clock()?;
-        let pending = match self.control_plane.begin_scm_continuation(
-            &task.id,
-            &self.config.worker_id,
-            &payload.pending_execution_id,
-            begin_now,
-        )? {
-            ScmContinuationResolution::Ready(pending) => pending,
-            ScmContinuationResolution::RunCreated(run) => {
-                return Ok(ScmWorkerTick::Completed {
-                    task_id: task.id.clone(),
-                    run_id: Some(run.id),
-                    replayed: true,
-                })
-            }
-            ScmContinuationResolution::Waiting(_) | ScmContinuationResolution::Closed(_) => {
-                return Ok(ScmWorkerTick::Completed {
-                    task_id: task.id.clone(),
-                    run_id: None,
-                    replayed: false,
-                })
-            }
-        };
+        let pending =
+            match self
+                .store_executor
+                .execute(self.control_plane.begin_scm_continuation(
+                    &task.id,
+                    &self.config.worker_id,
+                    &payload.pending_execution_id,
+                    begin_now,
+                ))? {
+                ScmContinuationResolution::Ready(pending) => pending,
+                ScmContinuationResolution::RunCreated(run) => {
+                    return Ok(ScmWorkerTick::Completed {
+                        task_id: task.id.clone(),
+                        run_id: Some(run.id),
+                        replayed: true,
+                    })
+                }
+                ScmContinuationResolution::Waiting(_) | ScmContinuationResolution::Closed(_) => {
+                    return Ok(ScmWorkerTick::Completed {
+                        task_id: task.id.clone(),
+                        run_id: None,
+                        replayed: false,
+                    })
+                }
+            };
         let pending_repository = self
-            .control_plane
-            .repository(&pending.repository_id)
+            .store_executor
+            .execute(self.control_plane.repository(&pending.repository_id))
             .map_err(TaskFailure::control)?;
         let configured_workflow_directory = self
-            .control_plane
-            .repository_workflow_directory(&pending_repository.tenant_id, &pending_repository.id)
+            .store_executor
+            .execute(self.control_plane.repository_workflow_directory(
+                &pending_repository.tenant_id,
+                &pending_repository.id,
+            ))
             .map_err(TaskFailure::control)?
             .unwrap_or_else(|| self.config.workflow_directory.clone());
         if pending.context.source_identity.policy_version_ids != self.config.policy_version_ids
@@ -3236,13 +3599,13 @@ impl ScmTaskWorker {
         let (repository, continuation_repository, source_snapshot) =
             if let Some(fetcher) = &self.source_fetcher {
                 let (repository, installation, link) = self
-                    .control_plane
-                    .github_repository_for_event(
+                    .store_executor
+                    .execute(self.control_plane.github_repository_for_event(
                         &event.installation_id,
                         &event.repository.external_id,
                         &event.repository.owner,
                         &event.repository.name,
-                    )
+                    ))
                     .map_err(TaskFailure::from_repository_lookup)?;
                 let fetched = fetcher
                     .fetch(&ScmSourceFetchRequest {
@@ -3260,8 +3623,11 @@ impl ScmTaskWorker {
                     TaskFailure::terminal("SCM continuation lost its source snapshot")
                 })?;
                 let snapshot = self
-                    .control_plane
-                    .source_snapshot(&repository.tenant_id, snapshot_id)
+                    .store_executor
+                    .execute(
+                        self.control_plane
+                            .source_snapshot(&repository.tenant_id, snapshot_id),
+                    )
                     .map_err(TaskFailure::control)?;
                 if snapshot.state != SourceSnapshotState::Ready
                     || snapshot.repository_id != repository.id
@@ -3295,10 +3661,13 @@ impl ScmTaskWorker {
                         finish_clock()?,
                     );
                 }
-                let repository = self
-                    .control_plane
-                    .repository_by_owner_name(&event.repository.owner, &event.repository.name)
-                    .map_err(TaskFailure::from_repository_lookup)?;
+                let repository =
+                    self.store_executor
+                        .execute(self.control_plane.repository_by_owner_name(
+                            &event.repository.owner,
+                            &event.repository.name,
+                        ))
+                        .map_err(TaskFailure::from_repository_lookup)?;
                 let git = self
                     .mirror_root
                     .as_ref()
@@ -3326,18 +3695,24 @@ impl ScmTaskWorker {
             current_name: &repository.name,
             endpoints: &self.config.github_provider_endpoints,
         };
-        let resolved_repository_actions: BTreeMap<String, ResolvedRepositoryAction> =
-            serde_json::from_value(pending.context.resolved_repository_actions.clone()).map_err(
-                |_| TaskFailure::terminal("durable repository-action mapping is invalid"),
-            )?;
+        let frontend_options =
+            workflow_frontends::options(self.config.default_job_container_image.as_deref())
+                .map_err(|_| TaskFailure::terminal("workflow frontend configuration is invalid"))?;
+        let frontend_options = restore_resolved_actions(
+            frontend_options,
+            pending.context.resolved_repository_actions.clone(),
+        )?;
+        let secret_resolver = StoreSecretResolver::new(
+            self.control_plane.as_ref(),
+            &self.store_executor,
+            &repository,
+        );
         let mut planner = TrustedPlanner::new(continuation_repository.repository())
-            .with_source_frontends(workflow_frontends())
+            .with_source_frontends(workflow_frontends::registry())
+            .with_source_frontend_options(frontend_options.clone())
             .with_reusable_source_provider(&reusable_source_provider)
-            .with_resolved_repository_actions(resolved_repository_actions.clone())
+            .with_secret_metadata_resolver(&secret_resolver)
             .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
-        if let Some(image) = &self.config.default_job_container_image {
-            planner = planner.with_default_job_container_image(image.clone());
-        }
         if let Some(snapshot) = &source_snapshot {
             planner = planner.with_source_snapshot_digest(snapshot.tree_manifest_digest.clone());
         }
@@ -3376,8 +3751,11 @@ impl ScmTaskWorker {
         .map_err(TaskFailure::from_planner)?;
         let replanned = if pending.role == ScmExecutionRole::ProposedDefinition {
             let approvals = self
-                .control_plane
-                .scm_pending_execution_approvals(&pending.id)
+                .store_executor
+                .execute(
+                    self.control_plane
+                        .scm_pending_execution_approvals(&pending.id),
+                )
                 .map_err(TaskFailure::control)?;
             let workflow_approval = approvals
                 .iter()
@@ -3393,13 +3771,11 @@ impl ScmTaskWorker {
                 approval: workflow_approval,
             };
             let mut planner = TrustedPlanner::new(continuation_repository.repository())
-                .with_source_frontends(workflow_frontends())
+                .with_source_frontends(workflow_frontends::registry())
+                .with_source_frontend_options(frontend_options)
                 .with_reusable_source_provider(&reusable_source_provider)
-                .with_resolved_repository_actions(resolved_repository_actions)
+                .with_secret_metadata_resolver(&secret_resolver)
                 .with_scm_api_url(self.config.github_provider_endpoints.api_origin());
-            if let Some(image) = &self.config.default_job_container_image {
-                planner = planner.with_default_job_container_image(image.clone());
-            }
             if let Some(snapshot) = &source_snapshot {
                 planner =
                     planner.with_source_snapshot_digest(snapshot.tree_manifest_digest.clone());
@@ -3485,17 +3861,20 @@ impl ScmTaskWorker {
         };
         let finish_now = finish_clock()?;
         match self
-            .control_plane
-            .complete_scm_continuation_with_run_idempotent(
-                &task.id,
-                &self.config.worker_id,
-                &pending.id,
-                finish_now,
-                &record,
-                &self.signing_key.verifying_key(),
-                &metadata,
-                &revalidated_context,
-                &pending.run,
+            .store_executor
+            .execute(
+                self.control_plane
+                    .complete_scm_continuation_with_run_idempotent(
+                        &task.id,
+                        &self.config.worker_id,
+                        &pending.id,
+                        finish_now,
+                        &record,
+                        &self.signing_key.verifying_key(),
+                        &metadata,
+                        &revalidated_context,
+                        &pending.run,
+                    ),
             )
             .map_err(TaskFailure::control)?
         {
@@ -3521,14 +3900,14 @@ impl ScmTaskWorker {
         reason: &str,
         now_unix_ms: u64,
     ) -> Result<ScmWorkerTick, ProcessError> {
-        self.control_plane
-            .close_scm_continuation_as_stale(
+        self.store_executor
+            .execute(self.control_plane.close_scm_continuation_as_stale(
                 &task.id,
                 &self.config.worker_id,
                 pending_execution_id,
                 reason,
                 now_unix_ms,
-            )
+            ))
             .map_err(TaskFailure::control)?;
         Ok(ScmWorkerTick::Completed {
             task_id: task.id.clone(),
@@ -3549,43 +3928,57 @@ impl ScmTaskWorker {
         ) {
             return Err(failure.source.expect("checked source").into());
         }
-        let retry_at =
-            if failure.retryable && task.attempts < self.config.max_attempts {
-                let exponential = self.retry_delay_ms(task.attempts)?;
-                let requested = failure.retry_after_ms.unwrap_or(exponential);
-                let bounded_delay = requested.min(duration_ms(self.config.retry_max)?);
-                Some(now_unix_ms.checked_add(bounded_delay).ok_or(
-                    ControlPlaneError::IntegerRange {
+        let recovery_deadline = if failure.retryable && task.kind == SCM_TASK_KIND {
+            task.created_unix_ms
+                .checked_add(SCM_EVENT_RECOVERY_WINDOW_MS)
+                .filter(|deadline| now_unix_ms < *deadline)
+        } else {
+            None
+        };
+        let retry_at = if failure.retryable
+            && (task.attempts < self.config.max_attempts || recovery_deadline.is_some())
+        {
+            let exponential = self.retry_delay_ms(task.attempts)?;
+            let requested = failure.retry_after_ms.unwrap_or(exponential);
+            let bounded_delay = requested.min(duration_ms(self.config.retry_max)?);
+            let requested_retry =
+                now_unix_ms
+                    .checked_add(bounded_delay)
+                    .ok_or(ControlPlaneError::IntegerRange {
                         field: "SCM task retry time",
-                    },
-                )?)
-            } else {
-                None
-            };
+                    })?;
+            Some(
+                recovery_deadline.map_or(requested_retry, |deadline| requested_retry.min(deadline)),
+            )
+        } else {
+            None
+        };
         let error = bounded_failure_message(failure.message);
         if task.kind == SCM_CONTINUATION_TASK_KIND && retry_at.is_none() {
             let payload: ScmContinuationPayload = serde_json::from_value(task.payload.clone())
                 .map_err(|_| ControlPlaneError::InvalidInput("invalid SCM continuation payload"))?;
-            self.control_plane.close_scm_continuation_as_stale(
-                &task.id,
-                &self.config.worker_id,
-                &payload.pending_execution_id,
-                &error,
-                now_unix_ms,
-            )?;
+            self.store_executor
+                .execute(self.control_plane.close_scm_continuation_as_stale(
+                    &task.id,
+                    &self.config.worker_id,
+                    &payload.pending_execution_id,
+                    &error,
+                    now_unix_ms,
+                ))?;
             return Ok(ScmWorkerTick::Completed {
                 task_id: task.id.clone(),
                 run_id: None,
                 replayed: false,
             });
         }
-        self.control_plane.fail_task(
+        self.store_executor.execute(self.control_plane.fail_task(
             &task.id,
             &self.config.worker_id,
             &error,
             now_unix_ms,
             retry_at,
-        )?;
+            recovery_deadline.filter(|_| retry_at.is_some()),
+        ))?;
         if retry_at.is_some() {
             self.metrics.task_retries.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -4057,13 +4450,7 @@ impl TaskFailure {
     }
 
     fn control(source: ControlPlaneError) -> Self {
-        let retryable = matches!(
-            &source,
-            ControlPlaneError::Sqlite(_)
-                | ControlPlaneError::Poisoned
-                | ControlPlaneError::InstallationSafeMode
-                | ControlPlaneError::TaskLeaseExpired
-        );
+        let retryable = retryable_control_plane_error(&source);
         let message = match &source {
             ControlPlaneError::InvalidInput(message) => message,
             ControlPlaneError::IdempotencyConflict => {
@@ -4087,7 +4474,7 @@ impl TaskFailure {
     fn from_repository_lookup(source: ControlPlaneError) -> Self {
         match source {
             ControlPlaneError::NotFound { .. } => {
-                Self::retryable("SCM repository is not registered")
+                Self::terminal("SCM repository is not registered")
             }
             ControlPlaneError::AmbiguousRepositoryIdentity { .. } => {
                 Self::terminal("SCM repository identity is ambiguous")
@@ -4113,10 +4500,12 @@ impl TaskFailure {
 
     fn from_source_fetch(source: ScmSourceFetchError) -> Self {
         match source {
-            ScmSourceFetchError::Unavailable | ScmSourceFetchError::CredentialUnavailable => {
+            ScmSourceFetchError::Unavailable => {
                 Self::retryable("authenticated SCM source fetch is temporarily unavailable")
             }
-            ScmSourceFetchError::BindingMismatch | ScmSourceFetchError::Rejected => {
+            ScmSourceFetchError::CredentialUnavailable
+            | ScmSourceFetchError::BindingMismatch
+            | ScmSourceFetchError::Rejected => {
                 Self::terminal("authenticated SCM source fetch was rejected")
             }
         }
@@ -4129,6 +4518,18 @@ impl TaskFailure {
             }
             _ => Self::terminal("source snapshot construction rejected repository contents"),
         }
+    }
+}
+
+fn retryable_control_plane_error(error: &ControlPlaneError) -> bool {
+    match error {
+        ControlPlaneError::Sqlite(_)
+        | ControlPlaneError::Poisoned
+        | ControlPlaneError::InstallationSafeMode
+        | ControlPlaneError::TaskLeaseExpired => true,
+        #[cfg(feature = "postgres")]
+        ControlPlaneError::Postgres(_) => true,
+        _ => false,
     }
 }
 
@@ -4480,7 +4881,7 @@ fn workflow_path_allowed(configured_workflow_directory: &str, path: &str) -> boo
     if !in_configured_directory || !(path.ends_with(".yml") || path.ends_with(".yaml")) {
         return false;
     }
-    workflow_frontends().frontend_for(path).is_ok()
+    workflow_frontends::registry().frontend_for(path).is_ok()
 }
 
 fn workflow_identity_suffix(path: &str) -> &[u8] {
@@ -4686,12 +5087,73 @@ fn unix_ms() -> Result<u64, ScmWorkerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtrue_control_plane::{DurableTaskStatus, RepositoryRecord};
+    use runtrue_control_plane::{ControlPlane, DurableTaskStatus, RepositoryRecord};
     use runtrue_policy::{ApprovalDecision, Decision};
     use runtrue_scm::{
         ActorIdentity, GitRevision, PullRequestAction, PullRequestEvent, RepositoryIdentity,
     };
     use std::process::Command;
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn postgres_persistence_errors_are_retryable() {
+        let failure = TaskFailure::control(ControlPlaneError::Postgres(sqlx::Error::PoolTimedOut));
+
+        assert!(failure.retryable);
+        assert!(matches!(
+            failure.source,
+            Some(ControlPlaneError::Postgres(sqlx::Error::PoolTimedOut))
+        ));
+    }
+
+    #[test]
+    fn source_fetch_authorization_failures_are_terminal() {
+        assert!(TaskFailure::from_source_fetch(ScmSourceFetchError::Unavailable).retryable);
+        for error in [
+            ScmSourceFetchError::CredentialUnavailable,
+            ScmSourceFetchError::BindingMismatch,
+            ScmSourceFetchError::Rejected,
+        ] {
+            assert!(!TaskFailure::from_source_fetch(error).retryable);
+        }
+    }
+
+    #[test]
+    fn store_executor_drives_store_futures_from_a_sync_worker_thread() {
+        std::thread::spawn(|| {
+            let executor = StoreExecutor::new().unwrap();
+            let store: Arc<dyn ControlPlaneStore> =
+                Arc::new(ControlPlane::open_in_memory("installation-executor", 1).unwrap());
+
+            let recovery = executor.execute(store.recovery_state()).unwrap();
+
+            assert!(!recovery.safe_mode);
+        })
+        .join()
+        .expect("SCM persistence execution must not panic");
+    }
+
+    #[test]
+    fn store_executor_rejects_nested_tokio_runtime_without_panicking() {
+        let outer_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let result = outer_runtime.block_on(async {
+            let executor = StoreExecutor::new().unwrap();
+            let store: Arc<dyn ControlPlaneStore> =
+                Arc::new(ControlPlane::open_in_memory("installation-executor", 1).unwrap());
+            executor.execute(store.recovery_state())
+        });
+
+        assert!(matches!(
+            result,
+            Err(ControlPlaneError::InvalidInput(
+                "synchronous SCM persistence executor entered from a Tokio runtime"
+            ))
+        ));
+    }
 
     #[cfg(unix)]
     fn private_directory(path: &Path) {
@@ -4734,6 +5196,66 @@ mod tests {
         assert_eq!(
             bounded_unified_definition_diff(definition, definition),
             None
+        );
+    }
+
+    #[test]
+    fn native_workflow_discovery_does_not_require_an_external_frontend() {
+        let directory = tempfile::tempdir().unwrap();
+        private_directory(directory.path());
+        let repository_path = directory.path().join("repository");
+        private_directory(&repository_path);
+        git(&repository_path, &["init", "--quiet"]);
+        git(
+            &repository_path,
+            &["config", "user.email", "worker@runtrue.invalid"],
+        );
+        git(&repository_path, &["config", "user.name", "Worker Test"]);
+        let workflow_directory = repository_path.join(".runtrue/workflows");
+        fs::create_dir_all(&workflow_directory).unwrap();
+        fs::write(workflow_directory.join("ci.yaml"), "version: 1\njobs: {}\n").unwrap();
+        git(&repository_path, &["add", ".runtrue/workflows/ci.yaml"]);
+        git(&repository_path, &["commit", "--quiet", "-m", "workflow"]);
+        let commit = git(&repository_path, &["rev-parse", "HEAD"]);
+        let repository = GitRepository::open(&repository_path, GitLimits::default()).unwrap();
+        let config = ScmWorkerConfig::new(directory.path().join("mirrors"), "worker-1");
+
+        assert_eq!(
+            discover_workflow_paths(&repository, &commit, &config.workflow_directory).unwrap(),
+            vec![format!("{DEFAULT_SCM_WORKFLOW_DIRECTORY}/ci.yaml")]
+        );
+    }
+
+    #[cfg(feature = "github-actions")]
+    #[test]
+    fn registered_frontend_drives_workflow_discovery() {
+        let directory = tempfile::tempdir().unwrap();
+        private_directory(directory.path());
+        let repository_path = directory.path().join("repository");
+        private_directory(&repository_path);
+        git(&repository_path, &["init", "--quiet"]);
+        git(
+            &repository_path,
+            &["config", "user.email", "worker@runtrue.invalid"],
+        );
+        git(&repository_path, &["config", "user.name", "Worker Test"]);
+        let workflow_directory = repository_path.join(".github/workflows");
+        fs::create_dir_all(&workflow_directory).unwrap();
+        fs::write(
+            workflow_directory.join("ci.yml"),
+            "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n",
+        )
+        .unwrap();
+        git(&repository_path, &["add", ".github/workflows/ci.yml"]);
+        git(&repository_path, &["commit", "--quiet", "-m", "workflow"]);
+        let commit = git(&repository_path, &["rev-parse", "HEAD"]);
+        let repository = GitRepository::open(&repository_path, GitLimits::default()).unwrap();
+        let mut config = ScmWorkerConfig::new(directory.path().join("mirrors"), "worker-1");
+        config.workflow_directory = ".github/workflows".to_owned();
+
+        assert_eq!(
+            discover_workflow_paths(&repository, &commit, &config.workflow_directory).unwrap(),
+            vec![".github/workflows/ci.yml"]
         );
     }
 
@@ -5393,7 +5915,7 @@ mod tests {
         let mut config = ScmWorkerConfig::new(directory.path(), "scm-worker");
         config.policy_version_ids = vec!["policy-v1".to_owned()];
         let worker = ScmTaskWorker::new(
-            Arc::clone(&control),
+            control.clone(),
             Arc::new(CapsuleSigningKey::from_seed([71_u8; 32])),
             config,
             None,

@@ -10,6 +10,7 @@ rust-version.workspace = true
 runtrue-attest.workspace = true
 runtrue-engine.workspace = true
 runtrue-model.workspace = true
+runtrue-runtime-metrics.workspace = true
 runtrue-workflow-ir.workspace = true
 hex.workspace = true
 hmac.workspace = true

@@ -32,7 +32,7 @@ async fn github_app_setup_binds_exact_tenant_repository_and_one_use_callback() {
             "github-api-setup",
             json!({
                 "tenant_id": "tenant-browser",
-                "return_path": "/ui/github/installations?github=installed"
+                "return_path": "/?github=installed"
             }),
         )
     };
@@ -125,10 +125,7 @@ async fn github_app_setup_binds_exact_tenant_repository_and_one_use_callback() {
         .await
         .unwrap();
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
-        callback.headers()[LOCATION],
-        "/ui/github/installations?github=installed"
-    );
+    assert_eq!(callback.headers()[LOCATION], "/?github=installed");
     assert_github_callback_is_protected(&callback);
 
     let callback_replay = application
@@ -615,7 +612,7 @@ async fn github_browser_api_requires_session_csrf_and_never_leaks_credentials() 
         fields.push("idempotency_key=github-ui-setup".to_owned());
         Request::builder()
             .method("POST")
-            .uri("/ui/github/installations/start")
+            .uri("/github/installations/start")
             .header("cookie", &cookies)
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(Body::from(fields.join("&")))
@@ -635,7 +632,7 @@ async fn github_browser_api_requires_session_csrf_and_never_leaks_credentials() 
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/ui/github/installations/start")
+                .uri("/github/installations/start")
                 .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
                     "csrf_token={csrf}&idempotency_key=anonymous-ui-setup"
@@ -770,6 +767,143 @@ async fn github_browser_manages_organization_secrets_and_variables_in_tenant_sco
         .await
         .unwrap();
     assert_eq!(delete_variable.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn github_secret_inventory_and_project_retargeting_enforce_each_target_policy() {
+    let (control, oidc, _, _, application) = github_human_application();
+    for (id, name) in [
+        ("repo-secret-visible", "visible"),
+        ("repo-secret-denied", "denied"),
+    ] {
+        control
+            .create_repository(&tenant_repository(id, "tenant-browser", name))
+            .unwrap();
+        control
+            .store_secret_metadata(&runtrue_control_plane::SecretMetadataReference {
+                id: format!("secret-{name}"),
+                tenant_id: "tenant-browser".to_owned(),
+                scope: format!("repository:{id}"),
+                name: format!("{name}-token"),
+                provider: "external-test".to_owned(),
+                provider_reference: Some(format!("provider://{name}")),
+                secret_type: "opaque".to_owned(),
+                status: "active".to_owned(),
+                current_version: None,
+                created_unix_ms: 1,
+                updated_unix_ms: 1,
+            })
+            .unwrap();
+    }
+    control
+        .put_configuration_project(&runtrue_control_plane::PutConfigurationProject {
+            id: "project-protected".to_owned(),
+            tenant_id: "tenant-browser".to_owned(),
+            name: "protected".to_owned(),
+            description: String::new(),
+            status: "active".to_owned(),
+            expected_version: 0,
+            targets: vec![runtrue_control_plane::ConfigurationProjectTarget {
+                kind: runtrue_control_plane::ConfigurationProjectTargetKind::Repository,
+                id: "repo-secret-denied".to_owned(),
+                created_unix_ms: 1,
+            }],
+            updated_unix_ms: 1,
+        })
+        .unwrap();
+
+    let mut policy = ActivePolicyBundleState::new("tenant-browser").unwrap();
+    policy
+        .replace_emergency_denies(
+            DenyFirstPolicy {
+                emergency_denies: vec![EmergencyDeny {
+                    id: "deny-protected-secret-target".to_owned(),
+                    actions: BTreeSet::from([
+                        "ReadSecretMetadata".to_owned(),
+                        "WriteSecret".to_owned(),
+                    ]),
+                    repository_id: Some("repo-secret-denied".to_owned()),
+                    minimum_risk_score: None,
+                    deny_privileged: false,
+                    deny_untrusted: false,
+                }],
+            },
+            0,
+        )
+        .unwrap();
+    control
+        .replace_emergency_denies(
+            &policy,
+            0,
+            &R9AuditMetadata {
+                actor_id: "user-<browser>".to_owned(),
+                correlation_id: "secret-scope-policy-test".to_owned(),
+                occurred_unix_ms: unix_ms_now(),
+            },
+        )
+        .unwrap();
+
+    let (login_cookie, oidc_state, nonce) = begin_human_login(&application).await;
+    oidc.respond(&nonce, "subject-browser");
+    let login = finish_human_login(&application, &login_cookie, &oidc_state).await;
+    let cookies = browser_cookie_header(&login);
+    let session = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/session")
+                .header("cookie", &cookies)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let csrf = json_body(session).await["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let inventory = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/ui/secrets")
+                .header("cookie", &cookies)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(inventory.status(), StatusCode::OK);
+    let inventory = json_body(inventory).await;
+    let encoded = inventory.to_string();
+    assert!(!encoded.contains("denied-token"));
+    assert!(!encoded.contains("repo-secret-denied"));
+    assert!(inventory["secrets"].as_array().unwrap().is_empty());
+    assert!(inventory["projects"].as_array().unwrap().is_empty());
+    assert!(inventory["repositories"].as_array().unwrap().is_empty());
+
+    let retarget = application
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/ui/secret-projects")
+                .header("cookie", &cookies)
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&id=project-protected&expected_version=1&name=protected&targets=%5B%5D"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retarget.status(), StatusCode::FORBIDDEN);
+    let project = control
+        .configuration_project("tenant-browser", "project-protected")
+        .unwrap();
+    assert_eq!(project.version, 1);
+    assert_eq!(project.targets.len(), 1);
+    assert_eq!(project.targets[0].id, "repo-secret-denied");
 }
 
 #[tokio::test]
@@ -1052,7 +1186,11 @@ async fn github_webhook_rejects_bad_hmac_and_durably_deduplicates_valid_delivery
         .unwrap();
     assert_eq!(accepted.status(), StatusCode::ACCEPTED);
 
-    let replay = application.oneshot(request(signature)).await.unwrap();
+    let replay = application
+        .clone()
+        .oneshot(request(signature))
+        .await
+        .unwrap();
     assert_eq!(replay.status(), StatusCode::ACCEPTED);
 
     let digest = ContentDigest::sha256(delivery_id.as_bytes());
@@ -1065,4 +1203,57 @@ async fn github_webhook_rejects_bad_hmac_and_durably_deduplicates_valid_delivery
     assert_eq!(task.payload["event_id"], delivery_id);
     assert!(task.payload["provider"].is_string());
     assert_eq!(task.attempts, 0);
+
+    let event_id = format!(
+        "event-scm-github-{}",
+        digest.as_str().trim_start_matches("sha256:")
+    );
+    let event = application
+        .clone()
+        .oneshot(api_request(
+            "GET",
+            &format!("/api/v1/events/{event_id}"),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(event.status(), StatusCode::OK);
+    let event = json_body(event).await;
+    assert_eq!(event["source"], "backend");
+    assert_eq!(event["status"], "pending");
+
+    let claim_now = task.created_unix_ms + 1;
+    let claimed = control_plane
+        .claim_task_by_kind("scm-replay-test", "scm.event", claim_now, 1_000)
+        .unwrap()
+        .unwrap();
+    control_plane
+        .fail_task(
+            &claimed.id,
+            "scm-replay-test",
+            "transient test failure",
+            claim_now + 1,
+            None,
+            None,
+        )
+        .unwrap();
+    let replay_request = || {
+        idempotent_request(
+            "POST",
+            &format!("/api/v1/events/{event_id}/replay"),
+            "replay-delivery-123",
+            json!({}),
+        )
+    };
+    let queued = application.clone().oneshot(replay_request()).await.unwrap();
+    assert_eq!(queued.status(), StatusCode::ACCEPTED);
+    assert_eq!(queued.headers()["idempotency-replayed"], "false");
+    let queued_body = json_body(queued).await;
+    let replay_task_id = queued_body["task_id"].as_str().unwrap().to_owned();
+    let queued_again = application.oneshot(replay_request()).await.unwrap();
+    assert_eq!(queued_again.status(), StatusCode::ACCEPTED);
+    assert_eq!(queued_again.headers()["idempotency-replayed"], "true");
+    let replay_task = control_plane.task(&replay_task_id).unwrap();
+    assert_eq!(replay_task.kind, "scm.event");
+    assert_eq!(replay_task.payload, task.payload);
 }

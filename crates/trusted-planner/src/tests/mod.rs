@@ -1,14 +1,15 @@
 use super::*;
-use crate::ReusableWorkflowProviderError;
+use crate::{ReusableWorkflowProviderError, SecretResolutionError};
 use runtrue_scm::{
     ActorIdentity, EventType, GitRevision, IssueCommentAction, IssueCommentEvent, ProviderKind,
     PullRequestAction, PullRequestEvent, RepositoryIdentity, WorkflowSourceError,
 };
 use runtrue_workflow_frontend::{
-    PreparedWorkflowSource, WorkflowFrontendOptions, WorkflowFrontendRegistry,
-    WorkflowFrontendReport, WorkflowSourceFrontend,
+    PreparedWorkflowSource, ResolvedProgram, ResolvedSourceAction, WorkflowFrontendError,
+    WorkflowFrontendOptions, WorkflowFrontendRegistry, WorkflowFrontendReport,
+    WorkflowSourceFrontend, WORKFLOW_FRONTEND_CONTRACT_GENERATION,
 };
-use std::{fs, path::Path, process::Command};
+use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
 const NOW: u64 = 10_000;
 const WORKFLOW_PATH: &str = ".runtrue/workflows/ci.yaml";
@@ -77,10 +78,18 @@ struct Verifier(bool);
 
 struct FixedFrontend {
     generation: u32,
-    dishonest_input_digest: bool,
+    invalid_report_media_type: bool,
 }
 
 impl WorkflowSourceFrontend for FixedFrontend {
+    fn frontend_id(&self) -> &'static str {
+        "runtrue.test-frontend"
+    }
+
+    fn frontend_generation(&self) -> u32 {
+        self.generation
+    }
+
     fn discovery_roots(&self) -> &'static [&'static str] {
         &[".runtrue/workflows"]
     }
@@ -91,27 +100,23 @@ impl WorkflowSourceFrontend for FixedFrontend {
 
     fn prepare(
         &self,
-        source: &str,
+        _source: &str,
         _workflow_path: &str,
         _options: &WorkflowFrontendOptions,
-    ) -> Result<PreparedWorkflowSource, String> {
+    ) -> Result<PreparedWorkflowSource, WorkflowFrontendError> {
         let native_yaml =
             String::from_utf8(workflow("translated", "microvm")).expect("native test workflow");
         let report_bytes = br#"{"status":"translated"}"#.to_vec();
         Ok(PreparedWorkflowSource {
-            frontend_id: "runtrue.test-frontend",
-            frontend_generation: self.generation,
-            input_digest: if self.dishonest_input_digest {
-                ContentDigest::sha256(b"substituted input")
-            } else {
-                ContentDigest::sha256(source.as_bytes())
-            },
-            native_digest: ContentDigest::sha256(native_yaml.as_bytes()),
             native_yaml,
             generated_lockfile_toml: None,
             report: Some(WorkflowFrontendReport {
-                media_type: "application/vnd.runtrue.test-frontend+json".to_owned(),
-                digest: ContentDigest::sha256(&report_bytes),
+                media_type: if self.invalid_report_media_type {
+                    "invalid media type"
+                } else {
+                    "application/vnd.runtrue.test-frontend+json"
+                }
+                .to_owned(),
                 bytes: report_bytes,
             }),
         })
@@ -139,6 +144,30 @@ struct FixedReusableProvider {
 }
 
 struct UnavailableReusableProvider;
+
+struct FixedSecretResolver;
+
+impl SecretMetadataResolver for FixedSecretResolver {
+    fn bind_exact(&self, compilation: &mut Compilation) -> Result<(), SecretResolutionError> {
+        compilation
+            .bind_secret_resolutions(&BTreeMap::from([(
+                "TOKEN".to_owned(),
+                runtrue_compiler::ResolvedSecretMetadata {
+                    metadata_id: "secret-1".to_owned(),
+                    binding: runtrue_model::SecretResolutionBinding {
+                        scope: "project:release".to_owned(),
+                        metadata_version: Some(4),
+                        resolution_digest: ContentDigest::sha256(b"resolution"),
+                        project_versions: vec![runtrue_model::SecretProjectVersion {
+                            project_id: "release".to_owned(),
+                            version: 2,
+                        }],
+                    },
+                },
+            )]))
+            .map_err(|_| SecretResolutionError::Unavailable)
+    }
+}
 
 impl ReusableWorkflowSourceProvider for UnavailableReusableProvider {
     fn load_exact(
@@ -170,6 +199,60 @@ fn workflow(name: &str, isolation: &str) -> Vec<u8> {
         "version: 1\nname: {name}\njobs:\n  build:\n    runner:\n      isolation: {isolation}\n    steps:\n      - run:\n          command: [\"true\"]\n"
     )
     .into_bytes()
+}
+
+fn secret_workflow() -> Vec<u8> {
+    b"version: 1\npermissions:\n  secrets: [{ name: TOKEN }]\njobs:\n  build:\n    steps:\n      - capabilities:\n          secrets: [{ name: TOKEN }]\n        run: { command: [\"true\"] }\n".to_vec()
+}
+
+#[test]
+fn trusted_planner_requires_and_seals_exact_secret_resolution() {
+    let fixture = Fixture::create(&secret_workflow());
+    let repository = fixture.repository();
+    let push = event(EventType::Push, fixture.source.clone(), None);
+    let without = TrustedPlanner::new(&repository).capsule(
+        &push,
+        WORKFLOW_PATH,
+        "installation-1",
+        "tenant-1",
+        "repo-1",
+        "main",
+        vec!["policy-v1".to_owned()],
+        None,
+        &Verifier(true),
+        NOW,
+    );
+    assert!(matches!(
+        without,
+        Err(TrustedPlannerError::SecretResolution(
+            SecretResolutionError::Missing
+        ))
+    ));
+
+    let resolver = FixedSecretResolver;
+    let execution = TrustedPlanner::new(&repository)
+        .with_secret_metadata_resolver(&resolver)
+        .capsule(
+            &push,
+            WORKFLOW_PATH,
+            "installation-1",
+            "tenant-1",
+            "repo-1",
+            "main",
+            vec!["policy-v1".to_owned()],
+            None,
+            &Verifier(true),
+            NOW,
+        )
+        .unwrap()
+        .execution;
+    let secret = &execution.capsule.jobs[0].steps[0].capabilities.secrets[0];
+    assert_eq!(secret.metadata_id, "secret-1");
+    assert_eq!(
+        secret.resolution.as_ref().unwrap().metadata_version,
+        Some(4)
+    );
+    assert_eq!(execution.approval_subject.secret_metadata_ids, ["secret-1"]);
 }
 
 fn event(event_type: EventType, source: String, base: Option<String>) -> EventEnvelope {
@@ -352,13 +435,13 @@ fn issue_comment_executes_exact_trusted_default_revision_without_mutating_event_
 }
 
 #[test]
-fn trusted_planner_rejects_dishonest_frontend_integrity_metadata() {
+fn trusted_planner_rejects_invalid_frontend_output() {
     let fixture = Fixture::create(&workflow("source", "microvm"));
     let repository = fixture.repository();
     let push = event(EventType::Push, fixture.source.clone(), None);
     let frontend = FixedFrontend {
         generation: 1,
-        dishonest_input_digest: true,
+        invalid_report_media_type: true,
     };
     let frontends = WorkflowFrontendRegistry::new(&[&frontend]).unwrap();
 
@@ -379,8 +462,50 @@ fn trusted_planner_rejects_dishonest_frontend_integrity_metadata() {
         .unwrap_err();
     assert!(matches!(
         error,
-        TrustedPlannerError::WorkflowFrontend(message)
-            if message.contains("input digest")
+        TrustedPlannerError::InvalidWorkflowFrontendOutput("invalid report media type")
+    ));
+}
+
+#[test]
+fn frontend_outputs_are_bounded_before_consumption() {
+    let prepared = |native_yaml: String| PreparedWorkflowSource {
+        native_yaml,
+        generated_lockfile_toml: None,
+        report: None,
+    };
+
+    assert!(matches!(
+        validate_frontend_output(&prepared(String::new())),
+        Err(TrustedPlannerError::InvalidWorkflowFrontendOutput(
+            "empty native workflow"
+        ))
+    ));
+    assert!(matches!(
+        validate_frontend_output(&prepared("x".repeat(MAX_NATIVE_WORKFLOW_BYTES + 1))),
+        Err(TrustedPlannerError::InvalidWorkflowFrontendOutput(
+            "oversized native workflow"
+        ))
+    ));
+
+    let mut oversized_lockfile = prepared("version: 1\njobs: {}\n".to_owned());
+    oversized_lockfile.generated_lockfile_toml = Some("x".repeat(MAX_GENERATED_LOCKFILE_BYTES + 1));
+    assert!(matches!(
+        validate_frontend_output(&oversized_lockfile),
+        Err(TrustedPlannerError::InvalidWorkflowFrontendOutput(
+            "oversized generated lockfile"
+        ))
+    ));
+
+    let mut oversized_report = prepared("version: 1\njobs: {}\n".to_owned());
+    oversized_report.report = Some(WorkflowFrontendReport {
+        media_type: "application/json".to_owned(),
+        bytes: vec![b'x'; MAX_FRONTEND_REPORT_BYTES + 1],
+    });
+    assert!(matches!(
+        validate_frontend_output(&oversized_report),
+        Err(TrustedPlannerError::InvalidWorkflowFrontendOutput(
+            "oversized report"
+        ))
     ));
 }
 
@@ -392,7 +517,7 @@ fn frontend_generation_is_bound_into_capsule_and_approval_identity() {
     let compile_with_generation = |generation| {
         let frontend = FixedFrontend {
             generation,
-            dishonest_input_digest: false,
+            invalid_report_media_type: false,
         };
         let frontends = WorkflowFrontendRegistry::new(&[&frontend]).unwrap();
         TrustedPlanner::new(&repository)
@@ -442,6 +567,95 @@ fn frontend_generation_is_bound_into_capsule_and_approval_identity() {
             .unwrap()
             .frontend_generation,
         2
+    );
+
+    let provenance = first.capsule.context.workflow_frontend.as_ref().unwrap();
+    assert_eq!(provenance.frontend_id, "runtrue.test-frontend");
+    assert_eq!(
+        provenance.contract_generation,
+        WORKFLOW_FRONTEND_CONTRACT_GENERATION
+    );
+    assert_eq!(
+        provenance.configuration_digest,
+        WorkflowFrontendOptions::default().digest()
+    );
+    assert_eq!(
+        provenance.input_digest,
+        ContentDigest::sha256(workflow("source", "microvm"))
+    );
+    assert_eq!(
+        provenance.native_digest,
+        ContentDigest::sha256(workflow("translated", "microvm"))
+    );
+    let report_bytes = br#"{"status":"translated"}"#;
+    assert_eq!(
+        provenance.report_digest,
+        Some(ContentDigest::sha256(report_bytes))
+    );
+    let report = first.workflow_frontend_report.as_ref().unwrap();
+    assert_eq!(report.digest, ContentDigest::sha256(report_bytes));
+    assert_eq!(report.bytes, report_bytes);
+}
+
+#[test]
+fn resolved_action_configuration_is_bound_into_capsule_identity() {
+    let fixture = Fixture::create(&workflow("source", "microvm"));
+    let repository = fixture.repository();
+    let push = event(EventType::Push, fixture.source.clone(), None);
+    let compile_with_image = |image: &str| {
+        let frontend = FixedFrontend {
+            generation: 1,
+            invalid_report_media_type: false,
+        };
+        let frontends = WorkflowFrontendRegistry::new(&[&frontend]).unwrap();
+        let mut options = WorkflowFrontendOptions::default();
+        options
+            .insert_resolved_action(
+                "source/action@revision",
+                ResolvedSourceAction::new(ResolvedProgram::container(image, None, None).unwrap()),
+            )
+            .unwrap();
+        let expected_configuration_digest = options.digest();
+        let execution = TrustedPlanner::new(&repository)
+            .with_source_frontends(&frontends)
+            .with_source_frontend_options(options)
+            .capsule(
+                &push,
+                WORKFLOW_PATH,
+                "installation-1",
+                "tenant-1",
+                "repo-1",
+                "main",
+                vec!["policy-v1".to_owned()],
+                None,
+                &Verifier(true),
+                NOW,
+            )
+            .unwrap()
+            .execution;
+        (execution, expected_configuration_digest)
+    };
+
+    let (first, first_configuration_digest) = compile_with_image(
+        "registry.invalid/tool@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    let (second, _) = compile_with_image(
+        "registry.invalid/tool@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    assert_eq!(
+        first
+            .capsule
+            .context
+            .workflow_frontend
+            .as_ref()
+            .unwrap()
+            .configuration_digest,
+        first_configuration_digest
+    );
+    assert_ne!(first.capsule_digest, second.capsule_digest);
+    assert_ne!(
+        first.approval_subject_digest,
+        second.approval_subject_digest
     );
 }
 

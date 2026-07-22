@@ -18,6 +18,13 @@ pub enum ControlPlaneError {
     },
     #[error("SQLite control-plane operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[cfg(feature = "postgres")]
+    #[error("PostgreSQL control-plane operation failed: {0}")]
+    Postgres(#[from] sqlx::Error),
+    #[error("invalid database configuration: {0}")]
+    InvalidDatabaseConfiguration(&'static str),
+    #[error("database migration history is invalid: {0}")]
+    InvalidMigrationHistory(String),
     #[error("control-plane JSON failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("invalid model value: {0}")]
@@ -52,6 +59,19 @@ pub enum ControlPlaneError {
     NotFound { kind: &'static str, id: String },
     #[error("repository identity `{owner}/{name}` is registered by multiple tenants")]
     AmbiguousRepositoryIdentity { owner: String, name: String },
+    #[error("secret `{name}` is defined by multiple matching projects: {project_ids:?}")]
+    AmbiguousSecretResolution {
+        name: String,
+        project_ids: Vec<String>,
+    },
+    #[error("configuration project `{id}` version is {actual}, not {expected}")]
+    ConfigurationProjectVersionConflict {
+        id: String,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("secret resolution for `{name}` changed before the Capsule was sealed")]
+    StaleSecretResolution { name: String },
     #[error("integer `{field}` cannot be represented durably")]
     IntegerRange { field: &'static str },
     #[error("canonical capsule bytes are not the canonical encoding of their decoded capsule")]
@@ -134,6 +154,8 @@ pub enum ControlPlaneError {
     TaskNotOwned,
     #[error("durable task lease expired")]
     TaskLeaseExpired,
+    #[error("runner autoscaler lease is stale, expired, or owned by another principal")]
+    RunnerAutoscalerLeaseLost,
     #[error("tenant storage quota would be exceeded")]
     StorageQuotaExceeded,
     #[error("the installation-wide lifecycle GC lease is held by another worker")]

@@ -279,7 +279,7 @@ async fn cedar_default_deny_and_request_errors_fail_closed_over_http() {
         .create_repository(&tenant_repository("repo-a", "tenant-a", "alpha"))
         .unwrap();
     let deny = CedarAuthorizationEngine::new("", DenyFirstPolicy::default()).unwrap();
-    let state = AppState::new(Arc::clone(&control_plane), TOKEN, None)
+    let state = AppState::new(control_plane.clone(), TOKEN, None)
         .unwrap()
         .with_authorization_engine(deny);
     let application = router(state);

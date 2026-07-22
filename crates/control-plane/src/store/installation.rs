@@ -58,10 +58,58 @@ pub(super) fn fence_open_leases_tx(
          )",
         [to_i64(completed_unix_ms)?],
     )?;
+    transaction.execute(
+        "UPDATE runner_object_transfers SET state = 'abandoned', updated_unix_ms = ?1
+         WHERE state IN ('reserved', 'transferring')",
+        [to_i64(completed_unix_ms)?],
+    )?;
+    transaction.execute(
+        "UPDATE enrollment_tokens SET expires_unix_ms = MIN(expires_unix_ms, ?1)
+         WHERE consumed_unix_ms IS NULL AND expires_unix_ms > ?1",
+        [to_i64(completed_unix_ms)?],
+    )?;
+    transaction.execute(
+        "UPDATE runner_launch_claims SET expires_unix_ms = MIN(expires_unix_ms, ?1)
+         WHERE consumed_unix_ms IS NULL AND expires_unix_ms > ?1",
+        [to_i64(completed_unix_ms)?],
+    )?;
+    transaction.execute(
+        "UPDATE runner_autoscaler_leases SET expires_unix_ms = MIN(expires_unix_ms, ?1)
+         WHERE expires_unix_ms > ?1",
+        [to_i64(completed_unix_ms)?],
+    )?;
     Ok(())
 }
 
 impl ControlPlane {
+    pub(crate) fn database_readiness(
+        &self,
+    ) -> Result<crate::persistence::DatabaseReadiness, ControlPlaneError> {
+        let connection = self.connection()?;
+        // The unified ledger was verified while opening the store. Preserve
+        // the backend schema generation in readiness without consulting the
+        // retired legacy PRAGMA authority.
+        let schema_version = super::database::CURRENT_SCHEMA_VERSION;
+        let recovery = connection.query_row(
+            "SELECT fencing_epoch, safe_mode, last_restore_unix_ms
+             FROM installation_state WHERE singleton = 1",
+            [],
+            |row| {
+                Ok(InstallationRecoveryState {
+                    fencing_epoch: u64_column(row, 0, "fencing_epoch")?,
+                    safe_mode: row.get(1)?,
+                    last_restore_unix_ms: optional_u64_column(row, 2, "last_restore_unix_ms")?,
+                })
+            },
+        )?;
+        Ok(crate::persistence::DatabaseReadiness {
+            backend: crate::persistence::DatabaseBackendKind::Sqlite,
+            schema_version,
+            installation_id: self.installation_id.clone(),
+            recovery,
+        })
+    }
+
     #[must_use]
     pub fn installation_id(&self) -> &str {
         &self.installation_id
@@ -120,7 +168,7 @@ impl ControlPlane {
     }
 
     /// Atomically enter recovery safe mode, advance the installation fence,
-    /// and expire every lease copied from the restored database.
+    /// mark jobs behind open leases lost, and revoke copied runner authority.
     pub fn enter_restore_safe_mode(
         &self,
         restored_unix_ms: u64,

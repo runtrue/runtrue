@@ -8,11 +8,12 @@ const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const publicDirectory = join(moduleDirectory, "public");
 const staticFiles = new Map([
   ["/", ["index.html", "text/html; charset=utf-8", "no-store"]],
-  ["/ui/github/installations", ["index.html", "text/html; charset=utf-8", "no-store"]],
   ["/favicon.svg", ["favicon.svg", "image/svg+xml", "public, max-age=86400"]],
   ["/assets/styles.css", ["styles.css", "text/css; charset=utf-8", "no-cache"]],
   ["/assets/app.js", ["app.js", "text/javascript; charset=utf-8", "no-cache"]],
 ]);
+const repositoryPagePath = /^\/repositories\/[^/]+\/[^/]+(?:\/(overview|runs|secrets|variables|settings))?\/?$/;
+const legacyWorkspacePath = "/ui/github/installations";
 const contentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 const hopByHopHeaders = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade"]);
 const clientErrorBytes = 2048;
@@ -97,7 +98,15 @@ export function createRuntrueServer({ backendOrigin = process.env.BACKEND_ORIGIN
       });
       return;
     }
-    const staticDefinition = staticFiles.get(url.pathname);
+    if ((request.method === "GET" || request.method === "HEAD") && (url.pathname === legacyWorkspacePath || url.pathname.startsWith(`${legacyWorkspacePath}/repositories/`))) {
+      const pathname = url.pathname === legacyWorkspacePath
+        ? "/"
+        : url.pathname.slice(legacyWorkspacePath.length);
+      response.writeHead(308, { location: `${pathname}${url.search}`, "cache-control": "no-store" });
+      return response.end();
+    }
+    const staticDefinition = staticFiles.get(url.pathname)
+      || (repositoryPagePath.test(url.pathname) ? staticFiles.get("/") : null);
     if ((request.method === "GET" || request.method === "HEAD") && staticDefinition) {
       return sendStatic(request, response, staticDefinition);
     }

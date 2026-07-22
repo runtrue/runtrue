@@ -4,6 +4,19 @@ fn exact_signed_component_dispatches_through_the_shared_engine() {
     let fixture = Fixture::new();
     let executor = WasmJobExecutor::load(&fixture.paths).unwrap();
     assert_eq!(executor.component_count(), 1);
+    assert_eq!(
+        executor.component_digests().unwrap(),
+        [ContentDigest::sha256(&fixture.component)]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        executor.component_preparation_tiers().unwrap(),
+        BTreeMap::from([(
+            ContentDigest::sha256(&fixture.component),
+            crate::daemon::PreparedContentTier::Warm,
+        )])
+    );
     executor.preflight_lease(&fixture.lease()).unwrap();
 
     let result = executor

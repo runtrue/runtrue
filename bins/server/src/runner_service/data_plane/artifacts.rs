@@ -18,19 +18,21 @@ use runtrue_workflow_ir::Access;
 use std::collections::BTreeMap;
 use tonic::Status;
 impl RunnerControlService {
-    pub(in crate::runner_service) fn request_artifact_ticket_authenticated(
+    pub(in crate::runner_service) async fn request_artifact_ticket_authenticated(
         &self,
         authenticated: &AuthenticatedIdentity,
         request: v1::ArtifactTicketRequest,
     ) -> Result<v1::ArtifactTicketResponse, Status> {
-        let subject = self.active_artifact_subject(
-            authenticated,
-            &request.execution_lease_id,
-            request.fencing_generation,
-            &request.job_id,
-            request.job_attempt,
-            &request.step_id,
-        )?;
+        let subject = self
+            .active_artifact_subject(
+                authenticated,
+                &request.execution_lease_id,
+                request.fencing_generation,
+                &request.job_id,
+                request.job_attempt,
+                &request.step_id,
+            )
+            .await?;
         let data = self.data_plane()?;
         let job = subject
             .capsule
@@ -90,7 +92,8 @@ impl RunnerControlService {
             expires_unix_ms: now_ms.saturating_add(300_000),
             completed_unix_ms: None,
         };
-        let reservation = reserve_or_recover_storage(&self.inner.control_plane, proposed, now_ms)?;
+        let reservation =
+            reserve_or_recover_storage(self.inner.control_plane.as_ref(), proposed, now_ms).await?;
         let ticket_request = ArtifactTicketRequest {
             tenant_id: subject.repository.tenant_id.clone(),
             repository_id: subject.repository.id.clone(),
@@ -108,12 +111,13 @@ impl RunnerControlService {
             expires_at_unix_seconds: reservation.expires_unix_ms / 1_000,
         };
         let ticket = issue_or_recover_artifact_ticket(
-            &self.inner.control_plane,
+            self.inner.control_plane.as_ref(),
             &data.artifacts,
             &reservation,
             &ticket_request,
             now_ms,
-        )?;
+        )
+        .await?;
         Ok(v1::ArtifactTicketResponse {
             ticket_id: ticket.ticket_id.to_string(),
             endpoint: "runner-grpc://upload-blob".to_owned(),
@@ -124,7 +128,7 @@ impl RunnerControlService {
         })
     }
 
-    pub(in crate::runner_service) fn commit_artifact_authenticated(
+    pub(in crate::runner_service) async fn commit_artifact_authenticated(
         &self,
         authenticated: &AuthenticatedIdentity,
         request: v1::CommitArtifactRequest,
@@ -142,15 +146,18 @@ impl RunnerControlService {
             .inner
             .control_plane
             .signed_capsule_for_lease(&request.execution_lease_id)
+            .await
             .map_err(control_plane_status)?;
-        let subject = self.active_artifact_subject(
-            authenticated,
-            &request.execution_lease_id,
-            request.fencing_generation,
-            &job_key,
-            request.job_attempt,
-            &ticket.step_id,
-        )?;
+        let subject = self
+            .active_artifact_subject(
+                authenticated,
+                &request.execution_lease_id,
+                request.fencing_generation,
+                &job_key,
+                request.job_attempt,
+                &ticket.step_id,
+            )
+            .await?;
         if ticket.job_attempt != request.job_attempt {
             return Err(Status::failed_precondition(
                 "artifact ticket attempt is stale",
@@ -208,6 +215,7 @@ impl RunnerControlService {
                 source_commit: producer.source_commit.clone(),
                 workflow_digest: producer.workflow_digest.clone(),
                 capsule_digest: producer.capsule_digest.clone(),
+                workflow_frontend: subject.capsule.context.workflow_frontend.clone(),
                 builder_id: producer.runner_id.clone(),
                 runner_image_digest: producer.runner_image_digest.clone(),
                 parity_grade: subject.capsule.expected_parity,
@@ -286,10 +294,11 @@ impl RunnerControlService {
                 1,
                 committed_unix_ms,
             )
+            .await
             .map_err(control_plane_status)?;
         self.inner
             .control_plane
-            .record_runner_data_commit(
+            .record_runner_data_commit_journal(
                 &RunnerDataCommit {
                     kind: RunnerDataCommitKind::Artifact,
                     object_id: handle.artifact_id.to_string(),
@@ -307,6 +316,7 @@ impl RunnerControlService {
                 },
                 &authenticated.runner_id,
             )
+            .await
             .map_err(control_plane_status)?;
         Ok(v1::CommitArtifactResponse {
             artifact_id: handle.artifact_id.to_string(),

@@ -1,6 +1,8 @@
 (() => {
   "use strict";
 
+  const workspacePath = "/";
+
   const state = {
     data: null,
     repositorySource: "all",
@@ -15,8 +17,17 @@
     activeRunDetails: null,
     repositorySettings: null,
     repositorySettingsLoading: false,
+    repositorySection: "overview",
+    repositoryRunsRefreshing: false,
     organizationSettings: null,
     organizationSettingsLoading: false,
+    secretInventory: null,
+    secretInventoryLoading: false,
+    identity: null,
+    identityLoading: false,
+    activeTeamId: null,
+    activeUserId: null,
+    pendingScopedSecretDelete: null,
     settingScope: null,
     settingKind: null,
     pendingSettingDelete: null,
@@ -53,6 +64,59 @@
     if (bytes < 1024 ** 3) return `${Math.round(bytes / 1024 ** 2)} MB`;
     return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
   };
+  const shortRef = (value) => String(value || "").replace(/^refs\/(heads|tags)\//, "");
+
+  function runEventLabel(run) {
+    const source = run.source || {};
+    if (source.pullRequestNumber) return `Pull request #${source.pullRequestNumber}`;
+    const labels = {
+      push: "Push",
+      pull_request: "Pull request",
+      merge_group: "Merge group",
+      issue_comment: "Issue comment",
+      check_run: "Check run",
+      api: "API request",
+      manual: "Manual run",
+    };
+    return labels[source.eventKind] || titleCase(source.eventKind || "Manual run");
+  }
+
+  function runTriggerMeta(run) {
+    const source = run.source || {};
+    const values = [];
+    if (source.eventAction) values.push(titleCase(source.eventAction));
+    if (source.refName) values.push(shortRef(source.refName));
+    if (source.actor) values.push(`@${source.actor}`);
+    if (source.commitSha) values.push(String(source.commitSha).slice(0, 8));
+    return values;
+  }
+
+  function runTriggerMarkup(run) {
+    const source = run.source || {};
+    const label = escapeHtml(runEventLabel(run));
+    const title = source.url
+      ? `<a class="run-source-link" href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">${label}<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg></a>`
+      : `<strong class="table-primary">${label}</strong>`;
+    const meta = runTriggerMeta(run);
+    return `${title}${meta.length ? `<small>${meta.map(escapeHtml).join(" · ")}</small>` : ""}`;
+  }
+
+  function runSourceCardMarkup(run) {
+    const source = run.source || {};
+    const label = escapeHtml(runEventLabel(run));
+    const title = source.url
+      ? `<a class="run-source-link run-source-primary" href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer"><span>${label}</span><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg><span class="sr-only"> (opens in a new tab)</span></a>`
+      : `<strong class="run-source-primary">${label}</strong>`;
+    const meta = runTriggerMeta(run);
+    const workflow = source.workflowPath
+      ? `<div class="run-source-workflow"><span>Workflow file</span><code title="${escapeHtml(source.workflowPath)}">${escapeHtml(source.workflowPath)}</code></div>`
+      : "";
+    return `<div class="run-source-icon" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><path d="M6 8v8m2-8h4a6 6 0 0 1 6 6v2"/></svg></div><div class="run-source-content"><span class="run-source-eyebrow">Triggered by</span>${title}${meta.length ? `<div class="run-source-meta">${meta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}</div>` : ""}</div>${workflow}`;
+  }
+
+  function runActionsMarkup(run) {
+    return `<div class="run-actions"><span class="retry-placeholder" title="Retry support is coming soon"><button class="btn btn-secondary btn-inline btn-compact" type="button" disabled aria-label="Retry ${escapeHtml(run.source?.workflowName || "workflow run")}">Retry</button></span><button class="text-button run-open-button" type="button" data-open-run="${escapeHtml(run.id)}">Details <span aria-hidden="true">→</span></button></div>`;
+  }
 
   function initials(name) {
     const parts = String(name || "User").split(/[^\p{L}\p{N}]+/u).filter(Boolean);
@@ -124,7 +188,7 @@
     }
     const rows = repositories.map((repository) => {
       const pending = pendingApprovalsForRepository(repository.id).length;
-      return `<tr><td><button class="repo-link" type="button" data-open-repository="${escapeHtml(repository.id)}"><span class="repo-glyph" aria-hidden="true">R</span><span><strong>${escapeHtml(repository.organization)}/${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.visibility)} · ${escapeHtml(repository.defaultBranch)}</small></span></button></td><td>${escapeHtml(repository.source)}</td><td>${pending ? `<span class="approval-count-badge">${escapeHtml(pending)} pending</span>` : `<span class="muted-cell">None</span>`}</td><td><span class="status-badge">${escapeHtml(repository.state)}</span></td></tr>`;
+      return `<tr><td><button class="repo-link" type="button" data-open-repository="${escapeHtml(repository.id)}"><span class="repo-glyph" aria-hidden="true">R</span><span><strong>${escapeHtml(repository.organization)}/${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.visibility)} · ${escapeHtml(repository.defaultBranch)}</small></span></button></td><td>${escapeHtml(repository.source)}</td><td>${pending ? `<span class="approval-count-badge">${escapeHtml(pending)} pending</span>` : `<span class="muted-cell">None</span>`}</td><td><span class="state-badge ${tone(repository.state)}">${escapeHtml(repository.state)}</span></td></tr>`;
     }).join("");
     byId("catalog-content").innerHTML = `<div class="table-wrap"><table class="repo-table"><thead><tr><th>Repository</th><th>Source</th><th>Approvals</th><th>State</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
@@ -142,14 +206,14 @@
     const search = byId("run-search").value.trim().toLowerCase();
     const status = byId("run-status-filter").value;
     const visible = runs.filter((run) => {
-      const matchesSearch = `${run.id} ${run.planId} ${run.repository}`.toLowerCase().includes(search);
+      const matchesSearch = `${run.id} ${run.planId} ${run.repository} ${Object.values(run.source || {}).join(" ")}`.toLowerCase().includes(search);
       return matchesSearch && (status === "all" || String(run.status) === status);
     });
     byId("sidebar-run-count").textContent = runs.length;
     byId("run-visible-count").textContent = visible.length;
     byId("run-total-count").textContent = `${runs.length} total`;
     const tbody = byId("runs-body");
-    tbody.innerHTML = visible.map((run) => `<tr><td><strong class="mono run-id" title="${escapeHtml(run.id)}">${escapeHtml(compactId(run.id))}</strong><small class="mono" title="${escapeHtml(run.planId)}">Capsule ${escapeHtml(compactId(run.planId))}</small></td><td><strong class="table-primary">${escapeHtml(run.repository)}</strong></td><td><span class="state-badge ${tone(run.status)}">${escapeHtml(titleCase(run.status))}</span></td><td class="date-cell">${escapeHtml(formatDate(run.createdAt))}</td><td><button class="text-button run-open-button" type="button" data-open-run="${escapeHtml(run.id)}">Details <span aria-hidden="true">→</span></button></td></tr>`).join("");
+    tbody.innerHTML = visible.map((run) => `<tr><td><strong class="table-primary">${escapeHtml(run.source?.workflowName || "Workflow")}</strong><small><span class="mono" title="${escapeHtml(run.id)}">${escapeHtml(compactId(run.id))}</span> · ${escapeHtml(run.source?.jobCount ?? "—")} ${run.source?.jobCount === 1 ? "job" : "jobs"}</small></td><td><strong class="table-primary">${escapeHtml(run.repository)}</strong></td><td class="run-trigger-cell">${runTriggerMarkup(run)}</td><td><span class="state-badge ${tone(run.status)}">${escapeHtml(titleCase(run.status))}</span></td><td class="date-cell">${escapeHtml(formatDate(run.startedAt || run.createdAt))}</td><td>${runActionsMarkup(run)}</td></tr>`).join("");
     byId("runs-empty").hidden = visible.length > 0;
     tbody.closest("table").hidden = visible.length === 0;
   }
@@ -222,6 +286,163 @@
     byId("token-list").hidden = tokens.length === 0;
   }
 
+  function renderIdentity() {
+    const identity = state.identity || { users: [], teams: [] };
+    const teamById = new Map(identity.teams.map((team) => [team.id, team]));
+    byId("identity-user-count").textContent = `${identity.users.length} user${identity.users.length === 1 ? "" : "s"}`;
+    const activeTeams = identity.teams.filter((team) => team.status === "active").length;
+    byId("identity-team-count").textContent = `${activeTeams} active`;
+    byId("team-list").innerHTML = identity.teams.map((team) => {
+      const members = team.member_ids.map((id) => identity.users.find((user) => user.id === id)).filter(Boolean);
+      return `<article class="team-card"><header><div><h3>${escapeHtml(team.name)}</h3><p>${escapeHtml(team.description || "No description")}</p></div><span class="state-badge ${tone(team.status)}">${escapeHtml(titleCase(team.status))}</span></header><div class="team-members"><span>${escapeHtml(members.length)} member${members.length === 1 ? "" : "s"}</span><div>${members.slice(0, 5).map((user) => `<span class="member-avatar" title="${escapeHtml(user.display_name)}">${escapeHtml(initials(user.display_name))}</span>`).join("")}${members.length > 5 ? `<span class="member-more">+${escapeHtml(members.length - 5)}</span>` : ""}</div></div><footer><span class="mono team-id">${escapeHtml(team.id)}</span><button class="btn btn-secondary btn-inline btn-compact" type="button" data-edit-team="${escapeHtml(team.id)}">Manage</button></footer></article>`;
+    }).join("");
+    byId("teams-empty").hidden = identity.teams.length > 0;
+    byId("team-list").hidden = identity.teams.length === 0;
+
+    const query = byId("identity-user-search").value.trim().toLowerCase();
+    const users = identity.users.filter((user) => `${user.display_name} ${user.primary_email} ${user.id}`.toLowerCase().includes(query));
+    byId("identity-users-body").innerHTML = users.map((user) => {
+      const teams = user.team_ids.map((id) => teamById.get(id)).filter(Boolean);
+      const lastSeen = user.last_seen_at ? escapeHtml(formatDate(user.last_seen_at)) : `<span class="muted-cell">Never</span>`;
+      return `<tr><td><strong>${escapeHtml(user.display_name)}</strong><small>${escapeHtml(user.primary_email)} · <span class="mono">${escapeHtml(user.id)}</span></small></td><td><span class="scope-list">${teams.map((team) => `<span class="scope-chip">${escapeHtml(team.name)}</span>`).join("") || `<span class="muted-cell">No teams</span>`}</span></td><td>${lastSeen}</td><td><span class="state-badge ${tone(user.status)}">${escapeHtml(titleCase(user.status))}</span></td><td><button class="text-button" type="button" data-edit-user="${escapeHtml(user.id)}">Edit</button></td></tr>`;
+    }).join("");
+    byId("identity-users-empty").hidden = users.length > 0;
+    byId("identity-users-body").closest("table").hidden = users.length === 0;
+  }
+
+  async function loadIdentity(force = false) {
+    if (state.identityLoading || (state.identity && !force)) return;
+    state.identityLoading = true;
+    try {
+      const response = await fetch("/api/v1/ui/identity", { credentials: "same-origin", headers: { accept: "application/json" }, cache: "no-store" });
+      if (!response.ok) throw new Error(response.status === 403 ? "You do not have permission to manage users and teams." : "Could not load users and teams.");
+      state.identity = await response.json();
+      renderIdentity();
+    } catch (error) { showToast(error.message || "Could not load users and teams."); }
+    finally { state.identityLoading = false; }
+  }
+
+  function openCreateTeam() {
+    state.activeTeamId = null;
+    byId("team-dialog-title").textContent = "Create team";
+    byId("team-dialog-copy").textContent = "Create a team for authorization policies.";
+    byId("team-id-input").value = "";
+    byId("team-id-input-wrap").hidden = false;
+    byId("team-name").value = "";
+    byId("team-description").value = "";
+    byId("team-status").value = "active";
+    byId("team-status-wrap").hidden = true;
+    byId("team-members-field").hidden = true;
+    byId("team-dialog").showModal();
+    byId("team-name").focus();
+  }
+
+  function openEditTeam(teamId) {
+    const team = state.identity?.teams.find((item) => item.id === teamId);
+    if (!team) return;
+    state.activeTeamId = team.id;
+    byId("team-dialog-title").textContent = team.name;
+    byId("team-dialog-copy").textContent = "Update details, lifecycle state, and membership.";
+    byId("team-id-input").value = team.id;
+    byId("team-id-input-wrap").hidden = true;
+    byId("team-name").value = team.name;
+    byId("team-description").value = team.description;
+    byId("team-status").value = team.status;
+    byId("team-status-wrap").hidden = false;
+    byId("team-members-field").hidden = false;
+    byId("team-member-picker").innerHTML = (state.identity?.users || []).map((user) => `<label><input type="checkbox" value="${escapeHtml(user.id)}" ${team.member_ids.includes(user.id) ? "checked" : ""}><span><strong>${escapeHtml(user.display_name)}</strong><small>${escapeHtml(user.primary_email)}</small></span></label>`).join("") || `<p class="muted-copy">No users are available.</p>`;
+    byId("team-dialog").showModal();
+  }
+
+  function openCreateUser() {
+    state.activeUserId = null;
+    byId("user-dialog-title").textContent = "Add user";
+    byId("user-dialog-copy").textContent = "Create a user record for policy and team assignment.";
+    byId("user-display-name").value = "";
+    byId("user-primary-email").value = "";
+    byId("user-status").value = "active";
+    byId("user-status-wrap").hidden = true;
+    byId("user-access-note").hidden = false;
+    byId("user-dialog-footnote").textContent = "The user can be added to teams after creation.";
+    byId("save-user").textContent = "Add user";
+    byId("user-dialog").showModal();
+    byId("user-display-name").focus();
+  }
+
+  function openEditUser(userId) {
+    const user = state.identity?.users.find((item) => item.id === userId);
+    if (!user) return;
+    state.activeUserId = user.id;
+    byId("user-dialog-title").textContent = user.display_name;
+    byId("user-dialog-copy").textContent = user.id;
+    byId("user-display-name").value = user.display_name;
+    byId("user-primary-email").value = user.primary_email;
+    byId("user-status").value = user.status;
+    byId("user-status-wrap").hidden = false;
+    byId("user-access-note").hidden = true;
+    byId("user-dialog-footnote").textContent = "Suspended or disabled users cannot start new sessions.";
+    byId("save-user").textContent = "Save user";
+    byId("user-dialog").showModal();
+  }
+
+  async function identityMutation(path, fields) {
+    const body = new URLSearchParams({ csrf_token: state.data.session.csrfToken, ...fields });
+    const response = await fetch(path, { method: "POST", body, credentials: "same-origin", headers: { accept: "application/json" } });
+    if (!response.ok) {
+      const problem = await response.json().catch(() => ({}));
+      throw new Error(problem.detail || "The identity change could not be saved.");
+    }
+    state.identity = await response.json();
+    renderIdentity();
+  }
+
+  async function saveTeam(event) {
+    event.preventDefault();
+    const button = byId("save-team");
+    button.disabled = true;
+    try {
+      if (!state.activeTeamId) {
+        await identityMutation("/api/v1/ui/teams", { id: byId("team-id-input").value, name: byId("team-name").value, description: byId("team-description").value });
+        byId("team-dialog").close();
+        showToast("Team created.");
+        return;
+      }
+      const teamId = state.activeTeamId;
+      const original = state.identity.teams.find((team) => team.id === teamId);
+      if (!original) throw new Error("The team no longer exists.");
+      const selected = new Set([...byId("team-member-picker").querySelectorAll("input:checked")].map((input) => input.value));
+      await identityMutation(`/api/v1/ui/teams/${encodeURIComponent(teamId)}`, { expected_version: original.version, name: byId("team-name").value, description: byId("team-description").value, status: byId("team-status").value });
+      for (const user of state.identity.users) {
+        const hadMember = original.member_ids.includes(user.id);
+        const wantsMember = selected.has(user.id);
+        if (hadMember !== wantsMember) await identityMutation(`/api/v1/ui/teams/${encodeURIComponent(teamId)}/members`, { user_id: user.id, action: wantsMember ? "add" : "remove" });
+      }
+      byId("team-dialog").close();
+      showToast("Team updated.");
+    } catch (error) { showToast(error.message || "The team could not be saved."); }
+    finally { button.disabled = false; }
+  }
+
+  async function saveUser(event) {
+    event.preventDefault();
+    const button = byId("save-user");
+    button.disabled = true;
+    try {
+      if (!state.activeUserId) {
+        await identityMutation("/api/v1/ui/users", { display_name: byId("user-display-name").value, primary_email: byId("user-primary-email").value });
+        byId("user-dialog").close();
+        showToast("User added without UI access.");
+        return;
+      }
+      const user = state.identity?.users.find((item) => item.id === state.activeUserId);
+      if (!user) throw new Error("The user no longer exists.");
+      await identityMutation(`/api/v1/ui/users/${encodeURIComponent(user.id)}`, { expected_version: user.version, display_name: byId("user-display-name").value, primary_email: byId("user-primary-email").value, status: byId("user-status").value });
+      byId("user-dialog").close();
+      showToast("User updated.");
+    } catch (error) { showToast(error.message || "The user could not be saved."); }
+    finally { button.disabled = false; }
+  }
+
   function renderAudit() {
     const events = state.data.audit || [];
     const query = byId("audit-search").value.trim().toLowerCase();
@@ -247,9 +468,25 @@
     byId("audit-result-filter").innerHTML = `<option value="all">All results</option>${results.map((result) => `<option value="${escapeHtml(result)}">${escapeHtml(titleCase(result))}</option>`).join("")}`;
   }
 
-  function openRepository(id) {
+  const repositorySections = new Set(["overview", "runs", "secrets", "variables", "settings"]);
+
+  function repositoryRoute(repository = state.activeRepository, section = state.repositorySection) {
+    if (!repository) return "repositories";
+    return `repository/${encodeURIComponent(repository.organization)}/${encodeURIComponent(repository.name)}/${section}`;
+  }
+
+  function updateRoute(route, replace = false) {
+    const repositoryPrefix = "repository/";
+    const url = route.startsWith(repositoryPrefix)
+      ? `${workspacePath}repositories/${route.slice(repositoryPrefix.length)}${location.search}`
+      : `${workspacePath}${location.search}#${route}`;
+    if (`${location.pathname}${location.search}${location.hash}` === url) return;
+    history[replace ? "replaceState" : "pushState"](null, "", url);
+  }
+
+  function openRepository(id, section = "overview", updateHash = true) {
     const repository = state.data.repositories.find((item) => String(item.id) === String(id));
-    if (!repository) return;
+    if (!repository) return false;
     state.activeRepository = repository;
     state.repositorySettings = null;
     renderRepositorySettings();
@@ -274,12 +511,14 @@
     byId("repository-uninstall-name").textContent = repository.key;
     renderRepositoryRuns(runs);
     renderRepositoryApprovals(approvals);
-    setRepositorySection("overview");
-    switchView("repository");
+    switchView("repository", false);
+    setRepositorySection(section, false);
+    if (updateHash) updateRoute(repositoryRoute());
+    return true;
   }
 
   function renderRepositoryRuns(runs) {
-    byId("repository-runs-body").innerHTML = runs.map((run) => `<tr><td><strong class="mono run-id" title="${escapeHtml(run.id)}">${escapeHtml(compactId(run.id))}</strong><small class="mono" title="${escapeHtml(run.planId)}">Capsule ${escapeHtml(compactId(run.planId))}</small></td><td><span class="state-badge ${tone(run.status)}">${escapeHtml(titleCase(run.status))}</span></td><td class="date-cell">${escapeHtml(formatDate(run.createdAt))}</td><td><button class="text-button run-open-button" type="button" data-open-run="${escapeHtml(run.id)}">Details <span aria-hidden="true">→</span></button></td></tr>`).join("");
+    byId("repository-runs-body").innerHTML = runs.map((run) => `<tr><td><strong class="table-primary">${escapeHtml(run.source?.workflowName || "Workflow")}</strong><small><span class="mono" title="${escapeHtml(run.id)}">${escapeHtml(compactId(run.id))}</span> · ${escapeHtml(run.source?.jobCount ?? "—")} ${run.source?.jobCount === 1 ? "job" : "jobs"}</small></td><td class="run-trigger-cell">${runTriggerMarkup(run)}</td><td><span class="state-badge ${tone(run.status)}">${escapeHtml(titleCase(run.status))}</span></td><td class="date-cell">${escapeHtml(formatDate(run.startedAt || run.createdAt))}</td><td>${runActionsMarkup(run)}</td></tr>`).join("");
     byId("repository-runs-empty").hidden = runs.length > 0;
     byId("repository-runs-body").closest("table").hidden = runs.length === 0;
   }
@@ -292,7 +531,9 @@
     byId("repository-approvals-empty").hidden = approvals.length > 0;
   }
 
-  function setRepositorySection(section) {
+  function setRepositorySection(section, updateHash = true) {
+    if (!repositorySections.has(section)) section = "overview";
+    state.repositorySection = section;
     document.querySelectorAll("[data-repository-panel]").forEach((panel) => { panel.hidden = panel.dataset.repositoryPanel !== section; });
     document.querySelectorAll("[data-repository-section]").forEach((button) => {
       const active = button.dataset.repositorySection === section;
@@ -300,6 +541,7 @@
       if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
     });
     if (["secrets", "variables", "settings"].includes(section)) loadRepositorySettings();
+    if (updateHash && state.activeRepository) updateRoute(repositoryRoute());
   }
 
   function renderRepositorySettings() {
@@ -341,6 +583,153 @@
       renderOrganizationSettings();
     } catch (error) { showToast(error.message || "Could not load organization settings."); }
     finally { state.organizationSettingsLoading = false; }
+  }
+
+  function secretScope(scope = "") {
+    const separator = scope.indexOf(":");
+    const prefix = separator < 0 ? "" : scope.slice(0, separator);
+    const id = separator < 0 ? scope : scope.slice(separator + 1);
+    const kind = { tenant: "workspace", "scm-account": "scm_account", project: "project", repository: "repository" }[prefix] || "unknown";
+    return { kind, id };
+  }
+
+  function secretScopeLabel(scope) {
+    const inventory = state.secretInventory || { projects: [], scm_accounts: [], repositories: [] };
+    if (scope.kind === "workspace") return state.data.session.tenantName || "Workspace";
+    if (scope.kind === "project") return inventory.projects.find((item) => item.id === scope.id)?.name || scope.id;
+    if (scope.kind === "scm_account") return inventory.scm_accounts.find((item) => item.id === scope.id)?.name || scope.id;
+    if (scope.kind === "repository") {
+      const repository = inventory.repositories.find((item) => item.id === scope.id);
+      return repository ? `${repository.owner}/${repository.name}` : scope.id;
+    }
+    return scope.id;
+  }
+
+  function renderSecretInventory() {
+    const inventory = state.secretInventory || { secrets: [], projects: [], scm_accounts: [], repositories: [] };
+    const query = byId("secret-search").value.trim().toLowerCase();
+    const filter = byId("secret-scope-filter").value;
+    const rows = inventory.secrets.map((secret) => ({ ...secret, parsedScope: secretScope(secret.scope) })).filter((secret) => {
+      const label = secretScopeLabel(secret.parsedScope);
+      return (filter === "all" || filter === secret.parsedScope.kind) && `${secret.name} ${label}`.toLowerCase().includes(query);
+    });
+    byId("secret-visible-count").textContent = rows.length;
+    byId("secret-total-count").textContent = `${inventory.secrets.length} total`;
+    byId("secret-inventory-body").innerHTML = rows.map((secret) => {
+      const scopeLabel = secretScopeLabel(secret.parsedScope);
+      const actions = secret.status === "active" ? `<div class="setting-actions"><button class="setting-action" type="button" data-edit-scoped-secret="${escapeHtml(secret.name)}" data-secret-scope-kind="${escapeHtml(secret.parsedScope.kind)}" data-secret-scope-id="${escapeHtml(secret.parsedScope.id)}">Rotate</button><button class="setting-action danger-text" type="button" data-delete-scoped-secret="${escapeHtml(secret.name)}" data-secret-scope-kind="${escapeHtml(secret.parsedScope.kind)}" data-secret-scope-id="${escapeHtml(secret.parsedScope.id)}">Delete</button></div>` : "";
+      return `<tr><td><strong class="mono setting-name">${escapeHtml(secret.name)}</strong><small>${escapeHtml(titleCase(secret.secret_type || "opaque"))}</small></td><td><span class="scope-chip">${escapeHtml(titleCase(secret.parsedScope.kind))}</span><small>${escapeHtml(scopeLabel)}</small></td><td>${escapeHtml(secret.provider)}</td><td><span class="state-badge ${tone(secret.status)}">${escapeHtml(titleCase(secret.status))}</span></td><td>${escapeHtml(secret.current_version ?? "External")}</td><td>${escapeHtml(formatDate(secret.updated_unix_ms))}</td><td>${actions}</td></tr>`;
+    }).join("");
+    byId("secret-inventory-empty").hidden = rows.length > 0;
+    byId("secret-inventory-body").closest("table").hidden = rows.length === 0;
+
+    byId("secret-project-count").textContent = `${inventory.projects.length} project${inventory.projects.length === 1 ? "" : "s"}`;
+    byId("secret-project-list").innerHTML = inventory.projects.map((project) => {
+      const targets = project.targets.map((target) => secretScopeLabel({ kind: target.kind, id: target.id }));
+      return `<article class="secret-project-card"><div><span class="state-badge ${tone(project.status)}">${escapeHtml(titleCase(project.status))}</span><h3>${escapeHtml(project.name)}</h3><p>${escapeHtml(project.description || "No description")}</p><small>${escapeHtml(targets.length ? targets.join(" · ") : "No targets")}</small></div><button class="btn btn-secondary btn-inline btn-compact" type="button" data-edit-secret-project="${escapeHtml(project.id)}">Edit</button></article>`;
+    }).join("");
+    byId("secret-project-empty").hidden = inventory.projects.length > 0;
+  }
+
+  async function loadSecretInventory(force = false) {
+    if (state.secretInventoryLoading || (state.secretInventory && !force)) return;
+    state.secretInventoryLoading = true;
+    try {
+      const response = await fetch("/api/v1/ui/secrets", { credentials: "same-origin", headers: { accept: "application/json" }, cache: "no-store" });
+      if (!response.ok) throw new Error(response.status === 403 ? "You do not have access to secrets." : "Could not load secrets.");
+      state.secretInventory = await response.json();
+      renderSecretInventory();
+    } catch (error) { showToast(error.message || "Could not load secrets."); }
+    finally { state.secretInventoryLoading = false; }
+  }
+
+  function secretScopeOptions() {
+    const inventory = state.secretInventory || { projects: [], scm_accounts: [], repositories: [] };
+    const options = [{ kind: "workspace", id: inventory.workspace_id, label: `Workspace · ${state.data.session.tenantName}` }];
+    inventory.projects.filter((item) => item.status === "active").forEach((item) => options.push({ kind: "project", id: item.id, label: `Project · ${item.name}` }));
+    inventory.scm_accounts.forEach((item) => options.push({ kind: "scm_account", id: item.id, label: `GitHub organization · ${item.name}` }));
+    inventory.repositories.forEach((item) => options.push({ kind: "repository", id: item.id, label: `Repository · ${item.owner}/${item.name}` }));
+    return options;
+  }
+
+  function openScopedSecret(name = "", scopeKind = "", scopeId = "") {
+    const select = byId("scoped-secret-scope");
+    const options = secretScopeOptions();
+    select.innerHTML = options.map((option) => `<option value="${escapeHtml(`${option.kind}:${option.id}`)}">${escapeHtml(option.label)}</option>`).join("");
+    if (scopeKind && scopeId) select.value = `${scopeKind}:${scopeId}`;
+    select.disabled = Boolean(name);
+    byId("scoped-secret-title").textContent = name ? "Rotate secret" : "Add secret";
+    byId("scoped-secret-name").value = name;
+    byId("scoped-secret-name").readOnly = Boolean(name);
+    byId("scoped-secret-value").value = "";
+    byId("scoped-secret-dialog").showModal();
+    (name ? byId("scoped-secret-value") : byId("scoped-secret-name")).focus();
+  }
+
+  async function saveScopedSecret(event) {
+    event.preventDefault();
+    const button = byId("save-scoped-secret");
+    const [scopeKind, ...scopeId] = byId("scoped-secret-scope").value.split(":");
+    button.disabled = true; button.textContent = "Saving…";
+    try {
+      const body = new URLSearchParams({ csrf_token: state.data.session.csrfToken, idempotency_key: crypto.randomUUID(), scope_kind: scopeKind, scope_id: scopeId.join(":"), name: byId("scoped-secret-name").value.trim(), value: byId("scoped-secret-value").value });
+      const response = await fetch("/api/v1/ui/secrets", { method: "POST", body, credentials: "same-origin" });
+      if (!response.ok) { const problem = await response.json().catch(() => null); throw new Error(problem?.detail || "Could not save secret."); }
+      byId("scoped-secret-dialog").close();
+      state.secretInventory = null; await loadSecretInventory(true); showToast("Secret saved.");
+    } catch (error) { showToast(error.message || "Could not save secret."); }
+    finally { byId("scoped-secret-value").value = ""; button.disabled = false; button.textContent = "Save secret"; }
+  }
+
+  function openSecretProject(projectId = "") {
+    const project = state.secretInventory?.projects.find((item) => item.id === projectId);
+    byId("secret-project-title").textContent = project ? "Edit project" : "New project";
+    byId("secret-project-id").value = project?.id || "";
+    byId("secret-project-version").value = project?.version || 0;
+    byId("secret-project-name").value = project?.name || "";
+    byId("secret-project-description").value = project?.description || "";
+    const selected = new Set((project?.targets || []).map((target) => `${target.kind}:${target.id}`));
+    const targets = secretScopeOptions().filter((item) => ["scm_account", "repository"].includes(item.kind));
+    byId("secret-project-targets").innerHTML = targets.map((target) => `<label class="project-target-option"><input type="checkbox" value="${escapeHtml(`${target.kind}:${target.id}`)}" ${selected.has(`${target.kind}:${target.id}`) ? "checked" : ""}><span>${escapeHtml(target.label)}</span></label>`).join("") || `<p class="muted-copy">Connect a GitHub organization or repository first.</p>`;
+    byId("secret-project-dialog").showModal();
+    byId("secret-project-name").focus();
+  }
+
+  async function saveSecretProject(event) {
+    event.preventDefault();
+    const button = byId("save-secret-project");
+    const targets = [...byId("secret-project-targets").querySelectorAll("input:checked")].map((input) => { const [kind, ...id] = input.value.split(":"); return { kind, id: id.join(":") }; });
+    button.disabled = true; button.textContent = "Saving…";
+    try {
+      const body = new URLSearchParams({ csrf_token: state.data.session.csrfToken, id: byId("secret-project-id").value, expected_version: byId("secret-project-version").value, name: byId("secret-project-name").value.trim(), description: byId("secret-project-description").value.trim(), targets: JSON.stringify(targets) });
+      const response = await fetch("/api/v1/ui/secret-projects", { method: "POST", body, credentials: "same-origin" });
+      if (!response.ok) { const problem = await response.json().catch(() => null); throw new Error(problem?.detail || "Could not save project."); }
+      byId("secret-project-dialog").close();
+      state.secretInventory = null; await loadSecretInventory(true); showToast("Project saved.");
+    } catch (error) { showToast(error.message || "Could not save project."); }
+    finally { button.disabled = false; button.textContent = "Save project"; }
+  }
+
+  function openScopedSecretDelete(name, scopeKind, scopeId) {
+    state.pendingScopedSecretDelete = { name, scopeKind, scopeId };
+    byId("delete-setting-title").textContent = "Delete secret?";
+    byId("delete-setting-name").textContent = name;
+    byId("confirm-delete-setting").textContent = "Delete secret";
+    byId("delete-setting-dialog").showModal();
+  }
+
+  async function deleteScopedSecret() {
+    const pending = state.pendingScopedSecretDelete;
+    if (!pending) return;
+    const button = byId("confirm-delete-setting");
+    button.disabled = true; button.textContent = "Deleting…";
+    try {
+      const body = new URLSearchParams({ csrf_token: state.data.session.csrfToken, scope_kind: pending.scopeKind, scope_id: pending.scopeId, name: pending.name });
+      const response = await fetch("/api/v1/ui/secrets/delete", { method: "POST", body, credentials: "same-origin" });
+      if (!response.ok) { const problem = await response.json().catch(() => null); throw new Error(problem?.detail || "Could not delete secret."); }
+      byId("delete-setting-dialog").close(); state.secretInventory = null; await loadSecretInventory(true); showToast("Secret deleted.");
+    } catch (error) { showToast(error.message || "Could not delete secret."); }
+    finally { state.pendingScopedSecretDelete = null; button.disabled = false; button.textContent = "Delete secret"; }
   }
 
   async function loadRepositorySettings(force = false) {
@@ -399,7 +788,7 @@
       switchView("repositories");
       showToast(`${repository.key} disconnected.`);
     } catch (error) { showToast(error.message || "Could not disconnect repository."); }
-    finally { state.repositoryUninstalling = false; button.disabled = false; button.textContent = "Disconnect"; }
+    finally { state.repositoryUninstalling = false; button.disabled = false; button.textContent = "Disconnect repository"; }
   }
 
   function openRepositorySetting(kind, name = "") {
@@ -459,6 +848,7 @@
   }
 
   async function deleteRepositorySetting() {
+    if (state.pendingScopedSecretDelete) return deleteScopedSecret();
     if (!state.pendingSettingDelete) return;
     const { kind, name, scope } = state.pendingSettingDelete;
     if (scope === "repository" && !state.activeRepository) return;
@@ -511,13 +901,15 @@
   function renderRunDetail(run, detail) {
     state.activeRunDetails = detail;
     const duration = formatDuration(run.startedAt, run.completedAt);
+    const source = run.source || {};
+    byId("run-source-card").innerHTML = runSourceCardMarkup(run);
     byId("run-summary").innerHTML = [
       ["Status", `<span class="state-badge ${tone(run.status)}">${escapeHtml(titleCase(run.status))}</span>`],
       ["Duration", escapeHtml(duration)],
       ["Started", escapeHtml(formatDate(run.startedAt))],
       ["Completed", escapeHtml(formatDate(run.completedAt))],
     ].map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join("");
-    byId("run-identifiers").innerHTML = `<div><dt>Run ID</dt><dd class="mono">${escapeHtml(run.id)}</dd></div><div><dt>Capsule ID</dt><dd class="mono">${escapeHtml(run.planId)}</dd></div><div><dt>Execution</dt><dd>${run.remote ? "Remote runner" : "Local"}${run.priority ? ` · Priority ${escapeHtml(run.priority)}` : ""}</dd></div>${run.cancelReason ? `<div><dt>Cancel reason</dt><dd>${escapeHtml(run.cancelReason)}</dd></div>` : ""}`;
+    byId("run-identifiers").innerHTML = `<div><dt>Workflow</dt><dd>${escapeHtml(source.workflowName || "Not recorded")}</dd></div><div><dt>Execution</dt><dd>${run.remote ? "Remote runner" : "Local"}${run.priority ? ` · Priority ${escapeHtml(run.priority)}` : ""}</dd></div><div><dt>Run ID</dt><dd class="mono">${escapeHtml(run.id)}</dd></div><div><dt>Capsule ID</dt><dd class="mono">${escapeHtml(run.planId)}</dd></div>${run.cancelReason ? `<div><dt>Cancel reason</dt><dd>${escapeHtml(run.cancelReason)}</dd></div>` : ""}`;
 
     byId("run-job-count").textContent = `${detail.jobs.length} ${detail.jobs.length === 1 ? "job" : "jobs"}`;
     byId("run-job-list").innerHTML = detail.jobs.length ? detail.jobs.map((job, index) => {
@@ -548,8 +940,8 @@
     if (!run) return;
     state.activeRunId = id;
     state.activeRunDetails = null;
-    byId("run-detail-title").textContent = `Run ${compactId(run.id).replace(/^run-/, "")}`;
-    byId("run-detail-copy").textContent = run.repository;
+    byId("run-detail-title").textContent = run.source?.workflowName || `Run ${compactId(run.id).replace(/^run-/, "")}`;
+    byId("run-detail-copy").textContent = `${run.repository} · ${runEventLabel(run)}`;
     byId("run-detail-loading").hidden = false;
     byId("run-detail-error").hidden = true;
     byId("run-detail-content").hidden = true;
@@ -722,7 +1114,7 @@
   }
 
   function switchView(view, updateHash = true) {
-    const allowed = ["repositories", "repository", "organization", "github", "runs", "approvals", "runners", "api-tokens", "audit"];
+    const allowed = ["repositories", "repository", "organization", "secrets", "github", "identity", "runs", "approvals", "runners", "api-tokens", "audit"];
     const target = document.querySelector(`[data-view="${view}"]`);
     const capability = target?.dataset.capability;
     if (!allowed.includes(view) || !target || (capability && !state.data.capabilities?.[capability])) view = "repositories";
@@ -732,10 +1124,42 @@
       button.classList.toggle("active", active);
       if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
     });
-    if (updateHash && view !== "repository") history.replaceState(null, "", `${location.pathname}${location.search}#${view}`);
+    if (updateHash) updateRoute(view === "repository" ? repositoryRoute() : view);
     if (view === "organization") loadOrganizationSettings();
+    if (view === "secrets") loadSecretInventory();
+    if (view === "identity") loadIdentity();
     closeNavigation();
     document.querySelector(`[data-view="${view}"] h1`)?.focus({ preventScroll: true });
+    return view;
+  }
+
+  function restoreRoute() {
+    const repositoryPathPrefix = `${workspacePath}repositories/`;
+    const route = location.pathname.startsWith(repositoryPathPrefix)
+      ? `repository/${location.pathname.slice(repositoryPathPrefix.length)}`
+      : location.hash.slice(1);
+    const parts = route.split("/");
+    if (parts[0] === "repository" && parts.length >= 3) {
+      let organization;
+      let name;
+      try {
+        organization = decodeURIComponent(parts[1]);
+        name = decodeURIComponent(parts[2]);
+      } catch {
+        organization = "";
+        name = "";
+      }
+      const repository = state.data.repositories.find((item) => item.organization === organization && item.name === name);
+      if (repository) {
+        const section = repositorySections.has(parts[3]) ? parts[3] : "overview";
+        openRepository(repository.id, section, false);
+        updateRoute(repositoryRoute(), true);
+        return;
+      }
+    }
+    const requestedView = parts.length === 1 ? parts[0] : "repositories";
+    const view = switchView(requestedView, false);
+    if (route !== view) updateRoute(view, true);
   }
 
   function openNavigation() { byId("workspace").classList.add("nav-open"); byId("mobile-menu").setAttribute("aria-expanded", "true"); }
@@ -966,11 +1390,11 @@
     if (!action) return showToast("GitHub App configuration is not ready.");
     const fields = { csrf_token: action.csrfToken, idempotency_key: action.idempotencyKey };
     if (repositories.length) fields.repository_ids = repositories.map((repository) => repository.externalRepositoryId).join(",");
-    submitLocalForm("/ui/github/installations/start", fields);
+    submitLocalForm("/github/installations/start", fields);
   }
 
   function refreshGitHubAccess() {
-    location.assign("/auth/login?return_to=%2Fui%2Fgithub%2Finstallations");
+    location.assign(`/auth/login?return_to=${encodeURIComponent(`${location.pathname}${location.search}`)}`);
   }
 
   async function reloadGitHubData() {
@@ -978,10 +1402,41 @@
     await loadOrganizations({ preserveSelection: true, reloadSelected: true });
   }
 
+  async function refreshRepositoryRuns() {
+    if (!state.activeRepository || state.repositoryRunsRefreshing) return;
+    const button = byId("refresh-repository-runs");
+    state.repositoryRunsRefreshing = true;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.textContent = "Refreshing…";
+    try {
+      const response = await fetch("/api/v1/ui/github", { credentials: "same-origin", headers: { accept: "application/json" }, cache: "no-store" });
+      if (response.status === 401) return showLogin();
+      if (!response.ok) throw new Error("Could not refresh repository runs.");
+      const dashboard = await response.json();
+      state.data.runs = dashboard.runs || [];
+      configureRunFilters();
+      renderRuns();
+      if (state.activeRepository) {
+        const runs = state.data.runs.filter((run) => run.repositoryId === state.activeRepository.id);
+        renderRepositoryRuns(runs);
+        byId("repository-execution-metadata").innerHTML = definitionCard("Runs", runs.length) + definitionCard("Latest activity", runs[0] ? formatDate(runs[0].createdAt) : "No runs yet");
+      }
+      showToast("Repository runs refreshed.");
+    } catch (error) {
+      showToast(error.message || "Could not refresh repository runs.");
+    } finally {
+      state.repositoryRunsRefreshing = false;
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.textContent = "Refresh runs";
+    }
+  }
+
   async function logout() {
     const body = new URLSearchParams({ csrf_token: state.data.session.csrfToken });
     const response = await fetch("/auth/session/logout", { method: "POST", body, credentials: "same-origin" });
-    if (response.ok) location.assign("/ui/github/installations"); else showToast("Could not end the current session.");
+    if (response.ok) location.assign("/"); else showToast("Could not end the current session.");
   }
 
   async function addSelectedRepositories() {
@@ -992,7 +1447,7 @@
         const response = await fetch("/ui/github/repositories/link", { method: "POST", body, credentials: "same-origin" });
         if (!response.ok) throw new Error(`Repository link failed (${response.status})`);
       }
-      location.assign("/ui/github/installations?github=linked");
+      location.assign("/?github=linked");
     } catch (error) { showToast(error.message || "Could not add the selected repositories."); button.disabled = false; button.textContent = "Add selected"; }
   }
 
@@ -1006,7 +1461,7 @@
   }
 
   function bindEvents() {
-    byId("github-signin").addEventListener("click", () => location.assign("/auth/login?return_to=%2Fui%2Fgithub%2Finstallations"));
+    byId("github-signin").addEventListener("click", () => refreshGitHubAccess());
     byId("logout").addEventListener("click", logout);
     byId("catalog-search").addEventListener("input", renderRepositories);
     document.querySelectorAll("[data-source]").forEach((button) => button.addEventListener("click", () => { state.repositorySource = button.dataset.source; document.querySelectorAll("[data-source]").forEach((item) => { const active = item === button; item.classList.toggle("active", active); item.setAttribute("aria-pressed", String(active)); }); renderRepositories(); }));
@@ -1015,11 +1470,15 @@
     byId("audit-search").addEventListener("input", renderAudit);
     byId("audit-action-filter").addEventListener("change", renderAudit);
     byId("audit-result-filter").addEventListener("change", renderAudit);
+    byId("secret-search").addEventListener("input", renderSecretInventory);
+    byId("secret-scope-filter").addEventListener("change", renderSecretInventory);
+    byId("identity-user-search").addEventListener("input", renderIdentity);
     document.querySelectorAll("[data-view-target]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.viewTarget)));
     byId("catalog-content").addEventListener("click", (event) => { const button = event.target.closest("[data-open-repository]"); if (button) openRepository(button.dataset.openRepository); });
-    document.addEventListener("click", (event) => { const run = event.target.closest("[data-open-run]"); const approval = event.target.closest("[data-open-approval]"); const token = event.target.closest("[data-open-token]"); const secret = event.target.closest("[data-edit-secret]"); const deleteSetting = event.target.closest("[data-delete-setting]"); const variable = event.target.closest("[data-edit-variable]"); if (run) openRun(run.dataset.openRun); if (approval) openApproval(approval.dataset.openApproval); if (token) openToken(token.dataset.openToken); if (secret) openSetting(secret.dataset.settingScope || "repository", "secret", secret.dataset.editSecret); if (deleteSetting) openDeleteSetting(deleteSetting.dataset.deleteSetting, deleteSetting.dataset.settingName, deleteSetting.dataset.settingScope || "repository"); if (variable) openSetting(variable.dataset.settingScope || "repository", "variable", variable.dataset.editVariable); });
+    document.addEventListener("click", (event) => { const run = event.target.closest("[data-open-run]"); const approval = event.target.closest("[data-open-approval]"); const token = event.target.closest("[data-open-token]"); const secret = event.target.closest("[data-edit-secret]"); const scopedSecret = event.target.closest("[data-edit-scoped-secret]"); const scopedDelete = event.target.closest("[data-delete-scoped-secret]"); const project = event.target.closest("[data-edit-secret-project]"); const deleteSetting = event.target.closest("[data-delete-setting]"); const variable = event.target.closest("[data-edit-variable]"); const team = event.target.closest("[data-edit-team]"); const user = event.target.closest("[data-edit-user]"); if (run) openRun(run.dataset.openRun); if (approval) openApproval(approval.dataset.openApproval); if (token) openToken(token.dataset.openToken); if (secret) openSetting(secret.dataset.settingScope || "repository", "secret", secret.dataset.editSecret); if (scopedSecret) openScopedSecret(scopedSecret.dataset.editScopedSecret, scopedSecret.dataset.secretScopeKind, scopedSecret.dataset.secretScopeId); if (scopedDelete) openScopedSecretDelete(scopedDelete.dataset.deleteScopedSecret, scopedDelete.dataset.secretScopeKind, scopedDelete.dataset.secretScopeId); if (project) openSecretProject(project.dataset.editSecretProject); if (deleteSetting) openDeleteSetting(deleteSetting.dataset.deleteSetting, deleteSetting.dataset.settingName, deleteSetting.dataset.settingScope || "repository"); if (variable) openSetting(variable.dataset.settingScope || "repository", "variable", variable.dataset.editVariable); if (team) openEditTeam(team.dataset.editTeam); if (user) openEditUser(user.dataset.editUser); });
     byId("back-to-repositories").addEventListener("click", () => switchView("repositories"));
     document.querySelectorAll("[data-repository-section]").forEach((button) => button.addEventListener("click", () => setRepositorySection(button.dataset.repositorySection)));
+    byId("refresh-repository-runs").addEventListener("click", refreshRepositoryRuns);
     byId("mobile-menu").addEventListener("click", openNavigation); byId("sidebar-scrim").addEventListener("click", closeNavigation);
     byId("open-add-dialog").addEventListener("click", openAddDialog); byId("manage-github").addEventListener("click", submitInstallAction); byId("dialog-manage-github").addEventListener("click", submitInstallAction); byId("dialog-refresh-github").addEventListener("click", reloadGitHubData);
     byId("close-dialog").addEventListener("click", () => byId("add-repo-dialog").close()); byId("cancel-add").addEventListener("click", () => byId("add-repo-dialog").close()); byId("confirm-add").addEventListener("click", confirmSelectedRepositories); byId("select-all-repositories").addEventListener("click", toggleVisibleRepositories);
@@ -1035,17 +1494,33 @@
     byId("add-repository-variable").addEventListener("click", () => openRepositorySetting("variable"));
     byId("add-organization-secret").addEventListener("click", () => openOrganizationSetting("secret"));
     byId("add-organization-variable").addEventListener("click", () => openOrganizationSetting("variable"));
+    byId("add-scoped-secret").addEventListener("click", () => openScopedSecret());
+    byId("add-secret-project").addEventListener("click", () => openSecretProject());
+    byId("scoped-secret-form").addEventListener("submit", saveScopedSecret);
+    byId("close-scoped-secret").addEventListener("click", () => byId("scoped-secret-dialog").close());
+    byId("cancel-scoped-secret").addEventListener("click", () => byId("scoped-secret-dialog").close());
+    byId("secret-project-form").addEventListener("submit", saveSecretProject);
+    byId("close-secret-project").addEventListener("click", () => byId("secret-project-dialog").close());
+    byId("cancel-secret-project").addEventListener("click", () => byId("secret-project-dialog").close());
+    byId("open-create-user").addEventListener("click", openCreateUser);
+    byId("open-create-team").addEventListener("click", openCreateTeam);
+    byId("team-form").addEventListener("submit", saveTeam);
+    byId("user-form").addEventListener("submit", saveUser);
+    byId("close-team-dialog").addEventListener("click", () => byId("team-dialog").close());
+    byId("cancel-team-dialog").addEventListener("click", () => byId("team-dialog").close());
+    byId("close-user-dialog").addEventListener("click", () => byId("user-dialog").close());
+    byId("cancel-user-dialog").addEventListener("click", () => byId("user-dialog").close());
     byId("repository-setting-form").addEventListener("submit", saveRepositorySetting);
     byId("repository-workflow-directory-form").addEventListener("submit", saveRepositoryWorkflowDirectory);
     byId("close-repository-setting").addEventListener("click", () => byId("repository-setting-dialog").close());
     byId("cancel-repository-setting").addEventListener("click", () => byId("repository-setting-dialog").close());
     byId("cancel-delete-setting").addEventListener("click", () => byId("delete-setting-dialog").close());
     byId("confirm-delete-setting").addEventListener("click", deleteRepositorySetting);
-    byId("delete-setting-dialog").addEventListener("close", () => { state.pendingSettingDelete = null; });
+    byId("delete-setting-dialog").addEventListener("close", () => { state.pendingSettingDelete = null; state.pendingScopedSecretDelete = null; });
     byId("open-uninstall-repository").addEventListener("click", openUninstallRepository);
     byId("cancel-uninstall-repository").addEventListener("click", () => byId("uninstall-repository-dialog").close());
     byId("confirm-uninstall-repository").addEventListener("click", uninstallRepository);
-    window.addEventListener("hashchange", () => switchView(location.hash.slice(1), false));
+    window.addEventListener("popstate", restoreRoute);
   }
 
   async function start() {
@@ -1058,7 +1533,7 @@
       if (!response.ok) return showLogin("The workspace is temporarily unavailable. Please sign in again or retry shortly.");
       state.data = await response.json();
       showWorkspace(); configureRunFilters(); configureAuditFilters(); renderRepositories(); renderAlert(); renderRuns(); renderApprovals(); renderGitHub(); renderRunners(); renderTokens(); renderAudit();
-      switchView(location.hash.slice(1), false);
+      restoreRoute();
     } catch (error) {
       const detail = error instanceof Error ? `${error.name}: ${error.message}` : "Unknown rendering error";
       fetch("/frontend-client-error", {

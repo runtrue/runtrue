@@ -12,9 +12,18 @@ Implemented routes:
 
 - `GET /healthz` and `GET /readyz`
 - `GET|POST /api/v1/repositories` and `GET /api/v1/repositories/{id}`
+- tenant-scoped user and team administration under
+  `/api/v1/tenants/{tenant_id}/users` and
+  `/api/v1/tenants/{tenant_id}/teams`, including versioned user updates and
+  team membership management
+- provider-neutral direct user or team repository grants at
+  `/api/v1/repositories/{id}/access`; grants use `read`, `write`, or `admin`,
+  and `GET /api/v1/tenants/{tenant_id}/users/{user_id}/repositories` resolves
+  the strongest effective permission across direct and inherited team access
 - workflow compilation and Capsule signing with
   `POST /api/v1/repositories/{id}/capsules`, plus `GET /api/v1/capsules/{id}`
 - run creation/list/get/cancel and canonical replay-bundle create/get routes
+- immutable durable-event metadata plus idempotent failed-event replay routes
 - approval collection/get routes and
   `POST /api/v1/approval-requests/{id}/decisions`
 - scoped secret metadata/create/rotate/tombstone routes and versioned variables;
@@ -24,11 +33,18 @@ Implemented routes:
   verified audit-event listing
 - OIDC discovery/JWKS and runner-mTLS-only short-lived workload JWT minting
 - `POST /webhooks/github`, which authenticates exact bytes, normalizes the
-  provider event, and durably deduplicates the resulting background task
+  provider event, and atomically stores the immutable event with its deduplicated
+  background task
 
 Webhook acknowledgement never waits for Git or workflow compilation. Configure
 `--git-mirror-root` / `RUNTRUE_GIT_MIRROR_ROOT` to enable the bounded SCM task
 worker; with no configured root, authenticated events remain durably pending.
+
+Failed event deliveries can be redelivered with
+`POST /api/v1/events/{event_id}/replay`. The caller must provide an
+`Idempotency-Key`; replay requeues the same task with the exact stored payload
+and stable processing identity while preserving the original event. Pending, claimed, and completed
+events are rejected, and replay acceptance is written to the audit chain.
 The root and each `<owner>/<repository>` directory must be real mode-0700 Unix
 directories (not symlinks), with a real `.git` directory. The worker does not
 fetch or execute repository content. It opens only the exact normalized
@@ -100,6 +116,14 @@ tokens cannot operate on promotion or policy-version resources until those
 records have durable tenant ownership. Bootstrap authentication remains an
 installation-wide recovery/administration principal, and approval decisions
 record the actual authenticated principal ID.
+
+User-management authorization has dedicated Cedar actions (`ManageUser`,
+`ManageTeam`, and `ManageRepositoryAccess`) and resources. Tenant identity
+routes always include the tenant in the path; repository grant routes derive
+the tenant from the durable repository record. Cross-tenant requests therefore
+follow the same not-found concealment behavior as the rest of the API. The
+model is independent of GitHub accounts and installations so provider-facing
+UIs can be added without becoming the source of truth for access.
 
 Production startup creates or reloads a durable 32-byte mode-0600 installation
 key from `--security-key-file` / `RUNTRUE_SECURITY_KEY_FILE` (default

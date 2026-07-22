@@ -105,7 +105,7 @@ crates/executor-wasm/src/host.rs|1155|844
 crates/executor-wasm/src/lib.rs|2297|1561
 crates/executor-wasm/src/rooted_fs.rs|394|263
 crates/expression/src/lib.rs|1969|-
-crates/gha-import/src/lib.rs|4296|3941
+frontends/github-actions/src/lib.rs|4296|3941
 crates/git/src/benchmark.rs|167|117
 crates/git/src/lib.rs|2539|1741
 crates/git/src/mirror.rs|3027|2335
@@ -176,7 +176,7 @@ module paths. The baseline search covered all Rust sources with
 ## Fixtures and explicit review items
 
 Protocol fixtures are `crates/protocol/tests/fixtures/runner-v1.sha256` and
-`runner-v2.sha256`; importer fixtures are under `crates/gha-import/tests/fixtures/`.
+`runner-v2.sha256`; importer fixtures are under `frontends/github-actions/tests/fixtures/`.
 Test/fixture-heavy files include the test files shown in the inventory. The
 875-line `crates/protocol/tests/contract.rs` is an explicit extra review item.
 The smaller explicit-review crates are `executor-dispatch`, `lifecycle`,

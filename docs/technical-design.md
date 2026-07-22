@@ -488,7 +488,9 @@ A hardened image build and verification tool for:
 These are disabled in the minimal deployment:
 
 - `runtrue-cache-agent`: rack/region cache and registry proxy.
-- `runtrue-autoscaler`: provisions and drains runner hosts.
+- `runtrue-autoscaler`: reusable Rust reconciliation core that provisions and
+  drains runner hosts. It runs as a least-privileged standalone process by
+  default and can be composed into `runtrue-server` for compact installations.
 - `runtrue-analytics`: ClickHouse-oriented high-volume event ingest/query service.
 - `runtrue-log-shipper`: external OpenTelemetry or object-log export.
 - `runtrue-mirror`: air-gapped action, image, and toolchain mirror.
@@ -1349,6 +1351,18 @@ Controls:
 - AOT cache keyed by Wasmtime version, target, component digest, and CPU feature floor.
 - Signed component manifests and WIT version checks.
 - Fuzz host adapters and reject resource leaks.
+
+Runner hosts share one Wasmtime Engine, admitted Component set, and
+authenticated AOT cache across concurrent jobs. Each invocation receives a
+fresh Store and host state. The runner advertises an operator-configured Wasm
+slot ceiling in its signed posture, and the scheduler admits a lease only when
+both a slot and the declared CPU, memory, and storage remain available. OCI,
+native, and microVM leases remain exclusive at the runner-process boundary.
+Fleet demand is measured in active, available, and pending slots; scale-up
+targets 75 percent slot utilization and rounds missing slots into whole worker
+instances. A cold pool with no matching enrolled runner is conservatively
+treated as one slot per pending worker until capacity is observed. Scale-down
+still drains an entirely idle worker before termination.
 
 ### 12.10 Native runner security
 

@@ -22,6 +22,8 @@ pub enum ReplayError {
         expected: ContentDigest,
         actual: ContentDigest,
     },
+    #[error("replay workflow frontend report does not match signed capsule provenance")]
+    WorkflowFrontendReportMismatch,
     #[error("credential-tainted execution cannot be published as a replay bundle")]
     CredentialTainted,
     #[error(transparent)]

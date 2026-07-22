@@ -1,17 +1,24 @@
 use clap::Parser;
 use rand_core::{OsRng, RngCore as _};
-use runtrue_control_plane::ControlPlane;
+use runtrue_control_plane::{ControlPlane, ControlPlaneStore};
+#[cfg(feature = "postgres")]
+use runtrue_control_plane::{
+    DatabaseBackendKind, DatabaseReadiness, InstallationStateStore, PostgresDatabaseConfig,
+    PostgresInstallationStore, POSTGRES_SCHEMA_VERSION,
+};
 use runtrue_scm::{
     validate_github_app_jwt, GitHubAppBroker, GitHubAppJwtProvider, GitHubAppPublicConfig,
     GitHubError, GitHubInstallationService, GitHubProviderEndpoints, GitHubTransportLimits,
     HardenedGitHubTransport, SensitiveToken, SharedGitHubInstallationProvider,
 };
+#[cfg(feature = "postgres")]
+use runtrue_server::read_database_url_file;
 use runtrue_server::{
-    router, AppState, GitHubAppInstallationTokenProvider, GitHubInstallationTokenProvider,
-    GitHubOauthQuickstartConfig, HardenedGitHubOauthClient, HardenedHumanOidcClient,
-    HumanOidcLimits, RunnerCertificateAuthority, RunnerControlConfig, RunnerControlService,
-    RunnerEnrollmentService, ScmTaskWorker, ScmWorkerConfig, DEFAULT_RUNNER_CERTIFICATE_LIFETIME,
-    DEFAULT_SCM_WORKFLOW_DIRECTORY,
+    postgres_server_runtime_ready, router, AppState, GitHubAppInstallationTokenProvider,
+    GitHubInstallationTokenProvider, GitHubOauthQuickstartConfig, HardenedGitHubOauthClient,
+    HardenedHumanOidcClient, HumanOidcLimits, RunnerCertificateAuthority, RunnerControlConfig,
+    RunnerControlService, RunnerEnrollmentService, ScmTaskWorker, ScmWorkerConfig,
+    DEFAULT_RUNNER_CERTIFICATE_LIFETIME, DEFAULT_SCM_WORKFLOW_DIRECTORY,
 };
 #[cfg(feature = "github-actions")]
 use runtrue_server::{RepositoryActionBuilder, UnixRepositoryActionBuilder};
@@ -66,6 +73,10 @@ struct Args {
     /// Durable SQLite control-plane database.
     #[arg(long)]
     database: Option<PathBuf>,
+
+    /// Mode-0600 file containing the external PostgreSQL connection URL.
+    #[arg(long)]
+    database_url_file: Option<PathBuf>,
 
     /// Stable installation identifier used by fencing and normalized events.
     #[arg(long)]
@@ -163,6 +174,11 @@ struct Args {
     /// Oldest runner protocol generation admitted by enrollment and Open.
     #[arg(long)]
     runner_protocol_minimum: Option<u32>,
+
+    /// Run provider reconciliation in this server process. Production
+    /// deployments should normally launch the same Rust core separately.
+    #[arg(long)]
+    embedded_autoscaler: bool,
 }
 
 struct RunnerGrpcPaths {
@@ -198,9 +214,52 @@ struct GitHubOauthStartupConfig {
     allowed_roles: BTreeMap<u64, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DatabaseSelection {
+    Sqlite(PathBuf),
+    PostgresUrlFile(PathBuf),
+}
+
+fn database_selection(
+    sqlite_database: Option<PathBuf>,
+    postgres_url_file: Option<PathBuf>,
+) -> Result<DatabaseSelection, StartupError> {
+    match (sqlite_database, postgres_url_file) {
+        (Some(_), Some(_)) => Err(StartupError::ConflictingDatabaseConfiguration),
+        (Some(path), None) => Ok(DatabaseSelection::Sqlite(path)),
+        (None, Some(path)) => Ok(DatabaseSelection::PostgresUrlFile(path)),
+        (None, None) => Ok(DatabaseSelection::Sqlite(PathBuf::from(DEFAULT_DATABASE))),
+    }
+}
+
+fn require_postgres_server_runtime() -> Result<(), StartupError> {
+    if runtrue_control_plane::postgres_transfer_ready() && postgres_server_runtime_ready() {
+        Ok(())
+    } else {
+        Err(StartupError::PostgresServerRuntimeIncomplete)
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn require_postgres_database_activation(readiness: &DatabaseReadiness) -> Result<(), StartupError> {
+    if readiness.backend != DatabaseBackendKind::Postgres {
+        return Err(StartupError::PostgresBackendMismatch);
+    }
+    if readiness.schema_version != POSTGRES_SCHEMA_VERSION {
+        return Err(StartupError::PostgresSchemaVersion {
+            expected: POSTGRES_SCHEMA_VERSION,
+            actual: readiness.schema_version,
+        });
+    }
+    if readiness.recovery.safe_mode {
+        return Err(StartupError::PostgresRestoreSafeMode);
+    }
+    Ok(())
+}
+
 struct Config {
     listen: SocketAddr,
-    database: PathBuf,
+    database: DatabaseSelection,
     installation_id: String,
     bootstrap_token: Zeroizing<String>,
     github_webhook_secret: Option<Zeroizing<Vec<u8>>>,
@@ -212,6 +271,7 @@ struct Config {
     git_mirror_root: Option<PathBuf>,
     data_root: PathBuf,
     runner_grpc: Option<RunnerGrpcPaths>,
+    embedded_autoscaler: bool,
 }
 
 impl Config {
@@ -223,10 +283,16 @@ impl Config {
                 .parse()
                 .map_err(|_| StartupError::InvalidListen)?,
         };
-        let database = args
+        if env::var_os("RUNTRUE_DATABASE_URL").is_some() {
+            return Err(StartupError::DatabaseUrlEnvironmentForbidden);
+        }
+        let sqlite_database = args
             .database
-            .or_else(|| env::var_os("RUNTRUE_DATABASE").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_DATABASE));
+            .or_else(|| env::var_os("RUNTRUE_DATABASE").map(PathBuf::from));
+        let postgres_url_file = args
+            .database_url_file
+            .or_else(|| env::var_os("RUNTRUE_DATABASE_URL_FILE").map(PathBuf::from));
+        let database = database_selection(sqlite_database, postgres_url_file)?;
         let installation_id = args
             .installation_id
             .or_else(|| env::var("RUNTRUE_INSTALLATION_ID").ok())
@@ -330,7 +396,12 @@ impl Config {
         let data_root = args
             .data_root
             .or_else(|| env::var_os("RUNTRUE_DATA_ROOT").map(PathBuf::from))
-            .unwrap_or_else(|| database.with_extension("data"));
+            .unwrap_or_else(|| match &database {
+                DatabaseSelection::Sqlite(path) => path.with_extension("data"),
+                DatabaseSelection::PostgresUrlFile(_) => {
+                    PathBuf::from(DEFAULT_DATABASE).with_extension("data")
+                }
+            });
         let runner_grpc_listen = args
             .runner_grpc_listen
             .or_else(|| env::var("RUNTRUE_RUNNER_GRPC_LISTEN").ok()?.parse().ok());
@@ -384,6 +455,18 @@ impl Config {
             paths.protocol_minimum = runner_protocol_minimum;
             paths
         });
+        let embedded_autoscaler = if args.embedded_autoscaler {
+            true
+        } else {
+            match env::var("RUNTRUE_EMBEDDED_AUTOSCALER") {
+                Ok(value) if value == "true" => true,
+                Ok(value) if value == "false" => false,
+                Ok(_) | Err(env::VarError::NotUnicode(_)) => {
+                    return Err(StartupError::InvalidEmbeddedAutoscaler)
+                }
+                Err(env::VarError::NotPresent) => false,
+            }
+        };
 
         Ok(Self {
             listen,
@@ -399,6 +482,7 @@ impl Config {
             git_mirror_root,
             data_root,
             runner_grpc,
+            embedded_autoscaler,
         })
     }
 }
@@ -586,6 +670,24 @@ fn runner_grpc_paths(
 enum StartupError {
     #[error("RUNTRUE_LISTEN is not a valid socket address")]
     InvalidListen,
+    #[error("configure only one database backend: RUNTRUE_DATABASE/--database or RUNTRUE_DATABASE_URL_FILE/--database-url-file")]
+    ConflictingDatabaseConfiguration,
+    #[error("RUNTRUE_DATABASE_URL is forbidden; load PostgreSQL credentials through RUNTRUE_DATABASE_URL_FILE")]
+    DatabaseUrlEnvironmentForbidden,
+    #[error("PostgreSQL server selection is disabled until every server runtime operation uses the backend-neutral persistence contracts")]
+    PostgresServerRuntimeIncomplete,
+    #[cfg(not(feature = "postgres"))]
+    #[error("this runtrue-server binary was built without PostgreSQL support")]
+    PostgresSupportUnavailable,
+    #[cfg(feature = "postgres")]
+    #[error("the selected external database did not report the PostgreSQL backend")]
+    PostgresBackendMismatch,
+    #[cfg(feature = "postgres")]
+    #[error("PostgreSQL schema version mismatch: expected {expected}, found {actual}")]
+    PostgresSchemaVersion { expected: u32, actual: u32 },
+    #[cfg(feature = "postgres")]
+    #[error("PostgreSQL remains in restore safe mode; verify and activate the transfer before server startup")]
+    PostgresRestoreSafeMode,
     #[error(
         "configure a bootstrap token with --bootstrap-token-file, RUNTRUE_BOOTSTRAP_TOKEN_FILE, or RUNTRUE_BOOTSTRAP_TOKEN"
     )]
@@ -618,6 +720,8 @@ enum StartupError {
     InvalidRunnerEnrollmentListen,
     #[error("runner protocol minimum must be a supported positive generation")]
     InvalidRunnerProtocolMinimum,
+    #[error("RUNTRUE_EMBEDDED_AUTOSCALER must be exactly `true` or `false`")]
+    InvalidEmbeddedAutoscaler,
     #[error(
         "runner gRPC requires distinct control and enrollment listen addresses, server certificate/key, and installation CA certificate/key together"
     )]
@@ -863,14 +967,51 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let scm_workflow_directory = env::var("RUNTRUE_SCM_WORKFLOW_DIRECTORY")
         .unwrap_or_else(|_| DEFAULT_SCM_WORKFLOW_DIRECTORY.to_owned());
     let listen = config.listen;
-    prepare_database_path(&config.database)?;
+    let embedded_autoscaler = if config.embedded_autoscaler {
+        Some(runtrue_autoscaler::AutoscalerRuntime::new(
+            runtrue_autoscaler::AutoscalerConfig::from_env()?,
+        )?)
+    } else {
+        None
+    };
     let now = unix_ms()?;
-    let control_plane = Arc::new(ControlPlane::open(
-        &config.database,
-        config.installation_id.as_str(),
-        now,
-    )?);
-    secure_database_file(&config.database)?;
+    let control_plane: Arc<dyn ControlPlaneStore> = match &config.database {
+        DatabaseSelection::Sqlite(database) => {
+            prepare_database_path(database)?;
+            let control_plane = Arc::new(ControlPlane::open(
+                database,
+                config.installation_id.as_str(),
+                now,
+            )?);
+            secure_database_file(database)?;
+            control_plane
+        }
+        DatabaseSelection::PostgresUrlFile(url_file) => {
+            // Do not even read the credential while a SQLite-only runtime
+            // path remains. This prevents accidental mixed-backend startup.
+            require_postgres_server_runtime()?;
+            #[cfg(feature = "postgres")]
+            {
+                let database_url = read_database_url_file(url_file)?;
+                let database_config = PostgresDatabaseConfig::parse(&database_url)?;
+                let store = Arc::new(
+                    PostgresInstallationStore::connect_existing(
+                        database_config,
+                        config.installation_id.as_str(),
+                    )
+                    .await?,
+                );
+                let readiness = store.load_database_readiness().await?;
+                require_postgres_database_activation(&readiness)?;
+                store
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                let _ = url_file;
+                return Err(StartupError::PostgresSupportUnavailable.into());
+            }
+        }
+    };
     let security_seed = load_or_create_security_seed(&config.security_key_file)?;
     let mut state = AppState::new_with_security_seed(
         Arc::clone(&control_plane),
@@ -905,15 +1046,17 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             github.client_secret.clone(),
             limits,
         )?);
-        state = state.with_github_oauth_quickstart(GitHubOauthQuickstartConfig {
-            tenant_id: github.tenant_id.clone(),
-            tenant_name: github.tenant_name.clone(),
-            web_origin: github.web_origin.clone(),
-            client_id: github.client_id.clone(),
-            adapter,
-            allowed_roles: github.allowed_roles.clone(),
-            now_unix_ms: now,
-        })?;
+        state = state
+            .with_github_oauth_quickstart(GitHubOauthQuickstartConfig {
+                tenant_id: github.tenant_id.clone(),
+                tenant_name: github.tenant_name.clone(),
+                web_origin: github.web_origin.clone(),
+                client_id: github.client_id.clone(),
+                adapter,
+                allowed_roles: github.allowed_roles.clone(),
+                now_unix_ms: now,
+            })
+            .await?;
     }
     if let Some(github) = config.github_app.as_ref() {
         if let Some(public) = github.public.as_ref() {
@@ -996,16 +1139,12 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                         }
                         _ => return Err(StartupError::InvalidRepositoryActionBuilder.into()),
                     };
-                    Some(if let Some(builder) = action_builder {
-                        state.scm_task_worker_with_github_app_and_action_builder(
-                            worker_config,
-                            tokens,
-                            load_github_installation_provider(github)?,
-                            builder,
-                        )?
-                    } else {
-                        state.scm_task_worker_with_github_app(worker_config, tokens)?
-                    })
+                    Some(state.scm_task_worker_with_github_repository_actions(
+                        worker_config,
+                        tokens,
+                        load_github_installation_provider(github)?,
+                        action_builder,
+                    )?)
                 }
                 #[cfg(not(feature = "github-actions"))]
                 {
@@ -1037,7 +1176,14 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                 .spawn(move || run_scm_worker(worker, &stop))
         })
         .transpose()?;
-    let server_result = serve_servers(listen, state, runner_grpc, Arc::clone(&stop_worker)).await;
+    let server_result = serve_servers(
+        listen,
+        state,
+        runner_grpc,
+        embedded_autoscaler,
+        Arc::clone(&stop_worker),
+    )
+    .await;
     if let Some(worker_thread) = worker_thread {
         worker_thread
             .join()
@@ -1112,10 +1258,11 @@ async fn serve_servers(
     http_listen: SocketAddr,
     state: AppState,
     runner_grpc: Option<RunnerGrpcRuntime>,
+    embedded_autoscaler: Option<runtrue_autoscaler::AutoscalerRuntime>,
     stop_worker: Arc<AtomicBool>,
 ) -> ServerTaskResult {
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-    let maintenance_control_plane = Arc::clone(&state.control_plane);
+    let maintenance_control_plane = Arc::clone(&state.store);
     let mut lifecycle_task = tokio::spawn(github_lifecycle_reconciliation_loop(
         state.clone(),
         shutdown_receiver.clone(),
@@ -1127,6 +1274,8 @@ async fn serve_servers(
         maintenance_control_plane,
         shutdown_receiver.clone(),
     ));
+    let autoscaler_task = embedded_autoscaler
+        .map(|runtime| tokio::spawn(runtime.run_until_shutdown(shutdown_receiver.clone())));
     let mut first_http_result = None;
     let mut first_grpc_result = None;
     let mut first_maintenance_result = None;
@@ -1168,12 +1317,21 @@ async fn serve_servers(
         Some(result) => result,
         None => lifecycle_task.await,
     };
+    let autoscaler_result = match autoscaler_task {
+        Some(task) => Some(task.await),
+        None => None,
+    };
     flatten_server_task(http_result)?;
     if let Some(result) = grpc_result {
         flatten_server_task(result)?;
     }
     flatten_server_task(maintenance_result)?;
     flatten_server_task(lifecycle_result)?;
+    if let Some(result) = autoscaler_result {
+        result
+            .map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })?
+            .map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })?;
+    }
     Ok(())
 }
 
@@ -1208,7 +1366,7 @@ async fn serve_runner_grpc(
 }
 
 async fn scheduler_maintenance_loop(
-    control_plane: Arc<ControlPlane>,
+    control_plane: Arc<dyn ControlPlaneStore>,
     mut shutdown: watch::Receiver<bool>,
 ) -> ServerTaskResult {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -1217,13 +1375,13 @@ async fn scheduler_maintenance_loop(
         tokio::select! {
             _ = interval.tick() => {
                 let now = unix_ms()?;
-                if let Err(error) = control_plane.perform_scheduler_maintenance(now) {
+                if let Err(error) = control_plane.maintain_runner_scheduler(now).await {
                     eprintln!("runtrue-server: scheduler maintenance failed: {error}");
                 }
                 if let Err(error) = control_plane.reconcile_due_schedules(
                     now,
                     MAX_DUE_SCHEDULES_PER_MAINTENANCE_TICK,
-                ) {
+                ).await {
                     eprintln!("runtrue-server: schedule reconciliation failed: {error}");
                 }
             }
@@ -1349,8 +1507,10 @@ fn secure_directory(path: &Path) -> Result<(), StartupError> {
         return Err(StartupError::UnsafePath(path.to_owned()));
     }
     #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|source| io_error(path, source))?;
+    if metadata.permissions().mode() & 0o7777 != 0o700 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|source| io_error(path, source))?;
+    }
     Ok(())
 }
 
@@ -1697,6 +1857,75 @@ fn io_error(path: &Path, source: io::Error) -> StartupError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_autoscaler_is_an_explicit_server_composition_mode() {
+        let default = Args::try_parse_from(["runtrue-server"]).unwrap();
+        assert!(!default.embedded_autoscaler);
+        let embedded = Args::try_parse_from(["runtrue-server", "--embedded-autoscaler"]).unwrap();
+        assert!(embedded.embedded_autoscaler);
+    }
+
+    #[test]
+    fn database_backends_are_mutually_exclusive_and_sqlite_stays_default() {
+        assert_eq!(
+            database_selection(None, None).unwrap(),
+            DatabaseSelection::Sqlite(PathBuf::from(DEFAULT_DATABASE))
+        );
+        assert_eq!(
+            database_selection(Some(PathBuf::from("control.sqlite")), None).unwrap(),
+            DatabaseSelection::Sqlite(PathBuf::from("control.sqlite"))
+        );
+        assert_eq!(
+            database_selection(None, Some(PathBuf::from("postgres.url"))).unwrap(),
+            DatabaseSelection::PostgresUrlFile(PathBuf::from("postgres.url"))
+        );
+        assert!(matches!(
+            database_selection(
+                Some(PathBuf::from("control.sqlite")),
+                Some(PathBuf::from("postgres.url")),
+            ),
+            Err(StartupError::ConflictingDatabaseConfiguration)
+        ));
+    }
+
+    #[test]
+    fn postgres_selection_tracks_the_runtime_and_transfer_inventories() {
+        assert_eq!(
+            require_postgres_server_runtime().is_ok(),
+            runtrue_control_plane::postgres_transfer_ready() && postgres_server_runtime_ready()
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn postgres_startup_requires_exact_schema_and_explicit_activation() {
+        let activated = DatabaseReadiness {
+            backend: DatabaseBackendKind::Postgres,
+            schema_version: POSTGRES_SCHEMA_VERSION,
+            installation_id: "installation".to_owned(),
+            recovery: runtrue_control_plane::InstallationRecoveryState {
+                fencing_epoch: 4,
+                safe_mode: false,
+                last_restore_unix_ms: Some(10),
+            },
+        };
+        require_postgres_database_activation(&activated).unwrap();
+
+        let mut safe_mode = activated.clone();
+        safe_mode.recovery.safe_mode = true;
+        assert!(matches!(
+            require_postgres_database_activation(&safe_mode),
+            Err(StartupError::PostgresRestoreSafeMode)
+        ));
+
+        let mut wrong_schema = activated;
+        wrong_schema.schema_version = POSTGRES_SCHEMA_VERSION.saturating_sub(1);
+        assert!(matches!(
+            require_postgres_database_activation(&wrong_schema),
+            Err(StartupError::PostgresSchemaVersion { .. })
+        ));
+    }
 
     #[test]
     fn bounded_schedule_reconciliation_survives_restart_without_duplicate_trigger() {

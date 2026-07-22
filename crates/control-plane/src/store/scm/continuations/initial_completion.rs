@@ -5,11 +5,12 @@ use super::super::{
     enqueue_proposed_workflow_check_task_tx, enqueue_scm_expiry_task_tx, hash_serializable,
     idempotency_tx, insert_capsule_metadata_tx, insert_jobs_for_capsule_tx,
     insert_or_reuse_scm_approval_tx, insert_run_and_jobs_for_capsule_tx, insert_run_tx,
-    insert_signed_capsule_tx, mark_task_completed_tx, params, require_same_idempotency,
-    require_task_owner_tx, run_tx, scm_analysis_status_name, scm_execution_role_name, task_tx,
-    to_i64, validate_create_run, validate_idempotency_key, validate_run_jobs,
-    validate_scm_analysis, validate_scm_prepared_execution, validate_signed_capsule, validate_text,
-    ApprovalRequest, AuditEventData, AuditPrincipal, AuditResource, AuditValue, BTreeMap, BTreeSet,
+    insert_signed_capsule_tx, insert_workflow_frontend_report_conn, mark_task_completed_tx, params,
+    require_same_idempotency, require_task_owner_tx, run_tx, scm_analysis_status_name,
+    scm_execution_role_name, task_tx, to_i64, validate_create_run, validate_idempotency_key,
+    validate_run_jobs, validate_scm_analysis, validate_scm_prepared_execution,
+    validate_signed_capsule, validate_text, validate_workflow_frontend_report, ApprovalRequest,
+    AuditEventData, AuditPrincipal, AuditResource, AuditValue, BTreeMap, BTreeSet,
     CapsuleApiMetadata, CapsuleVerifyingKey, ContentDigest, ControlPlane, ControlPlaneError,
     CreateRunRequest, ExecutionCapsule, IdempotentResult, PreparedScmExecution, RunRecord,
     ScmContinuationContext, ScmExecutionRole, ScmProposedAnalysisRecord, ScmTaskCompletion,
@@ -198,6 +199,18 @@ impl ControlPlane {
             let signature_json = validate_signed_capsule(&execution.capsule, verifying_key)?;
             let decoded_capsule: ExecutionCapsule =
                 serde_json::from_slice(&execution.capsule.canonical_capsule)?;
+            if let Some(report) = &execution.workflow_frontend_report {
+                validate_workflow_frontend_report(report, &decoded_capsule, &execution.capsule.id)?;
+            } else if decoded_capsule
+                .context
+                .workflow_frontend
+                .as_ref()
+                .is_some_and(|provenance| provenance.report_digest.is_some())
+            {
+                return Err(ControlPlaneError::InvalidInput(
+                    "SCM frontend capsule is missing its compatibility report",
+                ));
+            }
             validate_scm_prepared_execution(execution, &decoded_capsule)?;
             if let Some(context) = &execution.continuation {
                 if !pending_ids.insert(context.pending_execution_id.clone()) {
@@ -218,6 +231,8 @@ impl ControlPlane {
             capsule_digest: &'a ContentDigest,
             approval_subject_digest: &'a ContentDigest,
             risk_score: u32,
+            workflow_frontend_report_digest: Option<ContentDigest>,
+            workflow_frontend_report_media_type: Option<&'a str>,
             run_request_digest: ContentDigest,
             approvals: &'a [ApprovalRequest],
             continuation: &'a Option<ScmContinuationContext>,
@@ -238,6 +253,14 @@ impl ControlPlane {
                     capsule_digest: &execution.capsule.digest,
                     approval_subject_digest: &execution.metadata.approval_subject_digest,
                     risk_score: execution.metadata.risk_score,
+                    workflow_frontend_report_digest: execution
+                        .workflow_frontend_report
+                        .as_ref()
+                        .map(|record| ContentDigest::sha256(&record.bytes)),
+                    workflow_frontend_report_media_type: execution
+                        .workflow_frontend_report
+                        .as_ref()
+                        .map(|record| record.media_type.as_str()),
                     run_request_digest: create_run_request_hash(&execution.run)?,
                     approvals: &execution.approvals,
                     continuation: &execution.continuation,
@@ -349,6 +372,9 @@ impl ControlPlane {
         {
             insert_signed_capsule_tx(&transaction, &execution.capsule, signature_json)?;
             insert_capsule_metadata_tx(&transaction, &execution.metadata)?;
+            if let Some(report) = &execution.workflow_frontend_report {
+                insert_workflow_frontend_report_conn(&transaction, report)?;
+            }
             let mut effective_approvals = Vec::with_capacity(execution.approvals.len());
             for approval in &execution.approvals {
                 effective_approvals.push(insert_or_reuse_scm_approval_tx(

@@ -112,6 +112,14 @@ pub(in crate::app) fn control_plane_problem(
     request_id: &RequestId,
     error: ControlPlaneError,
 ) -> Response {
+    if control_plane_constraint_violation(&error) {
+        return problem_response(
+            request_id,
+            StatusCode::CONFLICT,
+            "Conflict",
+            "the request conflicts with existing durable state",
+        );
+    }
     match error {
         ControlPlaneError::NotFound { .. } => problem_response(
             request_id,
@@ -120,6 +128,9 @@ pub(in crate::app) fn control_plane_problem(
             error.to_string(),
         ),
         ControlPlaneError::IdempotencyConflict
+        | ControlPlaneError::AmbiguousSecretResolution { .. }
+        | ControlPlaneError::StaleSecretResolution { .. }
+        | ControlPlaneError::ConfigurationProjectVersionConflict { .. }
         | ControlPlaneError::ApprovalRequired
         | ControlPlaneError::StaleOidcGrant
         | ControlPlaneError::InvalidTransition { .. }
@@ -129,7 +140,8 @@ pub(in crate::app) fn control_plane_problem(
         | ControlPlaneError::LeaseExpired
         | ControlPlaneError::EnrollmentTokenConsumed
         | ControlPlaneError::TaskNotOwned
-        | ControlPlaneError::TaskLeaseExpired => problem_response(
+        | ControlPlaneError::TaskLeaseExpired
+        | ControlPlaneError::RunnerAutoscalerLeaseLost => problem_response(
             request_id,
             StatusCode::CONFLICT,
             "Conflict",
@@ -201,16 +213,6 @@ pub(in crate::app) fn control_plane_problem(
                 "the requested secret was not found",
             )
         }
-        ControlPlaneError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
-            if code.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
-            problem_response(
-                request_id,
-                StatusCode::CONFLICT,
-                "Conflict",
-                "the request conflicts with existing durable state",
-            )
-        }
         ControlPlaneError::InvalidInput(_)
         | ControlPlaneError::IntegerRange { .. }
         | ControlPlaneError::Model(_)
@@ -233,6 +235,20 @@ pub(in crate::app) fn control_plane_problem(
             error.to_string(),
         ),
         _ => internal_problem(request_id),
+    }
+}
+
+fn control_plane_constraint_violation(error: &ControlPlaneError) -> bool {
+    match error {
+        ControlPlaneError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) => {
+            code.code == rusqlite::ErrorCode::ConstraintViolation
+        }
+        #[cfg(feature = "postgres")]
+        ControlPlaneError::Postgres(error) => error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| code.starts_with("23")),
+        _ => false,
     }
 }
 
@@ -306,3 +322,103 @@ pub(in crate::app) fn problem_response(
 }
 use axum::response::IntoResponse as _;
 use rand_core::RngCore as _;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "postgres")]
+    use sqlx::error::{DatabaseError, ErrorKind};
+    #[cfg(feature = "postgres")]
+    use std::{borrow::Cow, error::Error as StdError, fmt};
+
+    #[cfg(feature = "postgres")]
+    #[derive(Debug)]
+    struct TestPostgresDatabaseError(&'static str);
+
+    #[cfg(feature = "postgres")]
+    impl fmt::Display for TestPostgresDatabaseError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("test PostgreSQL database error")
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    impl StdError for TestPostgresDatabaseError {}
+
+    #[cfg(feature = "postgres")]
+    impl DatabaseError for TestPostgresDatabaseError {
+        fn message(&self) -> &str {
+            "test PostgreSQL database error"
+        }
+
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(self.0))
+        }
+
+        fn as_error(&self) -> &(dyn StdError + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn StdError + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn StdError + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Other
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    fn postgres_error(code: &'static str) -> ControlPlaneError {
+        ControlPlaneError::Postgres(sqlx::Error::Database(Box::new(TestPostgresDatabaseError(
+            code,
+        ))))
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn postgres_integrity_constraints_use_conflict_problem_semantics() {
+        for code in [
+            "23000", "23001", "23502", "23503", "23505", "23514", "23P01",
+        ] {
+            let response =
+                control_plane_problem(&RequestId("request".to_owned()), postgres_error(code));
+            assert_eq!(response.status(), StatusCode::CONFLICT, "SQLSTATE {code}");
+        }
+
+        let response =
+            control_plane_problem(&RequestId("request".to_owned()), postgres_error("40001"));
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn sqlite_integrity_constraints_keep_conflict_problem_semantics() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE values_for_test(value TEXT UNIQUE);")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO values_for_test(value) VALUES ('duplicate')",
+                [],
+            )
+            .unwrap();
+        let error = connection
+            .execute(
+                "INSERT INTO values_for_test(value) VALUES ('duplicate')",
+                [],
+            )
+            .unwrap_err();
+
+        let response = control_plane_problem(
+            &RequestId("request".to_owned()),
+            ControlPlaneError::Sqlite(error),
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+}

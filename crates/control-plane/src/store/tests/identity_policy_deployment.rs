@@ -63,7 +63,7 @@ fn schema_twenty_two_upgrades_and_reopens_with_required_r9_tables() {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(version, crate::migration::SQLITE_RETIRED_USER_VERSION);
     let violations: u64 = connection
         .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
             row.get(0)
@@ -850,6 +850,12 @@ fn r10_external_secret_authority_is_exact_tenant_safe_and_restart_durable() {
                     metadata_id: "external-secret".to_owned(),
                     name: "TOKEN".to_owned(),
                     purpose: Some("publish".to_owned()),
+                    resolution: Some(runtrue_model::SecretResolutionBinding {
+                        scope: "repository:repo-1".to_owned(),
+                        metadata_version: None,
+                        resolution_digest: ContentDigest::sha256(b"external-resolution"),
+                        project_versions: Vec::new(),
+                    }),
                 }],
                 ..StepCapabilitySet::default()
             },
@@ -1302,4 +1308,125 @@ fn r10_provider_and_signer_policy_versions_reject_ambient_or_mutated_identity() 
             .unwrap(),
         provider
     );
+}
+
+#[test]
+fn user_teams_and_repository_grants_resolve_effective_access() {
+    let control = ControlPlane::open_in_memory("user-management", NOW).unwrap();
+    control
+        .put_tenant_identity(&r9_tenant("tenant-users"), None)
+        .unwrap();
+    add_r9_user(&control, "tenant-users", "alice", "viewer");
+    add_r9_user(&control, "tenant-users", "bob", "viewer");
+    control
+        .create_repository(&RepositoryRecord {
+            id: "repo-users".to_owned(),
+            tenant_id: "tenant-users".to_owned(),
+            owner: "acme".to_owned(),
+            name: "service".to_owned(),
+            default_branch: "main".to_owned(),
+            visibility: "private".to_owned(),
+            created_unix_ms: NOW,
+        })
+        .unwrap();
+
+    let team = TeamRecord {
+        id: "team-platform".to_owned(),
+        tenant_id: "tenant-users".to_owned(),
+        name: "Platform".to_owned(),
+        description: "Platform maintainers".to_owned(),
+        status: "active".to_owned(),
+        created_unix_ms: NOW,
+        updated_unix_ms: NOW,
+        version: 1,
+    };
+    assert!(control.put_team(&team, None).unwrap());
+    assert!(!control.put_team(&team, None).unwrap());
+    assert!(control
+        .put_team_membership(&TeamMembershipRecord {
+            tenant_id: "tenant-users".to_owned(),
+            team_id: team.id.clone(),
+            user_id: "alice".to_owned(),
+            role: "maintainer".to_owned(),
+            created_unix_ms: NOW,
+        })
+        .unwrap());
+
+    for grant in [
+        RepositoryAccessGrantRecord {
+            id: "grant-alice".to_owned(),
+            tenant_id: "tenant-users".to_owned(),
+            repository_id: "repo-users".to_owned(),
+            subject: RepositoryAccessSubject::User("alice".to_owned()),
+            permission: "read".to_owned(),
+            created_unix_ms: NOW,
+            updated_unix_ms: NOW,
+            version: 1,
+        },
+        RepositoryAccessGrantRecord {
+            id: "grant-platform".to_owned(),
+            tenant_id: "tenant-users".to_owned(),
+            repository_id: "repo-users".to_owned(),
+            subject: RepositoryAccessSubject::Team(team.id.clone()),
+            permission: "admin".to_owned(),
+            created_unix_ms: NOW,
+            updated_unix_ms: NOW,
+            version: 1,
+        },
+    ] {
+        assert!(control.put_repository_access_grant(&grant, None).unwrap());
+    }
+
+    assert_eq!(
+        control
+            .effective_repository_access_for_user("tenant-users", "alice")
+            .unwrap(),
+        [EffectiveRepositoryAccess {
+            repository_id: "repo-users".to_owned(),
+            permission: "admin".to_owned(),
+            direct: true,
+            team_ids: vec![team.id.clone()],
+        }]
+    );
+    assert!(control
+        .effective_repository_access_for_user("tenant-users", "bob")
+        .unwrap()
+        .is_empty());
+    assert!(matches!(
+        control.repository_access_grants("another-tenant", "repo-users"),
+        Ok(grants) if grants.is_empty()
+    ));
+    let mut disabled_team = team.clone();
+    disabled_team.status = "disabled".to_owned();
+    disabled_team.updated_unix_ms = NOW + 1;
+    disabled_team.version = 2;
+    assert!(control.put_team(&disabled_team, Some(1)).unwrap());
+    assert_eq!(
+        control
+            .effective_repository_access_for_user("tenant-users", "alice")
+            .unwrap()[0]
+            .permission,
+        "read"
+    );
+    assert!(control
+        .remove_team_membership("tenant-users", &team.id, "alice")
+        .unwrap());
+    assert_eq!(
+        control
+            .effective_repository_access_for_user("tenant-users", "alice")
+            .unwrap()[0]
+            .permission,
+        "read"
+    );
+    let mut disabled_user = r9_user("alice");
+    disabled_user.status = "disabled".to_owned();
+    disabled_user.updated_unix_ms = NOW + 1;
+    disabled_user.version = 2;
+    assert!(control
+        .put_human_user("tenant-users", &disabled_user, Some(1))
+        .unwrap());
+    assert!(control
+        .effective_repository_access_for_user("tenant-users", "alice")
+        .unwrap()
+        .is_empty());
 }

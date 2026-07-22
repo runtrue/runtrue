@@ -49,7 +49,19 @@ pub(crate) struct PreparedAotCache {
 
 pub(crate) struct AotCacheInspection {
     pub status: AotCacheStatus,
-    pub authenticated_artifact: Option<Vec<u8>>,
+    pub authenticated_artifact: Option<AuthenticatedAotArtifact>,
+}
+
+pub(crate) struct AuthenticatedAotArtifact(Vec<u8>);
+
+impl AuthenticatedAotArtifact {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
 }
 
 impl AotCache {
@@ -148,7 +160,7 @@ impl AotCache {
         }
         Ok(AotCacheInspection {
             status: AotCacheStatus::Hit,
-            authenticated_artifact: Some(artifact),
+            authenticated_artifact: Some(AuthenticatedAotArtifact(artifact)),
         })
     }
 

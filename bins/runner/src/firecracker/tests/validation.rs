@@ -27,6 +27,7 @@ fn topology_and_unwired_capabilities_fail_before_driver() {
             metadata_id: "secret-1".to_owned(),
             name: "TOKEN".to_owned(),
             purpose: None,
+            resolution: None,
         });
     assert!(matches!(
         executor.preflight_lease(&lease(secret)),

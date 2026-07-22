@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://runtrue.dev/schemas/performance/runtime-benchmark-report-v1.json",
+  "title": "Runtrue runtime benchmark report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "suite_version",
+    "scenario",
+    "environment",
+    "samples",
+    "summary",
+    "phase_summaries"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "suite_version": { "$ref": "#/$defs/label" },
+    "scenario": { "$ref": "#/$defs/label" },
+    "environment": { "$ref": "#/$defs/environment" },
+    "samples": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/sample" }
+    },
+    "summary": { "$ref": "#/$defs/benchmarkSummary" },
+    "phase_summaries": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/distribution" }
+    }
+  },
+  "$defs": {
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "uint": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "harness_commit",
+        "fixture_digest",
+        "runtime_family",
+        "runtime_compatibility_digest",
+        "runtime_version",
+        "host_os",
+        "architecture",
+        "logical_cpus",
+        "memory_bytes"
+      ],
+      "properties": {
+        "harness_commit": { "$ref": "#/$defs/label" },
+        "fixture_digest": { "$ref": "#/$defs/label" },
+        "runtime_family": { "$ref": "#/$defs/label" },
+        "runtime_compatibility_digest": { "$ref": "#/$defs/label" },
+        "runtime_version": { "$ref": "#/$defs/label" },
+        "host_os": { "$ref": "#/$defs/label" },
+        "architecture": { "$ref": "#/$defs/label" },
+        "logical_cpus": { "type": "integer", "minimum": 1 },
+        "memory_bytes": { "type": "integer", "minimum": 1 },
+        "attributes": {
+          "type": "object",
+          "maxProperties": 64,
+          "additionalProperties": { "$ref": "#/$defs/label" }
+        }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["iteration", "measurement", "succeeded", "resources"],
+      "properties": {
+        "iteration": { "type": "integer", "minimum": 1 },
+        "measurement": { "$ref": "#/$defs/measurement" },
+        "succeeded": { "type": "boolean" },
+        "diagnostic_code": { "$ref": "#/$defs/label" },
+        "resources": { "$ref": "#/$defs/resources" },
+        "load": { "$ref": "#/$defs/load" }
+      }
+    },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preparation_state", "phases"],
+      "properties": {
+        "preparation_state": {
+          "enum": [
+            "not_observed",
+            "process_cold_cache_cold",
+            "process_cold_cache_hit",
+            "process_warm_aot_prepared",
+            "process_warm_package_hot",
+            "process_cold_quarantined_miss"
+          ]
+        },
+        "cache_status": { "$ref": "#/$defs/label" },
+        "phases": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/phase" }
+        }
+      }
+    },
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "duration_ns"],
+      "properties": {
+        "phase": {
+          "enum": [
+            "request_admission",
+            "queue_wait",
+            "placement",
+            "lease_delivery",
+            "lease_acceptance",
+            "runtime_acquire",
+            "package_prepare",
+            "invocation_prepare",
+            "instantiate",
+            "guest_run",
+            "output_finalize",
+            "cleanup",
+            "completion_publish",
+            "end_to_end"
+          ]
+        },
+        "detail": { "$ref": "#/$defs/label" },
+        "duration_ns": { "$ref": "#/$defs/uint" }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu_time_ns": { "$ref": "#/$defs/uint" },
+        "peak_rss_bytes": { "$ref": "#/$defs/uint" },
+        "io_read_bytes": { "$ref": "#/$defs/uint" },
+        "io_write_bytes": { "$ref": "#/$defs/uint" }
+      }
+    },
+    "load": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intended_start_offset_ns",
+        "actual_start_offset_ns",
+        "completed_offset_ns",
+        "queue_depth_at_submit",
+        "active_workers",
+        "active_executions"
+      ],
+      "properties": {
+        "intended_start_offset_ns": { "$ref": "#/$defs/uint" },
+        "actual_start_offset_ns": { "$ref": "#/$defs/uint" },
+        "completed_offset_ns": { "$ref": "#/$defs/uint" },
+        "queue_depth_at_submit": { "$ref": "#/$defs/uint" },
+        "active_workers": { "$ref": "#/$defs/uint" },
+        "active_executions": { "$ref": "#/$defs/uint" }
+      }
+    },
+    "benchmarkSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_count", "succeeded", "failed"],
+      "properties": {
+        "sample_count": { "$ref": "#/$defs/uint" },
+        "succeeded": { "$ref": "#/$defs/uint" },
+        "failed": { "$ref": "#/$defs/uint" },
+        "throughput_milli_per_second": { "$ref": "#/$defs/uint" },
+        "maximum_queue_depth": { "$ref": "#/$defs/uint" },
+        "maximum_start_lag_ns": { "$ref": "#/$defs/uint" }
+      }
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "count",
+        "minimum_ns",
+        "p50_ns",
+        "p90_ns",
+        "p95_ns",
+        "p99_ns",
+        "maximum_ns",
+        "mean_ns",
+        "standard_deviation_ns"
+      ],
+      "properties": {
+        "count": { "$ref": "#/$defs/uint" },
+        "minimum_ns": { "$ref": "#/$defs/uint" },
+        "p50_ns": { "$ref": "#/$defs/uint" },
+        "p90_ns": { "$ref": "#/$defs/uint" },
+        "p95_ns": { "$ref": "#/$defs/uint" },
+        "p99_ns": { "$ref": "#/$defs/uint" },
+        "maximum_ns": { "$ref": "#/$defs/uint" },
+        "mean_ns": { "$ref": "#/$defs/uint" },
+        "standard_deviation_ns": { "$ref": "#/$defs/uint" }
+      }
+    }
+  }
+}

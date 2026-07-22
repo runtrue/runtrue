@@ -4,9 +4,11 @@ use crate::app::{
     RequestPrincipal, ServerResource, IDEMPOTENCY_REPLAYED, MAX_CAPSULE_EVENT_BYTES,
     MAX_CAPSULE_TEXT_BYTES, MAX_CAPSULE_WORKFLOW_BYTES, SERVER_POLICY_VERSION_ID,
 };
+use crate::secret_resolution::bind_compilation_secrets;
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{Extension, Path, State};
+use axum::http::header::CACHE_CONTROL;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::Json;
@@ -14,8 +16,11 @@ use runtrue_compiler::{
     CompileContext, Compiler, ReusableWorkflowSource, ReusableWorkflowSources,
     MAX_REUSABLE_BUNDLE_BYTES, MAX_REUSABLE_SOURCES, MAX_REUSABLE_SOURCE_BYTES,
 };
-use runtrue_control_plane::{CapsuleApiMetadata, ControlPlane, SignedCapsuleRecord};
+use runtrue_control_plane::{
+    CapsuleApiMetadata, ControlPlaneError, ControlPlaneStore, SignedCapsuleRecord,
+};
 use runtrue_lock::{LockFile, MAX_LOCKFILE_BYTES};
+use runtrue_model::ContentDigest;
 use runtrue_policy::{ApprovalKind, ApprovalRequest, ApprovalRule, CedarAction, CedarResourceKind};
 use runtrue_workflow_ir::ExecutionCapsule;
 use serde::{Deserialize, Serialize};
@@ -36,6 +41,14 @@ struct SignedCapsuleView {
     created_at: String,
     signature: Value,
     capsule: Value,
+    workflow_frontend_report: Option<WorkflowFrontendReportView>,
+}
+
+#[derive(Serialize)]
+struct WorkflowFrontendReportView {
+    media_type: String,
+    digest: String,
+    download_url: String,
 }
 
 #[derive(Serialize)]
@@ -205,7 +218,7 @@ pub(in crate::app) async fn create_capsule(
         Ok(key) => key,
         Err(response) => return response,
     };
-    let repository = match state.control_plane.repository(&repository_id) {
+    let repository = match state.store.repository(&repository_id).await {
         Ok(repository) => repository,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -220,13 +233,15 @@ pub(in crate::app) async fn create_capsule(
             &repository.tenant_id,
         )
         .in_repository(&repository.id),
-    ) {
+    )
+    .await
+    {
         return response;
     }
-    let compilation = match Compiler::default().compile_yaml(
+    let mut compilation = match Compiler::default().compile_yaml(
         &body.workflow_yaml,
         CompileContext {
-            installation_id: state.control_plane.installation_id().to_owned(),
+            installation_id: state.store.installation_id().to_owned(),
             tenant_id: repository.tenant_id.clone(),
             repository_id: repository.id.clone(),
             workflow_path: body.workflow_path,
@@ -252,6 +267,11 @@ pub(in crate::app) async fn create_capsule(
             )
         }
     };
+    if let Err(error) =
+        bind_compilation_secrets(state.store.as_ref(), &repository, &mut compilation).await
+    {
+        return control_plane_problem(&request_id, error);
+    }
     let signature = match state.capsule_signing_key.sign_capsule(&compilation.capsule) {
         Ok(signature) => signature,
         Err(_) => return internal_problem(&request_id),
@@ -321,14 +341,18 @@ pub(in crate::app) async fn create_capsule(
         };
         approvals.push(approval);
     }
-    match state.control_plane.store_compiled_capsule_idempotent(
-        &idempotency_key,
-        &record,
-        &state.capsule_signing_key.verifying_key(),
-        &metadata,
-        &approvals,
-    ) {
-        Ok(result) => match signed_capsule_view(&state.control_plane, result.value) {
+    match state
+        .store
+        .store_compiled_capsule_idempotent(
+            &idempotency_key,
+            &record,
+            &state.capsule_signing_key.verifying_key(),
+            &metadata,
+            &approvals,
+        )
+        .await
+    {
+        Ok(result) => match signed_capsule_view(state.store.as_ref(), result.value).await {
             Ok(view) => {
                 let mut response = (StatusCode::CREATED, Json(view)).into_response();
                 response.headers_mut().insert(
@@ -343,19 +367,44 @@ pub(in crate::app) async fn create_capsule(
     }
 }
 
-fn signed_capsule_view(
-    control_plane: &ControlPlane,
+async fn signed_capsule_view(
+    control_plane: &dyn ControlPlaneStore,
     record: SignedCapsuleRecord,
 ) -> Result<SignedCapsuleView, ()> {
     let capsule: ExecutionCapsule =
         serde_json::from_slice(&record.canonical_capsule).map_err(|_| ())?;
-    let metadata = control_plane.capsule_api_metadata(&record.id).ok();
+    let metadata = control_plane.capsule_api_metadata(&record.id).await.ok();
     let approval_requests = control_plane
         .approval_requests_for_capsule(&record.id)
+        .await
         .map_err(|_| ())?
         .into_iter()
         .map(CapsuleApprovalView::from_record)
         .collect::<Result<Vec<_>, _>>()?;
+    let workflow_frontend_report = match control_plane.workflow_frontend_report(&record.id).await {
+        Ok(report) => Some(WorkflowFrontendReportView {
+            media_type: report.media_type,
+            digest: capsule
+                .context
+                .workflow_frontend
+                .as_ref()
+                .and_then(|provenance| provenance.report_digest.as_ref())
+                .ok_or(())?
+                .to_string(),
+            download_url: format!("/api/v1/capsules/{}/workflow-frontend-report", record.id),
+        }),
+        Err(ControlPlaneError::NotFound { .. })
+            if capsule
+                .context
+                .workflow_frontend
+                .as_ref()
+                .is_none_or(|provenance| provenance.report_digest.is_none()) =>
+        {
+            None
+        }
+        Err(ControlPlaneError::NotFound { .. }) => return Err(()),
+        Err(_) => return Err(()),
+    };
     Ok(SignedCapsuleView {
         id: record.id,
         repository_id: record.repository_id,
@@ -374,6 +423,7 @@ fn signed_capsule_view(
         created_at: timestamp(record.created_unix_ms)?,
         signature: serde_json::to_value(record.signature).map_err(|_| ())?,
         capsule: serde_json::from_slice(&record.canonical_capsule).map_err(|_| ())?,
+        workflow_frontend_report,
     })
 }
 
@@ -383,11 +433,11 @@ pub(in crate::app) async fn get_capsule(
     Extension(principal): Extension<RequestPrincipal>,
     Path(capsule_id): Path<String>,
 ) -> Response {
-    let record = match state.control_plane.signed_capsule(&capsule_id) {
+    let record = match state.store.signed_capsule(&capsule_id).await {
         Ok(record) => record,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let repository = match state.control_plane.repository(&record.repository_id) {
+    let repository = match state.store.repository(&record.repository_id).await {
         Ok(repository) => repository,
         Err(_) => return internal_problem(&request_id),
     };
@@ -402,12 +452,64 @@ pub(in crate::app) async fn get_capsule(
             &repository.tenant_id,
         )
         .in_repository(&repository.id),
-    ) {
+    )
+    .await
+    {
         return response;
     }
-    match signed_capsule_view(&state.control_plane, record) {
+    match signed_capsule_view(state.store.as_ref(), record).await {
         Ok(view) => Json(view).into_response(),
         Err(()) => internal_problem(&request_id),
     }
+}
+
+pub(in crate::app) async fn get_workflow_frontend_report(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Path(capsule_id): Path<String>,
+) -> Response {
+    let capsule = match state.store.signed_capsule(&capsule_id).await {
+        Ok(capsule) => capsule,
+        Err(error) => return control_plane_problem(&request_id, error),
+    };
+    let repository = match state.store.repository(&capsule.repository_id).await {
+        Ok(repository) => repository,
+        Err(_) => return internal_problem(&request_id),
+    };
+    if let Err(response) = authorize_resource(
+        &state,
+        &request_id,
+        &principal,
+        CedarAction::ViewRun,
+        ServerResource::new(
+            CedarResourceKind::Workflow,
+            &capsule.id,
+            &repository.tenant_id,
+        )
+        .in_repository(&repository.id),
+    )
+    .await
+    {
+        return response;
+    }
+    let record = match state.store.workflow_frontend_report(&capsule_id).await {
+        Ok(record) => record,
+        Err(error) => return control_plane_problem(&request_id, error),
+    };
+    let content_type = match HeaderValue::from_str(&record.media_type) {
+        Ok(value) => value,
+        Err(_) => return internal_problem(&request_id),
+    };
+    let report_digest = ContentDigest::sha256(&record.bytes);
+    let content_digest = match HeaderValue::from_str(report_digest.as_str()) {
+        Ok(value) => value,
+        Err(_) => return internal_problem(&request_id),
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", content_type);
+    headers.insert("x-runtrue-content-digest", content_digest);
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    (headers, record.bytes).into_response()
 }
 use axum::response::IntoResponse as _;

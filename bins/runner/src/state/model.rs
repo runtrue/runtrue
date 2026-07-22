@@ -6,6 +6,10 @@ pub struct PersistentRunnerState {
     pub(crate) active_lease: Option<ActiveLeaseMarker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_completion: Option<PersistedCompletion>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) active_leases: BTreeMap<String, ActiveLeaseMarker>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) pending_completions: BTreeMap<String, PersistedCompletion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,3 +242,4 @@ use super::StateError;
 use runtrue_model::ContentDigest;
 use runtrue_protocol::{v1, v2};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;

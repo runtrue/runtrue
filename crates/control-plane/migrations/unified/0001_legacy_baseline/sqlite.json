@@ -1,0 +1,7 @@
+{
+  "backend": "sqlite",
+  "legacy_lineage": "sqlite-v1-through-v34",
+  "legacy_head": 34,
+  "legacy_history_sha256": "33fb34c340f243fa98128b93d1074c7b2027e9b9ea89dccef5862a461e15c4c6",
+  "schema_contract": "sqlite-control-plane-v34"
+}

@@ -1,0 +1,78 @@
+# Public HTTPS edge for the single-node Compose deployment. Traefik uses its
+# file provider so it never receives the Docker Engine socket.
+services:
+  server:
+    ports: !reset []
+    environment:
+      RUNTRUE_OIDC_ISSUER: "${RUNTRUE_PUBLIC_ORIGIN:?set the external Runtrue HTTPS origin}/oidc"
+
+  frontend:
+    ports: !reset []
+    networks:
+      - control
+      - edge
+
+  traefik:
+    image: docker.io/library/traefik:v3.7.1@sha256:6b9cbca6fac42ab0075f5437d8dc1685cfd188626d8d515839ea94f8b6271c42
+    user: "${RUNTRUE_RUNTIME_UID:?run deploy/bootstrap.sh first}:${RUNTRUE_RUNTIME_GID:?run deploy/bootstrap.sh first}"
+    entrypoint:
+      - /usr/local/bin/runtrue-traefik-entrypoint
+    command:
+      - --api.dashboard=false
+      - --global.checknewversion=false
+      - --global.sendanonymoususage=false
+      - --log.level=INFO
+      - --accesslog=true
+      - --ping=true
+      - --ping.entrypoint=web
+      - --entrypoints.web.address=:8080
+      - --entrypoints.websecure.address=:8443
+      - --providers.file.filename=/run/runtrue-traefik/dynamic.yml
+      - --providers.file.watch=false
+      - --certificatesresolvers.letsencrypt.acme.email=${RUNTRUE_ACME_EMAIL:?set the ACME account email}
+      - --certificatesresolvers.letsencrypt.acme.storage=/var/lib/traefik/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+    environment:
+      RUNTRUE_PUBLIC_ORIGIN: "${RUNTRUE_PUBLIC_ORIGIN:?set the external Runtrue HTTPS origin}"
+    ports:
+      - "80:8080"
+      - "443:8443"
+    volumes:
+      - type: bind
+        source: ./traefik-entrypoint.sh
+        target: /usr/local/bin/runtrue-traefik-entrypoint
+        read_only: true
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/traefik"
+        target: /var/lib/traefik
+        bind:
+          create_host_path: false
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
+      - /run/runtrue-traefik:size=1m,mode=0700,noexec,nosuid,nodev,uid=${RUNTRUE_RUNTIME_UID},gid=${RUNTRUE_RUNTIME_GID}
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    depends_on:
+      frontend:
+        condition: service_healthy
+    networks:
+      - edge
+
+networks:
+  edge:
+    driver: bridge

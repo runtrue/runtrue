@@ -2,6 +2,7 @@ use super::{
     error::RunnerError,
     executor::{
         execution_from_engine, JobExecution, JobExecutionServices, JobExecutor, NativeJobExecutor,
+        PreparedContent, PreparedContentTier,
     },
 };
 use crate::{
@@ -55,6 +56,30 @@ impl RemoteJobExecutor {
 }
 
 impl JobExecutor for RemoteJobExecutor {
+    fn prepared_content(&self) -> Result<Vec<PreparedContent>, RunnerError> {
+        let mut prepared = Vec::new();
+        if let Some(wasm) = &self.wasm {
+            let tiers = wasm.component_preparation_tiers()?;
+            for (tier, kind) in [
+                (PreparedContentTier::Warm, "wasm-component-warm"),
+                (PreparedContentTier::Warmish, "wasm-component-warmish"),
+            ] {
+                let digests = tiers
+                    .iter()
+                    .filter_map(|(digest, observed)| (*observed == tier).then_some(digest.clone()))
+                    .collect::<Vec<_>>();
+                if !digests.is_empty() {
+                    prepared.push(PreparedContent {
+                        kind: kind.to_owned(),
+                        digests,
+                        tier: Some(tier),
+                    });
+                }
+            }
+        }
+        Ok(prepared)
+    }
+
     fn preflight(&self, lease: &AdmittedLease) -> Result<(), RunnerError> {
         self.preflight_with_broker(lease, None)
     }

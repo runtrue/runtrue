@@ -8,6 +8,7 @@ pub fn probe_inventory(
         workspace_root,
         region,
         BTreeSet::from([Isolation::Native]),
+        1,
     )
 }
 
@@ -16,12 +17,14 @@ pub fn probe_inventory_with_backends(
     workspace_root: &Path,
     region: Option<String>,
     isolation_backends: BTreeSet<Isolation>,
+    max_concurrent_wasm_jobs: u32,
 ) -> Result<VerifiedInventory, InventoryError> {
     probe_inventory_with_backends_for_protocol(
         runner_id,
         workspace_root,
         region,
         isolation_backends,
+        max_concurrent_wasm_jobs,
         PROTOCOL_MAX,
     )
 }
@@ -34,6 +37,7 @@ pub fn probe_inventory_with_backends_for_protocol(
     workspace_root: &Path,
     region: Option<String>,
     isolation_backends: BTreeSet<Isolation>,
+    max_concurrent_wasm_jobs: u32,
     protocol_version: u32,
 ) -> Result<VerifiedInventory, InventoryError> {
     negotiate_protocol_version(protocol_version, protocol_version)?;
@@ -60,6 +64,7 @@ pub fn probe_inventory_with_backends_for_protocol(
         memory_bytes: u64,
         storage_bytes: u64,
         isolation_backends: &'a [&'static str],
+        max_concurrent_wasm_jobs: u32,
         runner_binary_digest: &'a str,
         runner_version: &'static str,
         protocol_version: u32,
@@ -79,6 +84,7 @@ pub fn probe_inventory_with_backends_for_protocol(
         memory_bytes,
         storage_bytes,
         isolation_backends: &backend_names,
+        max_concurrent_wasm_jobs,
         runner_binary_digest: binary_digest.as_str(),
         runner_version: env!("CARGO_PKG_VERSION"),
         protocol_version,
@@ -94,6 +100,7 @@ pub fn probe_inventory_with_backends_for_protocol(
         logical_cpus,
         memory_bytes,
         storage_bytes,
+        max_concurrent_wasm_jobs,
         isolation_backends: isolation_backends.clone(),
         capabilities: BTreeSet::new(),
         region: region.clone(),
@@ -127,7 +134,10 @@ pub fn probe_inventory_with_backends_for_protocol(
         engine_version: env!("CARGO_PKG_VERSION").to_owned(),
         protocol_version,
         region: region.unwrap_or_default(),
-        labels: Default::default(),
+        labels: BTreeMap::from([(
+            "runtrue.wasm.max-concurrent-jobs".to_owned(),
+            max_concurrent_wasm_jobs.to_string(),
+        )]),
     };
     Ok(VerifiedInventory {
         profile,
@@ -247,7 +257,7 @@ use runtrue_workflow_ir::{Architecture, Isolation, OperatingSystem};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{self, Read as _},
     path::Path,

@@ -9,7 +9,16 @@ COPY . .
 RUN --mount=type=cache,id=runtrue-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=runtrue-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=runtrue-rust-1.94-release-target-v1,target=/src/target,sharing=locked \
-    cargo build --locked --release -p runtrue-backup --bin runtrue-backup && \
+    --mount=type=secret,id=github_token \
+    set -eu; \
+    if test -s /run/secrets/github_token; then \
+      git config --global credential.https://github.com.username x-access-token; \
+      git config --global credential.helper \
+        '!f() { if test "$1" = get; then echo username=x-access-token; printf "password="; cat /run/secrets/github_token; echo; fi; }; f'; \
+    fi; \
+    CARGO_NET_GIT_FETCH_WITH_CLI=true \
+      cargo build --locked --release -p runtrue-backup --bin runtrue-backup; \
+    rm -f /root/.gitconfig; \
     install -D -m 0555 target/release/runtrue-backup /out/runtrue-backup
 
 FROM ${RUNTIME_IMAGE} AS backup

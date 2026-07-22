@@ -263,24 +263,35 @@ fn online_runner_locality_is_replaced_durably() {
         ContentDigest::sha256(b"source-a"),
         ContentDigest::sha256(b"source-b"),
     ]);
+    let first_tiers = BTreeMap::from([(
+        ContentDigest::sha256(b"source-a"),
+        runtrue_scheduler::PackagePreparationTier::Warmish,
+    )]);
     let updated = control
-        .update_runner_locality("runner-1", &first, NOW + 1)
+        .update_runner_locality("runner-1", &first, &first_tiers, NOW + 1)
         .unwrap();
     assert_eq!(updated.runner.locality, first);
+    assert_eq!(updated.runner.package_tiers, first_tiers);
     let replacement = BTreeSet::from([ContentDigest::sha256(b"source-c")]);
     control
-        .update_runner_locality("runner-1", &replacement, NOW + 2)
+        .update_runner_locality("runner-1", &replacement, &BTreeMap::new(), NOW + 2)
         .unwrap();
     assert_eq!(
         control.runner("runner-1").unwrap().runner.locality,
         replacement
     );
+    assert!(control
+        .runner("runner-1")
+        .unwrap()
+        .runner
+        .package_tiers
+        .is_empty());
 
     let mut offline = control.runner("runner-1").unwrap().runner;
     offline.status = RunnerStatus::Offline;
     control.update_runner(&offline, NOW + 3).unwrap();
     assert!(matches!(
-        control.update_runner_locality("runner-1", &BTreeSet::new(), NOW + 4),
+        control.update_runner_locality("runner-1", &BTreeSet::new(), &BTreeMap::new(), NOW + 4,),
         Err(ControlPlaneError::InvalidInput(_))
     ));
 }
@@ -361,6 +372,50 @@ fn offline_ephemeral_runner_with_lease_history_is_retired_from_fleet() {
     assert!(control
         .mark_runner_connected("runner-1", NOW + 4 + DEFAULT_EPHEMERAL_RUNNER_RETENTION_MS)
         .is_err());
+}
+
+#[test]
+fn offline_ephemeral_runner_with_fleet_history_is_retired_from_fleet() {
+    let control = ControlPlane::open_in_memory("ephemeral-runner-fleet-history", NOW).unwrap();
+    add_runner_pool_only(&control);
+    let mut disposable = runner();
+    disposable.ephemeral = true;
+    disposable.status = RunnerStatus::Offline;
+    control
+        .register_runner_with_inventory(
+            &disposable,
+            &ContentDigest::sha256(b"ephemeral fleet inventory"),
+            NOW,
+        )
+        .unwrap();
+    control
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO runner_fleet_requests
+             (id,pool_id,runtime_compatibility_digest,provider,
+              provider_template_id,runner_template_digest,state,runner_id,
+              created_unix_ms,updated_unix_ms)
+             VALUES('fleet-history','pool-1',?1,'docker','template',?2,
+                    'terminated','runner-1',?3,?3)",
+            params![
+                ContentDigest::sha256(b"fleet runtime").as_str(),
+                ContentDigest::sha256(b"fleet template").as_str(),
+                to_i64(NOW).unwrap(),
+            ],
+        )
+        .unwrap();
+
+    control
+        .perform_scheduler_maintenance(NOW + DEFAULT_EPHEMERAL_RUNNER_RETENTION_MS)
+        .unwrap();
+
+    let retired = control.runner("runner-1").unwrap().runner;
+    assert!(retired.retired);
+    assert_eq!(
+        control.list_runner_fleet_requests("pool-1").unwrap().len(),
+        1
+    );
 }
 
 #[test]
@@ -598,6 +653,62 @@ fn expired_enrollment_token_does_not_create_runner_or_certificate() {
     assert!(control
         .runner_certificate(&certificate.fingerprint)
         .is_err());
+}
+
+#[test]
+fn enrollment_lost_response_replays_the_exact_identity_and_certificate() {
+    let control = ControlPlane::open_in_memory("enrollment-replay", NOW).unwrap();
+    add_runner_pool_only(&control);
+    let issued = control
+        .create_enrollment_token("pool-1", NOW, NOW + 100)
+        .unwrap();
+    let mut enrolled = runner();
+    enrolled.status = RunnerStatus::Offline;
+    let certificate = runner_certificate("runner-1", b"replay-first", NOW, NOW + 1_000);
+    let request_digest = ContentDigest::sha256(b"complete-enrollment-request");
+    let inventory_digest = ContentDigest::sha256(b"replay inventory");
+    let first = control
+        .complete_runner_enrollment_idempotent(
+            issued.token.expose(),
+            &request_digest,
+            &enrolled,
+            &certificate,
+            b"original certificate chain",
+            &inventory_digest,
+            1,
+            NOW + 1,
+        )
+        .unwrap();
+    let mut ambiguous_retry = enrolled;
+    ambiguous_retry.id = "runner-random-retry".into();
+    let retry_certificate = runner_certificate(
+        "runner-random-retry",
+        b"replay-second",
+        NOW + 2,
+        NOW + 1_000,
+    );
+    let replay = control
+        .complete_runner_enrollment_idempotent(
+            issued.token.expose(),
+            &request_digest,
+            &ambiguous_retry,
+            &retry_certificate,
+            b"newly issued but discarded certificate chain",
+            &inventory_digest,
+            1,
+            NOW + 2,
+        )
+        .unwrap();
+    assert_eq!(replay, first);
+    assert_eq!(replay.runner_id, "runner-1");
+    assert_eq!(replay.certificate_chain_pem, b"original certificate chain");
+    assert!(matches!(
+        control.replay_runner_enrollment(
+            issued.token.expose(),
+            &ContentDigest::sha256(b"different request")
+        ),
+        Err(ControlPlaneError::EnrollmentTokenConsumed)
+    ));
 }
 
 #[test]

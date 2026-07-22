@@ -133,6 +133,34 @@ impl WasmJobExecutor {
         self.component_count
     }
 
+    pub fn component_digests(&self) -> Result<BTreeSet<ContentDigest>, RunnerError> {
+        self.references
+            .iter()
+            .map(|reference| exact_component_digest(reference))
+            .collect()
+    }
+
+    pub fn component_preparation_tiers(
+        &self,
+    ) -> Result<BTreeMap<ContentDigest, crate::daemon::PreparedContentTier>, RunnerError> {
+        let tiers = self
+            .executor
+            .package_preparation_tiers()?
+            .into_iter()
+            .filter_map(|(digest, tier)| {
+                let tier = match tier {
+                    WasmPackagePreparationTier::Cold => return None,
+                    WasmPackagePreparationTier::Warmish => {
+                        crate::daemon::PreparedContentTier::Warmish
+                    }
+                    WasmPackagePreparationTier::Warm => crate::daemon::PreparedContentTier::Warm,
+                };
+                Some((digest, tier))
+            })
+            .collect::<BTreeMap<_, _>>();
+        Ok(tiers)
+    }
+
     #[must_use]
     pub fn target_triple(&self) -> &str {
         self.target.target_triple()
@@ -196,7 +224,7 @@ impl WasmJobExecutor {
 
 #[derive(Clone)]
 pub(super) struct SharedWasmExecutor {
-    inner: Arc<Mutex<WasmExecutor>>,
+    inner: Arc<WasmExecutor>,
     adapters: CapabilityAdapters,
     contextual_inputs: BTreeMap<String, String>,
     fuel_multiplier: u64,
@@ -221,7 +249,7 @@ pub(super) fn fuel_multiplier_for_capsule(capsule: &ExecutionCapsule) -> u64 {
 impl SharedWasmExecutor {
     fn new(executor: WasmExecutor) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(executor)),
+            inner: Arc::new(executor),
             adapters: CapabilityAdapters::new(),
             contextual_inputs: BTreeMap::new(),
             fuel_multiplier: 1,
@@ -255,36 +283,32 @@ impl SharedWasmExecutor {
         Ok(self)
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, WasmExecutor>, RunnerError> {
-        self.inner.lock().map_err(|_| {
-            RunnerError::WasmConfiguration("Wasm executor state is poisoned".to_owned())
-        })
-    }
-
     fn preflight_capsule(&self, capsule: &ExecutionCapsule) -> Result<(), RunnerError> {
-        self.lock()?
+        self.inner
             .preflight_capsule_with_adapters(capsule, &self.adapters)
             .map_err(RunnerError::Wasm)
     }
 
     fn preflight_components(&self) -> Result<(), RunnerError> {
-        self.lock()?
-            .preflight_components()
+        self.inner.preflight_components().map_err(RunnerError::Wasm)
+    }
+
+    fn package_preparation_tiers(
+        &self,
+    ) -> Result<BTreeMap<ContentDigest, WasmPackagePreparationTier>, RunnerError> {
+        self.inner
+            .package_preparation_tiers()
             .map_err(RunnerError::Wasm)
     }
 
     fn reject_aot_events(&self) -> Result<(), RunnerError> {
-        let executor = self.lock()?;
-        reject_aot_events(&executor)
+        reject_aot_events(&self.inner)
     }
 }
 
 impl Executor for SharedWasmExecutor {
     fn preflight(&self, capsule: &ExecutionCapsule) -> Result<(), ExecutorError> {
-        self.inner
-            .lock()
-            .map_err(|_| ExecutorError::Spawn("Wasm executor state is poisoned".to_owned()))?
-            .preflight_with_adapters(capsule, &self.adapters)
+        self.inner.preflight_with_adapters(capsule, &self.adapters)
     }
 
     fn execute(
@@ -295,11 +319,11 @@ impl Executor for SharedWasmExecutor {
         if let PreparedAction::Component { inputs, .. } = &mut request.action {
             inputs.extend(self.contextual_inputs.clone());
         }
-        let (output, diagnostic) = self
-            .inner
-            .lock()
-            .map_err(|_| ExecutorError::Spawn("Wasm executor state is poisoned".to_owned()))?
-            .execute_with_adapters_and_diagnostic(&request, &self.adapters, self.fuel_multiplier)?;
+        let (output, diagnostic) = self.inner.execute_with_adapters_and_diagnostic(
+            &request,
+            &self.adapters,
+            self.fuel_multiplier,
+        )?;
         if let Some(diagnostic) = diagnostic {
             eprintln!(
                 "runtrue-runner: WASM runtime failure for job {} step {} attempt {}: {diagnostic}",
@@ -315,10 +339,8 @@ impl Executor for SharedWasmExecutor {
         attempt: u32,
         outcome: JobAttemptOutcome,
     ) -> Result<(), ExecutorError> {
-        self.inner
-            .lock()
-            .map_err(|_| ExecutorError::Spawn("Wasm executor state is poisoned".to_owned()))?
-            .finish_job_attempt(job, attempt, outcome)
+        let _ = (job, attempt, outcome);
+        Ok(())
     }
 }
 fn selected_capsule(
@@ -341,10 +363,10 @@ use super::{
     load_component_keys, load_components, read_bounded_private_file, reject_aot_events,
     validate_no_symlink_components, validate_private_directory, AdmittedLease,
     AotAuthenticationKey, AotCacheConfig, Arc, BTreeMap, BTreeSet, CancellationToken,
-    CapabilityAdapters, Engine, ExecutionCapsule, ExecutionResult, Executor, ExecutorDispatcher,
-    ExecutorError, ExecutorOutput, HandleAuthenticationKey, Isolation, JobAttemptOutcome, Mutex,
-    MutexGuard, Path, PathBuf, PlannedJob, PreparedAction, RunnerBrokerClient, RunnerError,
-    StepAction, StepStateObserver, WasmExecutor, WasmRuntimePaths, WasmTarget, Zeroizing,
-    MAX_RUNTIME_KEY_BYTES,
+    CapabilityAdapters, ContentDigest, Engine, ExecutionCapsule, ExecutionResult, Executor,
+    ExecutorDispatcher, ExecutorError, ExecutorOutput, HandleAuthenticationKey, Isolation,
+    JobAttemptOutcome, Path, PathBuf, PlannedJob, PreparedAction, RunnerBrokerClient, RunnerError,
+    StepAction, StepStateObserver, WasmExecutor, WasmPackagePreparationTier, WasmRuntimePaths,
+    WasmTarget, Zeroizing, MAX_RUNTIME_KEY_BYTES,
 };
 use std::fmt;

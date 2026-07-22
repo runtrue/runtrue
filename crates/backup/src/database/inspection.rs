@@ -39,11 +39,9 @@ pub(crate) fn inspect_database(
     )?;
     verify_guard_identity(path, &guard)?;
     verify_integrity(&connection)?;
-    verify_schema(&connection)?;
+    let schema_version = verify_schema(&connection)?;
     verify_audit_chain(&connection, limits)?;
 
-    let schema_version: u32 =
-        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let (installation_id, fencing_epoch, safe_mode): (String, u64, bool) = if schema_version >= 3 {
         connection.query_row(
             "SELECT installation_id, fencing_epoch, safe_mode

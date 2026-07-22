@@ -24,6 +24,8 @@ pub enum UpdateError {
     UnassignedRootKey,
     #[error("invalid target description")]
     InvalidTargetDescription,
+    #[error("invalid closed runner component profile")]
+    InvalidRunnerComponentProfile,
     #[error("targets metadata is empty or exceeds its bound")]
     InvalidTargetsMetadata,
     #[error("unsafe update target path `{0}`")]

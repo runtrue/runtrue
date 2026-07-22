@@ -1,0 +1,18 @@
+[package]
+name = "runtrue-autoscaler-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[[bin]]
+name = "runtrue-autoscaler"
+path = "src/main.rs"
+
+[dependencies]
+runtrue-autoscaler.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

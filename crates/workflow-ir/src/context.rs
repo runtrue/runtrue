@@ -7,11 +7,27 @@ use std::{collections::BTreeMap, fmt};
 #[serde(deny_unknown_fields)]
 pub struct WorkflowFrontendProvenance {
     pub frontend_id: String,
+    pub contract_generation: u32,
     pub frontend_generation: u32,
+    pub configuration_digest: ContentDigest,
     pub input_digest: ContentDigest,
     pub native_digest: ContentDigest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_digest: Option<ContentDigest>,
+}
+
+/// Bounded diagnostic artifact emitted while translating a source workflow.
+///
+/// This is a client-produced compilation artifact, not Provider Evidence as
+/// defined by ADR 0015. Its digest is signed through
+/// [`WorkflowFrontendProvenance`]; the bytes are retained separately from the
+/// execution capsule so retention and access policy can evolve independently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowFrontendReportArtifact {
+    pub media_type: String,
+    pub digest: ContentDigest,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

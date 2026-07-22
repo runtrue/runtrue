@@ -89,6 +89,11 @@ pub(crate) struct ReusableWorkflowIdentity {
 #[serde(deny_unknown_fields)]
 pub struct Compilation {
     pub capsule: ir::ExecutionCapsule,
+    /// Transient client-produced translation diagnostics. The signed capsule
+    /// binds its digest; durable storage retains the bytes under a separate
+    /// typed attachment and ADR 0015 Provider Evidence remains distinct.
+    #[serde(skip, default)]
+    pub workflow_frontend_report: Option<ir::WorkflowFrontendReportArtifact>,
     /// Canonical trigger declaration used by the event intake worker. It is
     /// part of the semantic workflow digest, but not the executable capsule.
     #[serde(default)]

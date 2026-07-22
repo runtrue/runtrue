@@ -41,7 +41,7 @@ pub(in crate::store) fn deployment_row(row: &Row<'_>) -> rusqlite::Result<Deploy
     })
 }
 
-pub(in crate::store) fn deployment_tx(
+pub(crate) fn deployment_tx(
     transaction: &Transaction<'_>,
     tenant_id: &str,
     deployment_id: &str,
@@ -63,6 +63,33 @@ pub(in crate::store) fn deployment_tx(
 }
 
 impl ControlPlane {
+    pub fn deployment_result(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+    ) -> Result<DeploymentRecord, ControlPlaneError> {
+        validate_r10_identifier(tenant_id)?;
+        validate_r10_identifier(deployment_id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        require_r9_tenant_tx(&transaction, tenant_id)?;
+        let record = deployment_tx(&transaction, tenant_id, deployment_id)?
+            .ok_or_else(|| not_found("deployment", deployment_id))?;
+        let mut result_material = record.clone();
+        if result_material.status == "rolled-back" {
+            result_material.status = "succeeded".to_owned();
+        }
+        if record.expected_metadata_digest()? != record.metadata_digest
+            || result_material.expected_result_digest()? != record.result_digest
+        {
+            return Err(ControlPlaneError::CorruptState(
+                "deployment result digest changed".to_owned(),
+            ));
+        }
+        transaction.commit()?;
+        Ok(record)
+    }
+
     pub fn record_deployment_result(
         &self,
         record: &DeploymentRecord,

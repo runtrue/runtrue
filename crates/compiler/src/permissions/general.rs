@@ -108,6 +108,7 @@ pub(crate) fn secret_reference(request: &ast::SecretRequest) -> SecretReference 
         metadata_id: format!("local:{}", ContentDigest::sha256(identity).as_str()),
         name: request.name.clone(),
         purpose: request.purpose.clone(),
+        resolution: None,
     }
 }
 use crate::{

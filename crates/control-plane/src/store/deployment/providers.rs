@@ -105,7 +105,7 @@ pub(in crate::store) fn provider_configuration_tx(
         .optional()?)
 }
 
-pub(in crate::store) fn validate_provider_configuration(
+pub(crate) fn validate_provider_configuration(
     record: &TenantProviderConfiguration,
 ) -> Result<(), ControlPlaneError> {
     for value in [&record.id, &record.tenant_id, &record.provider_kind] {
@@ -149,7 +149,7 @@ pub(in crate::store) fn validate_provider_configuration(
     Ok(())
 }
 
-pub(in crate::store) fn provider_configuration_snapshot(
+pub(crate) fn provider_configuration_snapshot(
     record: &TenantProviderConfiguration,
 ) -> Result<(Vec<u8>, ContentDigest), ControlPlaneError> {
     let bytes = r10_json_bytes(record, 256 * 1024)?;
@@ -257,9 +257,7 @@ pub(in crate::store) fn signer_policy_tx(
         .optional()?)
 }
 
-pub(in crate::store) fn validate_signer_policy(
-    record: &SignerPolicyRecord,
-) -> Result<(), ControlPlaneError> {
+pub(crate) fn validate_signer_policy(record: &SignerPolicyRecord) -> Result<(), ControlPlaneError> {
     for value in [
         &record.id,
         &record.tenant_id,
@@ -292,7 +290,7 @@ pub(in crate::store) fn validate_signer_policy(
     Ok(())
 }
 
-pub(in crate::store) fn signer_policy_snapshot(
+pub(crate) fn signer_policy_snapshot(
     record: &SignerPolicyRecord,
 ) -> Result<(Vec<u8>, ContentDigest), ControlPlaneError> {
     let bytes = r10_json_bytes(record, 256 * 1024)?;

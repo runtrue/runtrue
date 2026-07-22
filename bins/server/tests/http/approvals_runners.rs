@@ -214,3 +214,195 @@ jobs:
     assert_eq!(retry.headers()["idempotency-replayed"], "true");
     assert!(!json_body(retry).await.to_string().contains(&token));
 }
+
+#[tokio::test]
+async fn autoscaler_http_contract_is_authenticated_exact_and_fenced() {
+    let (control_plane, application) = application(None);
+    control_plane
+        .create_runner_pool(&RunnerPoolRecord {
+            id: "pool-fleet-http".to_owned(),
+            tenant_id: "tenant-fleet-http".to_owned(),
+            name: "fleet-http".to_owned(),
+            region: None,
+            status: RunnerPoolStatus::Active,
+            created_unix_ms: 1,
+        })
+        .unwrap();
+    let compatibility = ContentDigest::sha256(b"http-compatibility");
+    let template_digest = ContentDigest::sha256(b"http-template");
+    control_plane
+        .upsert_runner_pool_template(&runtrue_control_plane::RunnerPoolTemplateRecord {
+            pool_id: "pool-fleet-http".to_owned(),
+            runtime_compatibility_digest: compatibility.clone(),
+            provider: "fake".to_owned(),
+            provider_template_id: "fake-template".to_owned(),
+            runner_template_digest: template_digest.clone(),
+            created_unix_ms: 1,
+            updated_unix_ms: 1,
+        })
+        .unwrap();
+    control_plane
+        .upsert_runner_pool_scaling_policy(&runtrue_control_plane::RunnerPoolScalingPolicy {
+            pool_id: "pool-fleet-http".to_owned(),
+            baseline_runtime_compatibility_digest: Some(compatibility.clone()),
+            minimum_workers: 1,
+            minimum_idle_workers: 0,
+            maximum_workers: 3,
+            scale_up_batch: 1,
+            idle_timeout_ms: 60_000,
+            offline_grace_ms: 60_000,
+            cooldown_ms: 1_000,
+            enabled: true,
+            updated_unix_ms: 1,
+        })
+        .unwrap();
+
+    let unauthenticated = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/runner-pools/pool-fleet-http/fleet")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let fleet_token = issue_http_token(
+        &application,
+        "fleet-token",
+        "fleet-autoscaler",
+        "tenant-fleet-http",
+        &["runner-fleet:read", "runner-fleet:write"],
+    )
+    .await;
+    let fleet_read = application
+        .clone()
+        .oneshot(token_request(
+            &fleet_token,
+            "GET",
+            "/api/v1/runner-pools/pool-fleet-http/fleet",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(fleet_read.status(), StatusCode::OK);
+    for (method, path) in [
+        (
+            "POST",
+            "/api/v1/runner-pools/pool-fleet-http/enrollment-tokens",
+        ),
+        ("GET", "/api/v1/capsules/not-authorized"),
+        ("GET", "/api/v1/scopes/tenant:tenant-fleet-http/secrets"),
+    ] {
+        let denied = application
+            .clone()
+            .oneshot(token_request(&fleet_token, method, path, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{method} {path}");
+    }
+
+    let lease = application
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/v1/runner-pools/pool-fleet-http/fleet/lease",
+            serde_json::to_vec(&json!({"expires_in_ms": 45000})).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(lease.status(), StatusCode::OK);
+    let generation = json_body(lease).await["fencing_generation"]
+        .as_u64()
+        .unwrap();
+
+    let request_body = json!({
+        "fencing_generation": generation,
+        "template": {
+            "runtime_compatibility_digest": compatibility,
+            "provider": "fake",
+            "provider_template_id": "fake-template",
+            "runner_template_digest": template_digest,
+        }
+    });
+    let stale = application
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/v1/runner-pools/pool-fleet-http/fleet/requests",
+            serde_json::to_vec(&json!({
+                "fencing_generation": generation + 1,
+                "template": request_body["template"].clone(),
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    let created = application
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/v1/runner-pools/pool-fleet-http/fleet/requests",
+            serde_json::to_vec(&request_body).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let fleet_request_id = json_body(created).await["id"].as_str().unwrap().to_owned();
+
+    let provisioning = application
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            &format!(
+                "/api/v1/runner-pools/pool-fleet-http/fleet/requests/{fleet_request_id}/transition"
+            ),
+            serde_json::to_vec(&json!({
+                "expected_state": "requested",
+                "next_state": "provisioning",
+                "fencing_generation": generation,
+                "detail": "provider-request-http",
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(provisioning.status(), StatusCode::OK);
+
+    let claim = application
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/v1/runner-pools/pool-fleet-http/fleet/requests/{fleet_request_id}/launch-claim"),
+            serde_json::to_vec(&json!({
+                "fencing_generation": generation,
+                "provider_instance_id": "instance-http",
+                "identity_proof_digest": ContentDigest::sha256(b"identity-http"),
+                "expires_in_ms": 60000,
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(claim.status(), StatusCode::CREATED);
+    assert_eq!(claim.headers()["cache-control"], "no-store");
+    let token = json_body(claim).await["token"].as_str().unwrap().to_owned();
+    assert!(!token.is_empty());
+
+    let fleet = application
+        .oneshot(api_request(
+            "GET",
+            "/api/v1/runner-pools/pool-fleet-http/fleet",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(fleet.status(), StatusCode::OK);
+    let serialized = json_body(fleet).await.to_string();
+    assert!(serialized.contains(&fleet_request_id));
+    assert!(!serialized.contains(&token));
+}

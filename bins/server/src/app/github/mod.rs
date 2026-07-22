@@ -2,6 +2,7 @@ mod installations;
 mod lifecycle;
 mod setup;
 mod ui;
+mod ui_secrets;
 mod webhooks;
 
 pub(in crate::app) use installations::{
@@ -17,5 +18,9 @@ pub(in crate::app) use ui::{
     save_browser_organization_variable, save_browser_repository_secret,
     save_browser_repository_variable, save_browser_repository_workflow_directory,
     start_github_installation_from_ui, uninstall_browser_repository,
+};
+pub(in crate::app) use ui_secrets::{
+    browser_secret_inventory, delete_browser_scoped_secret, save_browser_configuration_project,
+    save_browser_scoped_secret,
 };
 pub(in crate::app) use webhooks::github_webhook;

@@ -14,17 +14,23 @@ path = "src/main.rs"
 name = "runtrue-action-builder"
 path = "src/action_builder_main.rs"
 
+[[bin]]
+name = "runtrue-db-transfer"
+path = "src/db_transfer_main.rs"
+
 [lib]
 name = "runtrue_server"
 path = "src/lib.rs"
 
 [features]
-default = ["github-actions"]
+default = ["github-actions", "postgres"]
 github-actions = ["dep:runtrue-gha-import"]
+postgres = ["runtrue-control-plane/postgres"]
 
 [dependencies]
 runtrue-attest.workspace = true
 runtrue-artifacts.workspace = true
+runtrue-autoscaler.workspace = true
 runtrue-auth.workspace = true
 runtrue-audit.workspace = true
 runtrue-compiler.workspace = true
@@ -36,7 +42,6 @@ runtrue-lifecycle.workspace = true
 runtrue-lock.workspace = true
 runtrue-model.workspace = true
 runtrue-oidc.workspace = true
-runtrue-output-lifecycle.workspace = true
 runtrue-policy.workspace = true
 runtrue-protocol.workspace = true
 runtrue-replay.workspace = true
@@ -46,6 +51,7 @@ runtrue-secrets.workspace = true
 runtrue-storage.workspace = true
 runtrue-trusted-planner.workspace = true
 runtrue-workflow-ir.workspace = true
+runtrue-update.workspace = true
 runtrue-workflow-ast.workspace = true
 runtrue-workflow-frontend.workspace = true
 axum.workspace = true
@@ -57,6 +63,7 @@ hkdf.workspace = true
 libc.workspace = true
 nix = { workspace = true, features = ["poll", "user"] }
 prost-types.workspace = true
+prost.workspace = true
 rand_core.workspace = true
 rcgen.workspace = true
 rusqlite.workspace = true
@@ -80,6 +87,7 @@ ureq.workspace = true
 [dev-dependencies]
 runtrue-runner = { package = "runtrue-runner", path = "../runner" }
 runtrue-runner-core = { path = "../../crates/runner-core" }
+sqlx.workspace = true
 tempfile.workspace = true
 tokio-stream.workspace = true
 

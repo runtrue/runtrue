@@ -2,8 +2,10 @@
 # evaluation profile, not a production TLS or remote-runner topology.
 x-runner-security: &runner-security
   # Deliberately shared with the evaluation server for rootless bind mounts.
-  # The hardened systemd examples use distinct service users instead.
   user: "${RUNTRUE_RUNTIME_UID:?run deploy/bootstrap.sh first}:${RUNTRUE_RUNTIME_GID:?run deploy/bootstrap.sh first}"
+  # Enrollment binds the verified hostname into the durable inventory. Keep it
+  # identical between the one-shot enroller and long-running daemon containers.
+  hostname: runtrue-runner
   read_only: true
   init: true
   cap_drop:

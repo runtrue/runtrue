@@ -1,0 +1,79 @@
+# Opt-in prehydrated WebAssembly runtime for the same-host evaluation runner.
+# Provisioning is deliberately separate from the runner daemon: payloads,
+# signed admission manifests, and verification keys are read-only, while only
+# the authenticated AOT cache is writable at runtime.
+
+x-runner-wasm-environment: &runner-wasm-environment
+  # This egress-capable profile executes admitted components only. Native
+  # commands would otherwise inherit the container's ambient network.
+  RUNTRUE_RUNNER_TRUSTED_NATIVE: "false"
+  RUNTRUE_RUNNER_CREDENTIAL_DIRECTORY: /var/lib/runtrue/wasm-runner/credentials
+  RUNTRUE_RUNNER_STATE_DIRECTORY: /var/lib/runtrue/wasm-runner/state
+  RUNTRUE_RUNNER_WASM_COMPONENT_DIRECTORY: /run/runtrue-wasm/components
+  RUNTRUE_RUNNER_WASM_MANIFEST_DIRECTORY: /run/runtrue-wasm/manifests
+  RUNTRUE_RUNNER_WASM_COMPONENT_KEYRING: /run/runtrue-wasm/keys
+  RUNTRUE_RUNNER_WASM_AOT_CACHE: /var/lib/runtrue/wasm-aot
+  RUNTRUE_RUNNER_WASM_RUNTIME_KEY: /run/runtrue-wasm/runtime.key
+  RUNTRUE_RUNNER_WASM_MAX_CONCURRENT_JOBS: "${RUNTRUE_RUNNER_WASM_MAX_CONCURRENT_JOBS:-1}"
+
+x-runner-wasm-volumes: &runner-wasm-volumes
+  - type: bind
+    source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/runner-wasm-identity"
+    target: /var/lib/runtrue/wasm-runner
+    bind:
+      create_host_path: false
+  - type: bind
+    source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/runner-wasm/components"
+    target: /run/runtrue-wasm/components
+    read_only: true
+    bind:
+      create_host_path: false
+  - type: bind
+    source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/runner-wasm/manifests"
+    target: /run/runtrue-wasm/manifests
+    read_only: true
+    bind:
+      create_host_path: false
+  - type: bind
+    source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/runner-wasm/keys"
+    target: /run/runtrue-wasm/keys
+    read_only: true
+    bind:
+      create_host_path: false
+  - type: bind
+    source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/runner-wasm/aot"
+    target: /var/lib/runtrue/wasm-aot
+    bind:
+      create_host_path: false
+  - type: bind
+    source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/runner-wasm/runtime.key"
+    target: /run/runtrue-wasm/runtime.key
+    read_only: true
+    bind:
+      create_host_path: false
+
+services:
+  runner:
+    profiles: !override
+      - runner-wasm-eval
+    environment:
+      <<: *runner-wasm-environment
+    volumes: *runner-wasm-volumes
+    networks:
+      - control
+      - scm-egress
+
+  # Enrollment probes and durably binds the same backend inventory that the
+  # daemon will advertise, so it must receive the identical Wasm admission
+  # configuration.
+  runner-enroll:
+    environment:
+      <<: *runner-wasm-environment
+    volumes: *runner-wasm-volumes
+    networks:
+      - control
+      - scm-egress
+
+networks:
+  scm-egress:
+    driver: bridge

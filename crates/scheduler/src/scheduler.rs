@@ -1,9 +1,9 @@
 use crate::{
-    matching, resources, validation, Lease, LeaseState, QueuedJob, RunnerRecord, RunnerStatus,
-    SchedulerError, TenantQuota,
+    matching, resources, validation, Lease, LeaseState, ObservedLeaseOffer, PlacementObservation,
+    PlacementScoreObservation, QueuedJob, RunnerRecord, RunnerStatus, SchedulerError, TenantQuota,
 };
 use runtrue_model::ContentDigest;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Instant};
 
 pub const DEFAULT_ACCEPT_WINDOW_MS: u64 = 15_000;
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 60_000;
@@ -95,15 +95,36 @@ impl Scheduler {
         runner_id: &str,
         now_unix_ms: u64,
     ) -> Result<Option<Lease>, SchedulerError> {
+        self.offer_for_runner_observed(runner_id, now_unix_ms)
+            .map(|offer| offer.lease)
+    }
+
+    /// Offer at most one job and return bounded diagnostics for the existing
+    /// hard-filter and scoring decision.
+    pub fn offer_for_runner_observed(
+        &mut self,
+        runner_id: &str,
+        now_unix_ms: u64,
+    ) -> Result<ObservedLeaseOffer, SchedulerError> {
+        let started = Instant::now();
         self.expire(now_unix_ms)?;
         let runner = self
             .runners
             .get(runner_id)
             .ok_or_else(|| SchedulerError::UnknownRunner(runner_id.to_owned()))?;
+        let queued_jobs = u64::try_from(self.queue.len()).unwrap_or(u64::MAX);
         if runner.status != RunnerStatus::Online {
-            return Ok(None);
+            return Ok(ObservedLeaseOffer {
+                lease: None,
+                placement: placement_observation(runner_id, queued_jobs, 0, None, None, started),
+            });
         }
 
+        let compatible_jobs = self
+            .queue
+            .values()
+            .filter(|job| self.hard_filters(job, runner))
+            .count();
         let chosen = self
             .queue
             .values()
@@ -111,8 +132,22 @@ impl Scheduler {
             .min_by_key(|job| self.score_key(job, runner, now_unix_ms))
             .map(|job| job.id.clone());
         let Some(job_id) = chosen else {
-            return Ok(None);
+            return Ok(ObservedLeaseOffer {
+                lease: None,
+                placement: placement_observation(
+                    runner_id,
+                    queued_jobs,
+                    u64::try_from(compatible_jobs).unwrap_or(u64::MAX),
+                    None,
+                    None,
+                    started,
+                ),
+            });
         };
+        let selected_score = self
+            .queue
+            .get(&job_id)
+            .map(|job| self.score_observation(job, runner, now_unix_ms));
         let job = self
             .queue
             .remove(&job_id)
@@ -144,7 +179,17 @@ impl Scheduler {
             .insert(job.id.clone(), lease_id.clone());
         self.leased_jobs.insert(lease_id.clone(), job);
         self.leases.insert(lease_id, lease.clone());
-        Ok(Some(lease))
+        Ok(ObservedLeaseOffer {
+            lease: Some(lease),
+            placement: placement_observation(
+                runner_id,
+                queued_jobs,
+                u64::try_from(compatible_jobs).unwrap_or(u64::MAX),
+                Some(job_id),
+                selected_score,
+                started,
+            ),
+        })
     }
 
     pub fn decide_offer(
@@ -436,6 +481,46 @@ impl Scheduler {
             now_unix_ms,
             PRIORITY_AGING_INTERVAL_MS,
         )
+    }
+
+    fn score_observation(
+        &self,
+        job: &QueuedJob,
+        runner: &RunnerRecord,
+        now_unix_ms: u64,
+    ) -> PlacementScoreObservation {
+        let quota = self.quotas.get(&job.tenant_id).copied().unwrap_or_default();
+        let running = self
+            .running_by_tenant
+            .get(&job.tenant_id)
+            .copied()
+            .unwrap_or(0);
+        matching::score_observation(
+            job,
+            runner,
+            quota,
+            running,
+            now_unix_ms,
+            PRIORITY_AGING_INTERVAL_MS,
+        )
+    }
+}
+
+fn placement_observation(
+    runner_id: &str,
+    queued_jobs: u64,
+    compatible_jobs: u64,
+    selected_job_id: Option<String>,
+    selected_score: Option<PlacementScoreObservation>,
+    started: Instant,
+) -> PlacementObservation {
+    PlacementObservation {
+        runner_id: runner_id.to_owned(),
+        queued_jobs,
+        compatible_jobs,
+        selected_job_id,
+        selected_score,
+        duration_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
     }
 }
 

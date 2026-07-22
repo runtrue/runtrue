@@ -1,0 +1,14 @@
+{
+  "sequence": 3,
+  "migration_id": "reusable-capability-approvals-v1",
+  "logical_schema_generation": 3,
+  "purpose": "Index repository-scoped reusable capability approvals and repair existing run authorizations to retain exact Capsule subjects.",
+  "preconditions": [
+    "legacy-baseline-v1-applied",
+    "approval-request-schema-present"
+  ],
+  "postconditions": [
+    "reusable-capability-approvals-indexed",
+    "run-approval-authorizations-exactly-bound"
+  ]
+}

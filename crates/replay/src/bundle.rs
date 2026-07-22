@@ -5,6 +5,7 @@ use crate::{
 };
 use runtrue_engine::ExecutionResult;
 use runtrue_model::ContentDigest;
+use runtrue_workflow_ir::WorkflowFrontendReportArtifact;
 use runtrue_workflow_ir::{canonicalize_value, ExecutionCapsule};
 
 impl ReplayBundle {
@@ -27,8 +28,15 @@ impl ReplayBundle {
             input_artifact_digests: Vec::new(),
             artifact_references: Vec::new(),
             cache_references: Vec::new(),
+            workflow_frontend_report: None,
             outcome: result.map(ReplayOutcome::from),
         })
+    }
+
+    #[must_use]
+    pub fn with_workflow_frontend_report(mut self, report: WorkflowFrontendReportArtifact) -> Self {
+        self.workflow_frontend_report = Some(report);
+        self
     }
 
     pub fn verify(&self) -> Result<(), ReplayError> {
@@ -46,6 +54,17 @@ impl ReplayBundle {
         ensure_sorted_unique(&self.input_artifact_digests, "input artifact digests")?;
         ensure_sorted_unique(&self.artifact_references, "artifact references")?;
         ensure_sorted_unique(&self.cache_references, "cache references")?;
+        match (
+            self.capsule.context.workflow_frontend.as_ref(),
+            self.workflow_frontend_report.as_ref(),
+        ) {
+            (Some(provenance), Some(report))
+                if provenance.report_digest.as_ref() == Some(&report.digest)
+                    && report.digest == ContentDigest::sha256(&report.bytes) => {}
+            (Some(provenance), None) if provenance.report_digest.is_none() => {}
+            (None, None) => {}
+            _ => return Err(ReplayError::WorkflowFrontendReportMismatch),
+        }
         Ok(())
     }
 

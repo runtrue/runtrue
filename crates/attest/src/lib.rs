@@ -7,7 +7,9 @@
 use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use rand_core::{OsRng, RngCore as _};
 use runtrue_model::ContentDigest;
-use runtrue_workflow_ir::{canonicalize_value, ExecutionCapsule, ExpandedJobSet, ParityGrade};
+use runtrue_workflow_ir::{
+    canonicalize_value, ExecutionCapsule, ExpandedJobSet, ParityGrade, WorkflowFrontendProvenance,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 use thiserror::Error;
@@ -313,6 +315,8 @@ pub struct ProvenanceStatement {
     pub source_commit: String,
     pub workflow_digest: ContentDigest,
     pub capsule_digest: ContentDigest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_frontend: Option<WorkflowFrontendProvenance>,
     pub builder_id: String,
     pub runner_image_digest: ContentDigest,
     pub parity_grade: ParityGrade,
@@ -328,6 +332,11 @@ impl ProvenanceStatement {
             || self.source_repository.is_empty()
             || self.source_commit.is_empty()
             || self.builder_id.is_empty()
+            || self.workflow_frontend.as_ref().is_some_and(|frontend| {
+                frontend.frontend_id.is_empty()
+                    || frontend.contract_generation == 0
+                    || frontend.frontend_generation == 0
+            })
             || self
                 .resolved_dependencies
                 .windows(2)
@@ -469,6 +478,15 @@ mod tests {
             source_commit: "commit".to_owned(),
             workflow_digest: ContentDigest::sha256(b"workflow"),
             capsule_digest: ContentDigest::sha256(b"capsule"),
+            workflow_frontend: Some(WorkflowFrontendProvenance {
+                frontend_id: "runtrue.test".to_owned(),
+                contract_generation: 1,
+                frontend_generation: 2,
+                configuration_digest: ContentDigest::sha256(b"frontend-config"),
+                input_digest: ContentDigest::sha256(b"frontend-input"),
+                native_digest: ContentDigest::sha256(b"native-workflow"),
+                report_digest: Some(ContentDigest::sha256(b"compatibility-report")),
+            }),
             builder_id: "runner:image".to_owned(),
             runner_image_digest: ContentDigest::sha256(b"runner"),
             parity_grade: ParityGrade::AExact,
@@ -479,6 +497,10 @@ mod tests {
         };
         let signed = key.sign_provenance(&statement).unwrap();
         key.verifying_key().verify_provenance(&signed).unwrap();
+        assert_eq!(
+            signed.statement.workflow_frontend,
+            statement.workflow_frontend
+        );
 
         let mut tampered = signed;
         tampered.statement.source_commit = "other".to_owned();

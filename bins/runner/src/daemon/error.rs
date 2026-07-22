@@ -12,6 +12,8 @@ pub enum RunnerError {
     InventoryRunnerMismatch,
     #[error("verified inventory protocol version differs from negotiated protocol")]
     InventoryProtocolMismatch,
+    #[error("configured Wasm concurrency differs from the verified inventory")]
+    InventoryWasmConcurrencyMismatch,
     #[error("control hello connection id does not match this stream")]
     ConnectionIdMismatch,
     #[error("invalid control-plane heartbeat interval")]

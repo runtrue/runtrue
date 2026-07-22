@@ -32,7 +32,26 @@ pub struct JobExecution {
     pub credential_taint: CredentialTaint,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedContent {
+    pub kind: String,
+    pub digests: Vec<ContentDigest>,
+    pub tier: Option<PreparedContentTier>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparedContentTier {
+    Warmish,
+    Warm,
+}
+
 pub trait JobExecutor: Clone + Send + Sync + 'static {
+    /// Exact immutable content prepared by this executor and safe to expose to
+    /// this runner's tenant-scoped placement inventory.
+    fn prepared_content(&self) -> Result<Vec<PreparedContent>, RunnerError> {
+        Ok(Vec::new())
+    }
+
     fn preflight(&self, lease: &AdmittedLease) -> Result<(), RunnerError>;
 
     fn preflight_with_broker(

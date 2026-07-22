@@ -15,5 +15,10 @@ mod browser;
 mod capsules;
 #[path = "http/github.rs"]
 mod github;
+#[cfg(feature = "postgres")]
+#[path = "http/postgres_runtime.rs"]
+mod postgres_runtime;
 #[path = "http/runs.rs"]
 mod runs;
+#[path = "http/user_management.rs"]
+mod user_management;

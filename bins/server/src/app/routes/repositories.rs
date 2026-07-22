@@ -66,12 +66,14 @@ pub(in crate::app) async fn list_repositories(
             &principal,
             CedarAction::ViewRepository,
             tenant_id,
-        ) {
+        )
+        .await
+        {
             return response;
         }
-        state.control_plane.list_repositories_for_tenant(tenant_id)
+        state.store.repositories_for_tenant(tenant_id).await
     } else {
-        state.control_plane.list_repositories()
+        state.store.repositories().await
     };
     match repositories {
         Ok(repositories) => Json(RepositoryPage {
@@ -123,10 +125,12 @@ pub(in crate::app) async fn create_repository(
         &principal,
         CedarAction::EditWorkflowSettings,
         ServerResource::new(CedarResourceKind::Repository, &record.id, &record.tenant_id),
-    ) {
+    )
+    .await
+    {
         return response;
     }
-    match state.control_plane.create_repository(&record) {
+    match state.store.create_repository(&record).await {
         Ok(()) => (StatusCode::CREATED, Json(RepositoryView::from(record))).into_response(),
         Err(error) => control_plane_problem(&request_id, error),
     }
@@ -138,7 +142,7 @@ pub(in crate::app) async fn get_repository(
     Extension(principal): Extension<RequestPrincipal>,
     Path(repository_id): Path<String>,
 ) -> Response {
-    match state.control_plane.repository(&repository_id) {
+    match state.store.repository(&repository_id).await {
         Ok(repository) => {
             if let Err(response) = authorize_resource(
                 &state,
@@ -150,7 +154,9 @@ pub(in crate::app) async fn get_repository(
                     &repository.id,
                     &repository.tenant_id,
                 ),
-            ) {
+            )
+            .await
+            {
                 return response;
             }
             Json(RepositoryView::from(repository)).into_response()

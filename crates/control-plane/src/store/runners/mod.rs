@@ -4,11 +4,13 @@ mod broker;
 mod certificates;
 mod data_commits;
 mod enrollment;
+mod fleet;
 mod leases;
 mod logs;
 mod oidc;
 mod pools;
 mod scheduler;
+mod updates;
 
 pub(in crate::store) use broker::*;
 pub(in crate::store) use certificates::*;

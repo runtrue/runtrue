@@ -3,6 +3,8 @@ use runtrue_model::ContentDigest;
 use runtrue_workflow_ir::{Architecture, Isolation, OperatingSystem};
 use std::collections::BTreeSet;
 
+pub const MAX_CONCURRENT_WASM_JOBS: u32 = 64;
+
 /// Locally verified runner posture. Self-reported inventory must not be used to
 /// populate this structure without a separate verification step.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +15,7 @@ pub struct VerifiedRunnerProfile {
     pub logical_cpus: u32,
     pub memory_bytes: u64,
     pub storage_bytes: u64,
+    pub max_concurrent_wasm_jobs: u32,
     pub isolation_backends: BTreeSet<Isolation>,
     pub capabilities: BTreeSet<String>,
     pub region: Option<String>,
@@ -25,6 +28,16 @@ impl VerifiedRunnerProfile {
         if self.logical_cpus == 0 || self.memory_bytes == 0 || self.storage_bytes == 0 {
             return Err(RunnerAdmissionError::InvalidProfile(
                 "CPU, memory, and storage must be greater than zero".to_owned(),
+            ));
+        }
+        if self.max_concurrent_wasm_jobs == 0
+            || self.max_concurrent_wasm_jobs > MAX_CONCURRENT_WASM_JOBS
+            || (self.max_concurrent_wasm_jobs > 1
+                && !self.isolation_backends.contains(&Isolation::Wasm))
+        {
+            return Err(RunnerAdmissionError::InvalidProfile(
+                "Wasm concurrency must be between 1 and 64 and requires the Wasm backend"
+                    .to_owned(),
             ));
         }
         if self.isolation_backends.is_empty() {

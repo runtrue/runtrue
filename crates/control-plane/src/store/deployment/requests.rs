@@ -101,7 +101,7 @@ pub(in crate::store) fn deployment_request_tx(
         .optional()?)
 }
 
-pub(in crate::store) fn validate_deployment_request_shape(
+pub(crate) fn validate_deployment_request_shape(
     record: &DeploymentRequestRecord,
 ) -> Result<(), ControlPlaneError> {
     for value in [

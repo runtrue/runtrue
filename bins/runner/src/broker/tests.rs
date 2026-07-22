@@ -180,6 +180,7 @@ fn grant() -> SecretReference {
         metadata_id: "secret-1".to_owned(),
         name: "TOKEN".to_owned(),
         purpose: Some("publish".to_owned()),
+        resolution: None,
     }
 }
 

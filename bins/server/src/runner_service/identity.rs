@@ -1,4 +1,6 @@
-use super::{optional_string, parse_isolation, validate_inventory, RunnerSession};
+use super::{
+    optional_string, parse_isolation, validate_inventory, wasm_concurrency, RunnerSession,
+};
 use runtrue_model::ContentDigest;
 use runtrue_protocol::v1;
 use runtrue_scheduler::{Lease, RunnerRecord, RunnerStatus};
@@ -74,15 +76,18 @@ pub(super) fn enrolled_runner_record(
         logical_cpus: inventory.logical_cpus,
         memory_bytes: inventory.memory_bytes,
         storage_bytes: inventory.local_storage_bytes,
+        max_concurrent_wasm_jobs: wasm_concurrency(inventory)?,
         region: optional_string(&inventory.region).map(str::to_owned),
         verified_capabilities: BTreeSet::new(),
         self_reported_capabilities,
         status: RunnerStatus::Offline,
         active_jobs: 0,
+        active_wasm_jobs: 0,
         used_cpus: 0,
         used_memory_bytes: 0,
         used_storage_bytes: 0,
         locality: BTreeSet::new(),
+        package_tiers: std::collections::BTreeMap::new(),
         last_heartbeat_unix_ms: now_unix_ms,
     };
     validate_inventory(&runner, inventory, inventory.protocol_version)?;

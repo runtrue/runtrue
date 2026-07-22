@@ -1,7 +1,7 @@
 mod api_tokens;
 mod artifacts;
 mod cache;
-mod database;
+pub(crate) mod database;
 mod decode;
 mod durable;
 mod installation;
@@ -43,25 +43,31 @@ use crate::types::{
     CompleteGitHubLifecycleDelivery, CompleteGitHubSetupTransaction, CreateGitHubSetupTransaction,
     CreateRunRequest, CredentialTaintState, DeliveredRunnerSecret, DeploymentMetrics,
     DeploymentRecord, DeploymentRequestRecord, DeploymentRequestStatus, DurableTask,
-    DurableTaskStatus, EnrollmentToken, EnrollmentTokenIssueResult, EnrollmentTokenRecord,
-    EnvironmentConcurrencyLeaseRecord, EnvironmentRecord, ExpandedJobMaterialization,
-    ExpandedJobSetRecord, FailGitHubLifecycleDelivery, GitHubAccountKind,
-    GitHubInstallationReconciliationResult, GitHubInstallationRecord,
+    DurableTaskStatus, EffectiveRepositoryAccess, EnrollmentToken, EnrollmentTokenIssueResult,
+    EnrollmentTokenRecord, EnvironmentConcurrencyLeaseRecord, EnvironmentRecord,
+    ExpandedJobMaterialization, ExpandedJobSetRecord, FailGitHubLifecycleDelivery,
+    GitHubAccountKind, GitHubInstallationReconciliationResult, GitHubInstallationRecord,
     GitHubLifecycleDeliveryRecord, GitHubLifecycleDeliveryState, GitHubRepositoryCatalogRecord,
     GitHubRepositoryReconciliationSummary, GitHubRepositorySelection, GitHubSelectedRepository,
     GitHubSetupStatus, GitHubSetupTransactionRecord, HumanIdentityRecord, HumanUserRecord,
     IdempotentResult, InstallationRecoveryState, IssueRunnerSecretRequest, IssueRunnerSourceTicket,
-    IssuedEnrollmentToken, JobRecord, LifecycleGcLease, LifecycleGcMetrics, LifecycleGcRoot,
-    LifecyclePruneSummary, LinkSelectedGitHubRepository, MaterializeExpandedJobSet,
-    NewScmWebhookEvent, NormalizedTriggerEventRecord, PersistedRunner, PolicyVersionRecord,
+    IssuedEnrollmentToken, IssuedRunnerLaunchClaim, IssuedRunnerSoftwareUpdateClaim, JobRecord,
+    LifecycleGcLease, LifecycleGcMetrics, LifecycleGcRoot, LifecyclePruneSummary,
+    LinkSelectedGitHubRepository, MaterializeExpandedJobSet, NewScmWebhookEvent,
+    NormalizedTriggerEventRecord, PersistedRunner, PlannedRunnerReplacement, PolicyVersionRecord,
     PreparedScmExecution, PromotionRequestRecord, PublicSigningResult, R9AuditMetadata,
     ReconcileGitHubInstallation, RecordRunnerBlobUpload, RecordRunnerOidcIssuance,
     RecordScmCheckFailure, RecordScmCheckProgress, RecordScmFetchSnapshotReady, ReplayBundleRecord,
-    RepositoryRecord, ReserveGitHubLifecycleDelivery, ReserveScmCheckPublication,
-    ReserveScmSourceFetch, RunRecord, RunSourceSnapshotRecord, RunnerCertificateRecord,
+    RepositoryAccessGrantRecord, RepositoryAccessSubject, RepositoryRecord,
+    ReserveGitHubLifecycleDelivery, ReserveScmCheckPublication, ReserveScmSourceFetch, RunRecord,
+    RunSourceSnapshotRecord, RunnerAutoscalerLease, RunnerCertificateRecord,
     RunnerCertificateRotationRecord, RunnerCertificateStatus, RunnerDataCommit,
-    RunnerDataCommitKind, RunnerLogFrameRecord, RunnerPoolRecord, RunnerPoolStatus,
-    RunnerSecretLeaseRecord, RunnerSourceDownload, RunnerSourceTicketRecord,
+    RunnerDataCommitKind, RunnerDemandGroup, RunnerEnrollmentReplay, RunnerFleetRequestRecord,
+    RunnerFleetRequestState, RunnerLaunchClaimRecord, RunnerLaunchClaimToken, RunnerLogFrameRecord,
+    RunnerPoolFleetSnapshot, RunnerPoolRecord, RunnerPoolScalingPolicy, RunnerPoolStatus,
+    RunnerPoolTemplateRecord, RunnerPoolUpdatePolicy, RunnerReplacementMode,
+    RunnerReplacementRecord, RunnerReplacementState, RunnerSecretLeaseRecord, RunnerSlotRecord,
+    RunnerSoftwareUpdateClaim, RunnerSourceDownload, RunnerSourceTicketRecord, RunnerUpdateRelease,
     ScheduleReconciliationSummary, ScheduleTriggerCursor, ScmCheckPublicationRecord,
     ScmCheckPublicationState, ScmCheckPublishTask, ScmContinuationCommit, ScmContinuationContext,
     ScmContinuationResolution, ScmExecutionRole, ScmInstallationRecord, ScmPendingExecution,
@@ -70,10 +76,11 @@ use crate::types::{
     ScmTaskCompletion, ScmWebhookEventRecord, SecretMetadataReference, SetGitHubInstallationStatus,
     SignedCapsuleRecord, SignerPolicyRecord, SigningResultJournalRecord, SigningResultReservation,
     SigningResultState, SourceSnapshotRecord, SourceSnapshotState, StorageReservationState,
-    StorageTicketBinding, StorageTicketBindingState, TenantIdentityRecord, TenantMembershipRecord,
-    TenantOidcProviderConfiguration, TenantProviderConfiguration, TenantStorageQuota,
-    TenantStorageReservation, TenantStorageUsage, VariableRecord, VariableSnapshot,
-    WorkflowSemanticsMetrics,
+    StorageTicketBinding, StorageTicketBindingState, TeamMembershipRecord, TeamRecord,
+    TenantIdentityRecord, TenantMembershipRecord, TenantOidcProviderConfiguration,
+    TenantProviderConfiguration, TenantStorageQuota, TenantStorageReservation, TenantStorageUsage,
+    VariableRecord, VariableSnapshot, VerifiedRunnerUpdateReleaseRegistration,
+    WorkflowFrontendReportRecord, WorkflowSemanticsMetrics,
 };
 use rand_core::{OsRng, RngCore};
 use runtrue_attest::CapsuleVerifyingKey;
@@ -169,7 +176,7 @@ pub fn authoritative_runner_posture_digest(
 ) -> Result<ContentDigest, ControlPlaneError> {
     #[derive(Serialize)]
     #[serde(deny_unknown_fields)]
-    struct Posture<'a> {
+    struct LegacyPosture<'a> {
         version: u32,
         runner_id: &'a str,
         tenant_id: &'a str,
@@ -184,23 +191,65 @@ pub fn authoritative_runner_posture_digest(
         verified_capabilities: &'a BTreeSet<String>,
     }
 
+    #[derive(Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct ScalablePosture<'a> {
+        version: u32,
+        runner_id: &'a str,
+        tenant_id: &'a str,
+        pool_id: &'a str,
+        os: runtrue_workflow_ir::OperatingSystem,
+        arch: runtrue_workflow_ir::Architecture,
+        isolation_backends: &'a BTreeSet<runtrue_workflow_ir::Isolation>,
+        logical_cpus: u32,
+        memory_bytes: u64,
+        storage_bytes: u64,
+        max_concurrent_wasm_jobs: u32,
+        region: &'a Option<String>,
+        verified_capabilities: &'a BTreeSet<String>,
+    }
+
     validate_runner_record(runner)?;
-    let durable = serde_json::to_vec(&Posture {
-        version: 1,
-        runner_id: &runner.id,
-        tenant_id: &runner.tenant_id,
-        pool_id: &runner.pool_id,
-        os: runner.os,
-        arch: runner.arch,
-        isolation_backends: &runner.isolation_backends,
-        logical_cpus: runner.logical_cpus,
-        memory_bytes: runner.memory_bytes,
-        storage_bytes: runner.storage_bytes,
-        region: &runner.region,
-        verified_capabilities: &runner.verified_capabilities,
-    })?;
+    let (durable, domain) = if runner.max_concurrent_wasm_jobs == 1 {
+        (
+            serde_json::to_vec(&LegacyPosture {
+                version: 1,
+                runner_id: &runner.id,
+                tenant_id: &runner.tenant_id,
+                pool_id: &runner.pool_id,
+                os: runner.os,
+                arch: runner.arch,
+                isolation_backends: &runner.isolation_backends,
+                logical_cpus: runner.logical_cpus,
+                memory_bytes: runner.memory_bytes,
+                storage_bytes: runner.storage_bytes,
+                region: &runner.region,
+                verified_capabilities: &runner.verified_capabilities,
+            })?,
+            b"runtrue.runner.authoritative-posture.v1\0".as_slice(),
+        )
+    } else {
+        (
+            serde_json::to_vec(&ScalablePosture {
+                version: 2,
+                runner_id: &runner.id,
+                tenant_id: &runner.tenant_id,
+                pool_id: &runner.pool_id,
+                os: runner.os,
+                arch: runner.arch,
+                isolation_backends: &runner.isolation_backends,
+                logical_cpus: runner.logical_cpus,
+                memory_bytes: runner.memory_bytes,
+                storage_bytes: runner.storage_bytes,
+                max_concurrent_wasm_jobs: runner.max_concurrent_wasm_jobs,
+                region: &runner.region,
+                verified_capabilities: &runner.verified_capabilities,
+            })?,
+            b"runtrue.runner.authoritative-posture.v2\0".as_slice(),
+        )
+    };
     let mut binding = Vec::with_capacity(durable.len() + inventory_digest.as_str().len() + 64);
-    binding.extend_from_slice(b"runtrue.runner.authoritative-posture.v1\0");
+    binding.extend_from_slice(domain);
     binding.extend_from_slice(&(inventory_digest.as_str().len() as u64).to_be_bytes());
     binding.extend_from_slice(inventory_digest.as_str().as_bytes());
     binding.extend_from_slice(&(durable.len() as u64).to_be_bytes());
@@ -214,7 +263,7 @@ pub struct ControlPlane {
 }
 
 impl ControlPlane {
-    fn connection(&self) -> Result<MutexGuard<'_, Connection>, ControlPlaneError> {
+    pub(crate) fn connection(&self) -> Result<MutexGuard<'_, Connection>, ControlPlaneError> {
         self.connection
             .lock()
             .map_err(|_| ControlPlaneError::Poisoned)
@@ -325,8 +374,55 @@ mod deployment;
 mod identity;
 mod policy;
 
-use deployment::*;
+pub(crate) use deployment::*;
 use identity::*;
+
+#[cfg(feature = "postgres")]
+pub(crate) fn validate_persistence_tenant_identity(
+    record: &TenantIdentityRecord,
+) -> Result<Vec<u8>, ControlPlaneError> {
+    identity::validate_tenant_identity(record)
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn validate_persistence_identity_identifier(
+    value: &str,
+) -> Result<(), ControlPlaneError> {
+    identity::validate_r9_identifier(value)
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn validate_persistence_https_uri(value: &str) -> Result<(), ControlPlaneError> {
+    identity::validate_r9_https_uri(value, false)
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn validate_persistence_oidc_provider(
+    record: &TenantOidcProviderConfiguration,
+) -> Result<(Vec<u8>, Vec<u8>), ControlPlaneError> {
+    identity::validate_oidc_provider(record)
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn validate_persistence_human_user(
+    record: &HumanUserRecord,
+) -> Result<(), ControlPlaneError> {
+    identity::validate_human_user(record)
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn validate_persistence_human_identity(
+    record: &HumanIdentityRecord,
+) -> Result<(), ControlPlaneError> {
+    identity::validate_human_identity(record)
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn validate_persistence_tenant_membership(
+    record: &TenantMembershipRecord,
+) -> Result<Vec<u8>, ControlPlaneError> {
+    identity::validate_tenant_membership(record)
+}
 
 #[cfg(test)]
 mod tests;

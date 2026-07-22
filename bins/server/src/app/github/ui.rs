@@ -9,9 +9,10 @@ use crate::app::{
     timestamp, AppState, GitHubSetupRequest, RequestId, SCM_READ_SCOPE, SCM_WRITE_SCOPE,
 };
 use crate::github_install_ui::{
-    github_installations_payload, ComponentHealth, GitHubAccountKind as UiGitHubAccountKind,
-    GitHubAppHealth, GitHubInstallAction, GitHubInstallationState as UiGitHubInstallationState,
-    GitHubInstallationView, GitHubInstallationsPage, GitHubPermission as UiGitHubPermission,
+    github_installations_payload, repository_url, ComponentHealth,
+    GitHubAccountKind as UiGitHubAccountKind, GitHubAppHealth, GitHubInstallAction,
+    GitHubInstallationState as UiGitHubInstallationState, GitHubInstallationView,
+    GitHubInstallationsPage, GitHubPermission as UiGitHubPermission,
     GitHubRepositoryCandidateAction, GitHubRepositoryEventView, GitHubRepositoryLinkView,
     GitHubUiAlert, RepositoryLinkState, RepositorySelection, RepositoryVisibility,
     GITHUB_BROWSER_API_CACHE_CONTROL,
@@ -100,19 +101,21 @@ pub(in crate::app) async fn browser_decide_workflow_approval(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
-    let approval = match state.control_plane.approval_request(&approval_id) {
+    let approval = match state.store.approval_request(&approval_id).await {
         Ok(approval) => approval,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let tenant = match state.control_plane.approval_request_tenant(&approval_id) {
+    let tenant = match state.store.approval_request_tenant(&approval_id).await {
         Ok(tenant) => tenant,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let (repository_id, _) = match state.control_plane.approval_request_binding(&approval_id) {
+    let (repository_id, _) = match state.store.approval_request_binding(&approval_id).await {
         Ok(binding) => binding,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -138,22 +141,28 @@ pub(in crate::app) async fn browser_decide_workflow_approval(
         &context,
         action,
         browser_approval_resource(&approval, &tenant, &repository_id),
-    ) {
+    )
+    .await
+    {
         return *response;
     }
-    match state.control_plane.decide_approval_idempotent(
-        &idempotency_key,
-        &approval_id,
-        ApprovalDecision {
-            actor_id: "runtrue-workflow-approver".to_owned(),
-            decision,
-            reason: format!("Runtrue UI decision by principal {}", context.principal_id),
-            rule_id: approval.rule.id.clone(),
-            subject_digest: approval.subject_digest,
-            decided_unix_ms: now,
-        },
-        now,
-    ) {
+    match state
+        .store
+        .decide_approval_idempotent(
+            &idempotency_key,
+            &approval_id,
+            ApprovalDecision {
+                actor_id: "runtrue-workflow-approver".to_owned(),
+                decision,
+                reason: format!("Runtrue UI decision by principal {}", context.principal_id),
+                rule_id: approval.rule.id.clone(),
+                subject_digest: approval.subject_digest,
+                decided_unix_ms: now,
+            },
+            now,
+        )
+        .await
+    {
         Ok(result) => Json(json!({
             "id": result.value.id,
             "status": result.value.status,
@@ -191,7 +200,7 @@ fn browser_approval_resource(
     }
 }
 
-fn browser_repository(
+async fn browser_repository(
     state: &AppState,
     request_id: &RequestId,
     context: &AuthContext,
@@ -207,8 +216,9 @@ fn browser_repository(
         .into());
     }
     let repository = state
-        .control_plane
+        .store
         .repository(repository_id)
+        .await
         .map_err(|error| control_plane_problem(request_id, error))?;
     if repository.tenant_id != context.tenant_id {
         return Err(problem_response(
@@ -283,7 +293,9 @@ pub(in crate::app) async fn browser_organization_settings(
         SCM_READ_SCOPE,
         None,
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
@@ -298,20 +310,20 @@ pub(in crate::app) async fn browser_organization_settings(
             &context,
             action,
             organization_setting_resource(&context, kind, scope.clone()),
-        ) {
+        )
+        .await
+        {
             return *response;
         }
     }
-    let secrets = match state
-        .control_plane
-        .list_secret_metadata(&context.tenant_id, &scope)
-    {
+    let secrets = match state.store.secrets(&context.tenant_id, &scope).await {
         Ok(items) => items,
         Err(error) => return control_plane_problem(&request_id, error),
     };
     let variables = match state
-        .control_plane
-        .list_variables(&context.tenant_id, &scope)
+        .store
+        .variable_records(&context.tenant_id, &scope)
+        .await
     {
         Ok(items) => items,
         Err(error) => return control_plane_problem(&request_id, error),
@@ -349,7 +361,9 @@ pub(in crate::app) async fn save_browser_organization_secret(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
@@ -376,24 +390,30 @@ pub(in crate::app) async fn save_browser_organization_secret(
             CedarResourceKind::Secret,
             format!("{scope}/{name}"),
         ),
-    ) {
+    )
+    .await
+    {
         return *response;
     }
     let plaintext = SecretPlaintext::new(value.into_bytes());
     let result = if state
-        .control_plane
-        .secret_metadata_by_name(&context.tenant_id, &scope, &name)
+        .store
+        .secret_by_name(&context.tenant_id, &scope, &name)
+        .await
         .is_ok()
     {
-        state.control_plane.rotate_secret_idempotent(
-            &idempotency_key,
-            &context.tenant_id,
-            &scope,
-            &name,
-            &plaintext,
-            &state.secret_master_key,
-            now,
-        )
+        state
+            .store
+            .rotate_secret(
+                &idempotency_key,
+                &context.tenant_id,
+                &scope,
+                &name,
+                &plaintext,
+                &state.secret_master_key,
+                now,
+            )
+            .await
     } else {
         let id = match random_id("secret") {
             Ok(id) => id,
@@ -412,12 +432,15 @@ pub(in crate::app) async fn save_browser_organization_secret(
             created_unix_ms: now,
             updated_unix_ms: now,
         };
-        state.control_plane.create_secret_idempotent(
-            &idempotency_key,
-            &metadata,
-            Some(&plaintext),
-            &state.secret_master_key,
-        )
+        state
+            .store
+            .create_secret(
+                &idempotency_key,
+                &metadata,
+                Some(&plaintext),
+                &state.secret_master_key,
+            )
+            .await
     };
     match result {
         Ok(result) => {
@@ -454,7 +477,9 @@ pub(in crate::app) async fn delete_browser_organization_secret(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
@@ -473,16 +498,22 @@ pub(in crate::app) async fn delete_browser_organization_secret(
             CedarResourceKind::Secret,
             format!("{scope}/{name}"),
         ),
-    ) {
+    )
+    .await
+    {
         return *response;
     }
-    match state.control_plane.delete_secret(
-        &context.tenant_id,
-        &scope,
-        &name,
-        &state.secret_master_key,
-        now,
-    ) {
+    match state
+        .store
+        .delete_secret_configuration(
+            &context.tenant_id,
+            &scope,
+            &name,
+            &state.secret_master_key,
+            now,
+        )
+        .await
+    {
         Ok(metadata) => {
             let mut response = Json(metadata).into_response();
             protect_sensitive_response(&mut response);
@@ -517,7 +548,9 @@ pub(in crate::app) async fn save_browser_organization_variable(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
@@ -544,17 +577,23 @@ pub(in crate::app) async fn save_browser_organization_variable(
             CedarResourceKind::Variable,
             format!("{scope}/{name}"),
         ),
-    ) {
+    )
+    .await
+    {
         return *response;
     }
-    match state.control_plane.put_variable_idempotent(
-        &idempotency_key,
-        &context.tenant_id,
-        &scope,
-        &name,
-        Value::String(value),
-        now,
-    ) {
+    match state
+        .store
+        .put_variable(
+            &idempotency_key,
+            &context.tenant_id,
+            &scope,
+            &name,
+            Value::String(value),
+            now,
+        )
+        .await
+    {
         Ok(result) => Json(result.value).into_response(),
         Err(error) => control_plane_problem(&request_id, error),
     }
@@ -585,7 +624,9 @@ pub(in crate::app) async fn delete_browser_organization_variable(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
@@ -604,12 +645,15 @@ pub(in crate::app) async fn delete_browser_organization_variable(
             CedarResourceKind::Variable,
             format!("{scope}/{name}"),
         ),
-    ) {
+    )
+    .await
+    {
         return *response;
     }
     match state
-        .control_plane
-        .delete_variable(&context.tenant_id, &scope, &name)
+        .store
+        .delete_variable_record(&context.tenant_id, &scope, &name)
+        .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => control_plane_problem(&request_id, error),
@@ -633,11 +677,13 @@ pub(in crate::app) async fn browser_repository_settings(
         SCM_READ_SCOPE,
         None,
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
-    let repository = match browser_repository(&state, &request_id, &context, &repository_id) {
+    let repository = match browser_repository(&state, &request_id, &context, &repository_id).await {
         Ok(repository) => repository,
         Err(response) => return response.into_response(),
     };
@@ -656,28 +702,29 @@ pub(in crate::app) async fn browser_repository_settings(
                 kind,
                 format!("repository:{}", repository.id),
             ),
-        ) {
+        )
+        .await
+        {
             return *response;
         }
     }
     let scope = format!("repository:{}", repository.id);
-    let secrets = match state
-        .control_plane
-        .list_secret_metadata(&context.tenant_id, &scope)
-    {
+    let secrets = match state.store.secrets(&context.tenant_id, &scope).await {
         Ok(items) => items,
         Err(error) => return control_plane_problem(&request_id, error),
     };
     let variables = match state
-        .control_plane
-        .list_variables(&context.tenant_id, &scope)
+        .store
+        .variable_records(&context.tenant_id, &scope)
+        .await
     {
         Ok(items) => items,
         Err(error) => return control_plane_problem(&request_id, error),
     };
     let workflow_directory_override = match state
-        .control_plane
+        .store
         .repository_workflow_directory(&context.tenant_id, &repository.id)
+        .await
     {
         Ok(path) => path,
         Err(error) => return control_plane_problem(&request_id, error),
@@ -725,11 +772,13 @@ pub(in crate::app) async fn save_browser_repository_workflow_directory(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
-    let repository = match browser_repository(&state, &request_id, &context, &repository_id) {
+    let repository = match browser_repository(&state, &request_id, &context, &repository_id).await {
         Ok(repository) => repository,
         Err(response) => return response.into_response(),
     };
@@ -752,15 +801,21 @@ pub(in crate::app) async fn save_browser_repository_workflow_directory(
             privileged: false,
             untrusted: false,
         },
-    ) {
+    )
+    .await
+    {
         return *response;
     }
-    match state.control_plane.set_repository_workflow_directory(
-        &context.tenant_id,
-        &repository.id,
-        &workflow_directory,
-        now,
-    ) {
+    match state
+        .store
+        .set_repository_workflow_directory(
+            &context.tenant_id,
+            &repository.id,
+            &workflow_directory,
+            now,
+        )
+        .await
+    {
         Ok(workflow_directory) => Json(json!({
             "repository_id": repository.id,
             "workflow_directory": workflow_directory,
@@ -797,11 +852,13 @@ pub(in crate::app) async fn uninstall_browser_repository(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
-    let repository = match browser_repository(&state, &request_id, &context, &repository_id) {
+    let repository = match browser_repository(&state, &request_id, &context, &repository_id).await {
         Ok(repository) => repository,
         Err(response) => return response.into_response(),
     };
@@ -825,16 +882,22 @@ pub(in crate::app) async fn uninstall_browser_repository(
             privileged: false,
             untrusted: false,
         },
-    ) {
+    )
+    .await
+    {
         return *response;
     }
-    match state.control_plane.suspend_github_repository_link(
-        &context.tenant_id,
-        &repository.id,
-        &context.principal_id,
-        &request_id.0,
-        now,
-    ) {
+    match state
+        .store
+        .suspend_github_repository_link(
+            &context.tenant_id,
+            &repository.id,
+            &context.principal_id,
+            &request_id.0,
+            now,
+        )
+        .await
+    {
         Ok(result) => Json(json!({
             "repository_id": result.value.repository_id,
             "status": result.value.status,
@@ -871,11 +934,13 @@ pub(in crate::app) async fn save_browser_repository_secret(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
-    let repository = match browser_repository(&state, &request_id, &context, &repository_id) {
+    let repository = match browser_repository(&state, &request_id, &context, &repository_id).await {
         Ok(repository) => repository,
         Err(response) => return response.into_response(),
     };
@@ -902,25 +967,31 @@ pub(in crate::app) async fn save_browser_repository_secret(
             CedarResourceKind::Secret,
             format!("repository:{}/{}", repository.id, name),
         ),
-    ) {
+    )
+    .await
+    {
         return *response;
     }
     let scope = format!("repository:{}", repository.id);
     let plaintext = SecretPlaintext::new(value.into_bytes());
     let result = if state
-        .control_plane
-        .secret_metadata_by_name(&context.tenant_id, &scope, &name)
+        .store
+        .secret_by_name(&context.tenant_id, &scope, &name)
+        .await
         .is_ok()
     {
-        state.control_plane.rotate_secret_idempotent(
-            &idempotency_key,
-            &context.tenant_id,
-            &scope,
-            &name,
-            &plaintext,
-            &state.secret_master_key,
-            now,
-        )
+        state
+            .store
+            .rotate_secret(
+                &idempotency_key,
+                &context.tenant_id,
+                &scope,
+                &name,
+                &plaintext,
+                &state.secret_master_key,
+                now,
+            )
+            .await
     } else {
         let id = match random_id("secret") {
             Ok(id) => id,
@@ -939,12 +1010,15 @@ pub(in crate::app) async fn save_browser_repository_secret(
             created_unix_ms: now,
             updated_unix_ms: now,
         };
-        state.control_plane.create_secret_idempotent(
-            &idempotency_key,
-            &metadata,
-            Some(&plaintext),
-            &state.secret_master_key,
-        )
+        state
+            .store
+            .create_secret(
+                &idempotency_key,
+                &metadata,
+                Some(&plaintext),
+                &state.secret_master_key,
+            )
+            .await
     };
     match result {
         Ok(result) => {
@@ -982,11 +1056,13 @@ pub(in crate::app) async fn delete_browser_repository_secret(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
-    let repository = match browser_repository(&state, &request_id, &context, &repository_id) {
+    let repository = match browser_repository(&state, &request_id, &context, &repository_id).await {
         Ok(repository) => repository,
         Err(response) => return response.into_response(),
     };
@@ -1005,17 +1081,23 @@ pub(in crate::app) async fn delete_browser_repository_secret(
             CedarResourceKind::Secret,
             format!("repository:{}/{}", repository.id, name),
         ),
-    ) {
+    )
+    .await
+    {
         return *response;
     }
     let scope = format!("repository:{}", repository.id);
-    match state.control_plane.delete_secret(
-        &context.tenant_id,
-        &scope,
-        &name,
-        &state.secret_master_key,
-        now,
-    ) {
+    match state
+        .store
+        .delete_secret_configuration(
+            &context.tenant_id,
+            &scope,
+            &name,
+            &state.secret_master_key,
+            now,
+        )
+        .await
+    {
         Ok(metadata) => {
             let mut response = Json(metadata).into_response();
             protect_sensitive_response(&mut response);
@@ -1051,11 +1133,13 @@ pub(in crate::app) async fn save_browser_repository_variable(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
-    let repository = match browser_repository(&state, &request_id, &context, &repository_id) {
+    let repository = match browser_repository(&state, &request_id, &context, &repository_id).await {
         Ok(repository) => repository,
         Err(response) => return response.into_response(),
     };
@@ -1082,18 +1166,24 @@ pub(in crate::app) async fn save_browser_repository_variable(
             CedarResourceKind::Variable,
             format!("repository:{}/{}", repository.id, name),
         ),
-    ) {
+    )
+    .await
+    {
         return *response;
     }
     let scope = format!("repository:{}", repository.id);
-    match state.control_plane.put_variable_idempotent(
-        &idempotency_key,
-        &context.tenant_id,
-        &scope,
-        &name,
-        Value::String(value),
-        now,
-    ) {
+    match state
+        .store
+        .put_variable(
+            &idempotency_key,
+            &context.tenant_id,
+            &scope,
+            &name,
+            Value::String(value),
+            now,
+        )
+        .await
+    {
         Ok(result) => Json(result.value).into_response(),
         Err(error) => control_plane_problem(&request_id, error),
     }
@@ -1125,11 +1215,13 @@ pub(in crate::app) async fn delete_browser_repository_variable(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
-    let repository = match browser_repository(&state, &request_id, &context, &repository_id) {
+    let repository = match browser_repository(&state, &request_id, &context, &repository_id).await {
         Ok(repository) => repository,
         Err(response) => return response.into_response(),
     };
@@ -1148,13 +1240,16 @@ pub(in crate::app) async fn delete_browser_repository_variable(
             CedarResourceKind::Variable,
             format!("repository:{}/{}", repository.id, name),
         ),
-    ) {
+    )
+    .await
+    {
         return *response;
     }
     let scope = format!("repository:{}", repository.id);
     match state
-        .control_plane
-        .delete_variable(&context.tenant_id, &scope, &name)
+        .store
+        .delete_variable_record(&context.tenant_id, &scope, &name)
+        .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => control_plane_problem(&request_id, error),
@@ -1493,27 +1588,31 @@ pub(in crate::app) async fn github_browser_state(
         SCM_READ_SCOPE,
         None,
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
     if let Err(response) =
-        authorize_browser_tenant(&state, &request_id, &context, CedarAction::ViewRepository)
+        authorize_browser_tenant(&state, &request_id, &context, CedarAction::ViewRepository).await
     {
         return *response;
     }
-    let status = match github_status_service(&state, &context.tenant_id) {
+    let status = match github_status_service(&state, &context.tenant_id).await {
         Ok(status) => status,
         Err(error) => return control_plane_problem(&request_id, error),
     };
     let tenant_name = state
-        .control_plane
+        .store
         .tenant_identity(&context.tenant_id)
+        .await
         .map(|tenant| tenant.name)
         .unwrap_or_else(|_| context.tenant_id.clone());
     let principal_name = state
-        .control_plane
-        .human_user_for_tenant(&context.tenant_id, &context.principal_id)
+        .store
+        .human_user(&context.tenant_id, &context.principal_id)
+        .await
         .map(|user| user.display_name)
         .unwrap_or_else(|_| context.principal_id.clone());
     let installation_accounts = status
@@ -1613,12 +1712,11 @@ pub(in crate::app) async fn github_browser_state(
         let Some(linked_repository_id) = repository.linked_repository_id.as_deref() else {
             continue;
         };
-        let records = match state.control_plane.scm_webhook_events_for_repository(
-            &context.tenant_id,
-            linked_repository_id,
-            None,
-            10,
-        ) {
+        let records = match state
+            .store
+            .scm_webhook_events_for_repository(&context.tenant_id, linked_repository_id, None, 10)
+            .await
+        {
             Ok(records) => records,
             Err(error) => return control_plane_problem(&request_id, error),
         };
@@ -1728,7 +1826,7 @@ pub(in crate::app) async fn github_browser_state(
         payload["organizations"] = json!([]);
         payload["userCatalog"] = json!({"status": "not_loaded"});
     }
-    let sections = match browser_dashboard_sections(&state, &request_id, &context, &page) {
+    let sections = match browser_dashboard_sections(&state, &request_id, &context, &page).await {
         Ok(sections) => sections,
         Err(response) => return response.into_response(),
     };
@@ -1761,21 +1859,23 @@ pub(in crate::app) async fn browser_run_detail(
         SCM_READ_SCOPE,
         None,
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
     if let Err(response) =
-        authorize_browser_tenant(&state, &request_id, &context, CedarAction::ViewRun)
+        authorize_browser_tenant(&state, &request_id, &context, CedarAction::ViewRun).await
     {
         return *response;
     }
 
-    let run = match state.control_plane.run(&run_id) {
+    let run = match state.store.run(&run_id).await {
         Ok(run) => run,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let repository = match state.control_plane.repository(&run.repository_id) {
+    let repository = match state.store.repository(&run.repository_id).await {
         Ok(repository) => repository,
         Err(_) => return internal_problem(&request_id),
     };
@@ -1788,11 +1888,11 @@ pub(in crate::app) async fn browser_run_detail(
         );
     }
 
-    let jobs = match state.control_plane.jobs_for_run(&run.id) {
+    let jobs = match state.store.jobs_for_run(&run.id).await {
         Ok(jobs) => jobs,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    let signed_capsule = match state.control_plane.signed_capsule(&run.capsule_id) {
+    let signed_capsule = match state.store.signed_capsule(&run.capsule_id).await {
         Ok(capsule) => capsule,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -1821,8 +1921,9 @@ pub(in crate::app) async fn browser_run_detail(
         })
         .collect::<BTreeMap<_, _>>();
     let frames = match state
-        .control_plane
+        .store
         .runner_logs_for_run(&run.id, BROWSER_RUN_LOG_FRAME_LIMIT + 1)
+        .await
     {
         Ok(frames) => frames,
         Err(error) => return control_plane_problem(&request_id, error),
@@ -1841,7 +1942,11 @@ pub(in crate::app) async fn browser_run_detail(
         let job_id = if let Some(job_id) = lease_jobs.get(&frame.execution_lease_id) {
             job_id.clone()
         } else {
-            let lease = match state.control_plane.lease(&frame.execution_lease_id) {
+            let lease = match state
+                .store
+                .runner_execution_lease(&frame.execution_lease_id)
+                .await
+            {
                 Ok(lease) => lease,
                 Err(error) => return control_plane_problem(&request_id, error),
             };
@@ -1902,19 +2007,46 @@ pub(in crate::app) async fn browser_run_detail(
     response
 }
 
-fn browser_dashboard_sections(
+async fn browser_dashboard_sections(
     state: &AppState,
     request_id: &RequestId,
     context: &AuthContext,
     page: &GitHubInstallationsPage,
 ) -> Result<Value, BrowserResponse> {
-    let allowed = |action| authorize_browser_tenant(state, request_id, context, action).is_ok();
-    let can_view_runs = allowed(CedarAction::ViewRun);
+    let can_view_runs = authorize_browser_tenant(state, request_id, context, CedarAction::ViewRun)
+        .await
+        .is_ok();
     let can_view_approvals =
-        allowed(CedarAction::ApproveWorkflow) || allowed(CedarAction::ApprovePrivilegedRun);
-    let can_view_runners = allowed(CedarAction::ManageRunnerPool);
-    let can_view_tokens = allowed(CedarAction::ManageApiToken);
-    let can_view_audit = allowed(CedarAction::ReadAudit);
+        authorize_browser_tenant(state, request_id, context, CedarAction::ApproveWorkflow)
+            .await
+            .is_ok()
+            || authorize_browser_tenant(
+                state,
+                request_id,
+                context,
+                CedarAction::ApprovePrivilegedRun,
+            )
+            .await
+            .is_ok();
+    let can_view_runners =
+        authorize_browser_tenant(state, request_id, context, CedarAction::ManageRunnerPool)
+            .await
+            .is_ok();
+    let can_view_tokens =
+        authorize_browser_tenant(state, request_id, context, CedarAction::ManageApiToken)
+            .await
+            .is_ok();
+    let can_view_audit =
+        authorize_browser_tenant(state, request_id, context, CedarAction::ReadAudit)
+            .await
+            .is_ok();
+    let can_manage_identity =
+        authorize_browser_tenant(state, request_id, context, CedarAction::ManageUser)
+            .await
+            .is_ok()
+            && authorize_browser_tenant(state, request_id, context, CedarAction::ManageTeam)
+                .await
+                .is_ok();
 
     let repository_names = page
         .repositories
@@ -1928,103 +2060,121 @@ fn browser_dashboard_sections(
             })
         })
         .collect::<BTreeMap<_, _>>();
+    let repository_urls = page
+        .repositories
+        .iter()
+        .filter_map(|repository| {
+            repository
+                .control_plane_id
+                .as_ref()
+                .map(|id| (id.clone(), repository_url(repository)))
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let runs = if can_view_runs {
         let records = state
-            .control_plane
+            .store
             .list_runs_page_for_tenant(&context.tenant_id, None, None, 100)
+            .await
             .map_err(|error| control_plane_problem(request_id, error))?;
-        Some(
-            records
-                .into_iter()
-                .map(|record| {
-                    Ok(json!({
-                        "id": record.id,
-                        "repositoryId": record.repository_id,
-                        "repository": repository_names
-                            .get(&record.repository_id)
-                            .cloned()
-                            .unwrap_or_else(|| record.repository_id.clone()),
-                        "planId": record.capsule_id,
-                        "status": record.status,
-                        "priority": record.priority,
-                        "remote": record.remote,
-                        "createdAt": timestamp(record.created_unix_ms).map_err(|()| internal_problem(request_id))?,
-                        "startedAt": record.started_unix_ms.map(timestamp).transpose().map_err(|()| internal_problem(request_id))?,
-                        "completedAt": record.completed_unix_ms.map(timestamp).transpose().map_err(|()| internal_problem(request_id))?,
-                        "cancelReason": record.cancel_reason,
-                    }))
-                })
-                .collect::<Result<Vec<_>, Response>>()?,
-        )
+        let mut browser_runs = Vec::with_capacity(records.len());
+        for record in records {
+            let signed_capsule = state
+                .store
+                .signed_capsule(&record.capsule_id)
+                .await
+                .map_err(|error| control_plane_problem(request_id, error))?;
+            let capsule: ExecutionCapsule =
+                serde_json::from_slice(&signed_capsule.canonical_capsule)
+                    .map_err(|_| internal_problem(request_id))?;
+            let source = browser_run_source(
+                &capsule,
+                repository_urls
+                    .get(&record.repository_id)
+                    .map(String::as_str),
+            );
+            browser_runs.push(json!({
+                "id": record.id,
+                "repositoryId": record.repository_id,
+                "repository": repository_names
+                    .get(&record.repository_id)
+                    .cloned()
+                    .unwrap_or_else(|| record.repository_id.clone()),
+                "repositoryUrl": repository_urls.get(&record.repository_id),
+                "planId": record.capsule_id,
+                "status": record.status,
+                "priority": record.priority,
+                "remote": record.remote,
+                "createdAt": timestamp(record.created_unix_ms).map_err(|()| internal_problem(request_id))?,
+                "startedAt": record.started_unix_ms.map(timestamp).transpose().map_err(|()| internal_problem(request_id))?,
+                "completedAt": record.completed_unix_ms.map(timestamp).transpose().map_err(|()| internal_problem(request_id))?,
+                "cancelReason": record.cancel_reason,
+                "source": source,
+            }));
+        }
+        Some(browser_runs)
     } else {
         None
     };
 
     let approvals = if can_view_approvals {
         let mut records = state
-            .control_plane
+            .store
             .list_approval_requests_page_for_tenant(
                 &context.tenant_id,
                 Some("pending"),
                 None,
                 BROWSER_PENDING_APPROVAL_LIMIT,
             )
+            .await
             .map_err(|error| control_plane_problem(request_id, error))?;
         let recent = state
-            .control_plane
+            .store
             .list_approval_requests_page_for_tenant(
                 &context.tenant_id,
                 None,
                 None,
                 BROWSER_RESOLVED_APPROVAL_LIMIT,
             )
+            .await
             .map_err(|error| control_plane_problem(request_id, error))?;
         records.extend(
             recent
                 .into_iter()
                 .filter(|candidate| candidate.status != runtrue_policy::ApprovalStatus::Pending),
         );
-        Some(
-            records
-                .into_iter()
-                .filter_map(|record| {
-                    match browser_approval_view(
-                        state,
-                        request_id,
-                        context,
-                        &repository_names,
-                        record,
-                    ) {
-                        Ok(Some(view)) => Some(Ok(view)),
-                        Ok(None) => None,
-                        // Approval history can outlive the Capsule schema that
-                        // produced it. A single legacy or otherwise unreadable
-                        // record must not make the whole authenticated
-                        // dashboard unavailable. Keep rendering approvals that
-                        // can be validated against their immutable Capsule and
-                        // omit only the record that cannot be enriched.
-                        Err(_) => None,
-                    }
-                })
-                .collect::<Result<Vec<_>, Response>>()?,
-        )
+        let mut views = Vec::with_capacity(records.len());
+        for record in records {
+            match browser_approval_view(state, request_id, context, &repository_names, record).await
+            {
+                Ok(Some(view)) => views.push(view),
+                Ok(None) => {}
+                // Approval history can outlive the Capsule schema that
+                // produced it. A single legacy or otherwise unreadable
+                // record must not make the whole authenticated dashboard
+                // unavailable.
+                Err(_) => {}
+            }
+        }
+        Some(views)
     } else {
         None
     };
 
     let runners = if can_view_runners {
         let pools = state
-            .control_plane
-            .list_runner_pools_for_tenant(&context.tenant_id)
+            .store
+            .runner_pools_for_tenant(&context.tenant_id)
+            .await
             .map_err(|error| control_plane_problem(request_id, error))?;
         let pool_names = pools
             .iter()
             .map(|pool| (pool.id.clone(), pool.name.clone()))
             .collect::<BTreeMap<_, _>>();
         let records = state
-            .control_plane
-            .list_runners_for_tenant(&context.tenant_id)
+            .store
+            .pool_runners_for_tenant(&context.tenant_id)
+            .await
             .map_err(|error| control_plane_problem(request_id, error))?;
         let items = records
             .into_iter()
@@ -2056,8 +2206,9 @@ fn browser_dashboard_sections(
 
     let api_tokens = if can_view_tokens {
         let records = state
-            .control_plane
-            .list_api_tokens_page(&context.tenant_id, None, 100)
+            .store
+            .tokens_page(&context.tenant_id, None, 100)
+            .await
             .map_err(|error| control_plane_problem(request_id, error))?;
         Some(
             records
@@ -2082,8 +2233,9 @@ fn browser_dashboard_sections(
 
     let audit = if can_view_audit {
         let records = state
-            .control_plane
-            .audit_events_page_for_tenant(&context.tenant_id, None, None, 100)
+            .store
+            .events_page_for_tenant(&context.tenant_id, None, None, 100)
+            .await
             .map_err(|error| control_plane_problem(request_id, error))?;
         Some(
             records
@@ -2115,6 +2267,7 @@ fn browser_dashboard_sections(
             "runners": can_view_runners,
             "apiTokens": can_view_tokens,
             "audit": can_view_audit,
+            "identity": can_manage_identity,
         },
         "runs": runs,
         "approvals": approvals,
@@ -2124,7 +2277,7 @@ fn browser_dashboard_sections(
     }))
 }
 
-fn browser_approval_view(
+async fn browser_approval_view(
     state: &AppState,
     request_id: &RequestId,
     context: &AuthContext,
@@ -2135,16 +2288,21 @@ fn browser_approval_view(
         return Ok(None);
     };
     let (repository_id, capsule_id) = state
-        .control_plane
+        .store
         .approval_request_binding(&record.id)
+        .await
         .map_err(|error| control_plane_problem(request_id, error))?;
     let resource = browser_approval_resource(&record, &context.tenant_id, &repository_id);
-    if authorize_browser_resource(state, request_id, context, action, resource).is_err() {
+    if authorize_browser_resource(state, request_id, context, action, resource)
+        .await
+        .is_err()
+    {
         return Ok(None);
     }
     let signed_capsule = state
-        .control_plane
+        .store
         .signed_capsule(&capsule_id)
+        .await
         .map_err(|error| control_plane_problem(request_id, error))?;
     if signed_capsule.repository_id != repository_id {
         return Err(internal_problem(request_id));
@@ -2188,8 +2346,9 @@ fn browser_approval_view(
         Some(repository) => repository.clone(),
         None => {
             let repository = state
-                .control_plane
+                .store
                 .repository(&repository_id)
+                .await
                 .map_err(|error| control_plane_problem(request_id, error))?;
             if repository.tenant_id != context.tenant_id {
                 return Err(internal_problem(request_id));
@@ -2198,8 +2357,9 @@ fn browser_approval_view(
         }
     };
     let waiting_events = state
-        .control_plane
+        .store
         .approval_pending_execution_events(&record.id)
+        .await
         .map_err(|error| control_plane_problem(request_id, error))?;
     let waiting_pull_requests = waiting_events
         .iter()
@@ -2228,7 +2388,7 @@ fn browser_approval_view(
         "requiredApprovals": record.rule.required_approvals,
         "decisionCount": record.decisions.len(),
         "remainingApprovals": remaining_approvals,
-        "waitingExecutions": state.control_plane.approval_pending_execution_count(&record.id)
+        "waitingExecutions": state.store.approval_pending_execution_count(&record.id).await
             .map_err(|error| control_plane_problem(request_id, error))?,
         "waitingPullRequests": waiting_pull_requests,
         "decisions": decisions,
@@ -2255,6 +2415,74 @@ fn browser_approval_view(
         })).collect::<Vec<_>>(),
         "canDecide": true,
     })))
+}
+
+fn browser_run_source(capsule: &ExecutionCapsule, repository_url: Option<&str>) -> Value {
+    let event = capsule
+        .context
+        .normalized_event_json
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok());
+    let event_kind = event
+        .as_ref()
+        .and_then(|value| value.pointer("/event_type/kind"))
+        .or_else(|| event.as_ref().and_then(|value| value.get("trigger_kind")))
+        .and_then(Value::as_str)
+        .unwrap_or("manual");
+    let event_action = event
+        .as_ref()
+        .and_then(|value| value.pointer("/event_type/action"))
+        .and_then(Value::as_str);
+    let actor = event
+        .as_ref()
+        .and_then(|value| value.pointer("/actor/login"))
+        .or_else(|| event.as_ref().and_then(|value| value.get("actor_id")))
+        .and_then(Value::as_str);
+    let ref_name = event
+        .as_ref()
+        .and_then(|value| value.get("ref_name"))
+        .or_else(|| {
+            event
+                .as_ref()
+                .and_then(|value| value.pointer("/source/ref_name"))
+        })
+        .and_then(Value::as_str);
+    let pull_request_number = event
+        .as_ref()
+        .and_then(|value| value.pointer("/pull_request/number"))
+        .and_then(Value::as_u64);
+    let source_url = repository_url.map(|url| {
+        if let Some(number) = pull_request_number {
+            format!("{}/pull/{number}", url.trim_end_matches('/'))
+        } else if capsule.context.source_commit.len() >= 7
+            && capsule
+                .context
+                .source_commit
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            format!(
+                "{}/commit/{}",
+                url.trim_end_matches('/'),
+                capsule.context.source_commit
+            )
+        } else {
+            url.to_owned()
+        }
+    });
+
+    json!({
+        "workflowName": capsule.workflow.name,
+        "workflowPath": capsule.workflow.source_path,
+        "eventKind": event_kind,
+        "eventAction": event_action,
+        "actor": actor,
+        "refName": ref_name,
+        "commitSha": capsule.context.source_commit,
+        "pullRequestNumber": pull_request_number,
+        "url": source_url,
+        "jobCount": capsule.jobs.len(),
+    })
 }
 
 pub(in crate::app) async fn start_github_installation_from_ui(
@@ -2286,7 +2514,9 @@ pub(in crate::app) async fn start_github_installation_from_ui(
         SCM_WRITE_SCOPE,
         Some(&presented_csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(session) => session,
         Err(response) => return *response,
     };
@@ -2295,7 +2525,9 @@ pub(in crate::app) async fn start_github_installation_from_ui(
         &request_id,
         &context,
         CedarAction::EditWorkflowSettings,
-    ) {
+    )
+    .await
+    {
         return *response;
     }
     let repository_ids = match form_value(&body, "repository_ids") {
@@ -2367,11 +2599,11 @@ pub(in crate::app) async fn start_github_installation_from_ui(
             );
         }
         let owner = selected[0].owner.clone();
-        let existing_installations = match state.control_plane.list_github_installations_for_tenant(
-            &context.tenant_id,
-            None,
-            100,
-        ) {
+        let existing_installations = match state
+            .store
+            .github_installations_for_tenant(&context.tenant_id, None, 100)
+            .await
+        {
             Ok(installations) => installations,
             Err(error) => return control_plane_problem(&request_id, error),
         };
@@ -2410,13 +2642,16 @@ pub(in crate::app) async fn start_github_installation_from_ui(
                     &context.tenant_id,
                     snapshot,
                     now,
-                ) {
+                )
+                .await
+                {
                     Ok(reconciliation) => reconciliation,
                     Err(error) => return control_plane_problem(&request_id, error),
                 };
                 if let Err(error) = state
-                    .control_plane
+                    .store
                     .reconcile_github_installation(&reconciliation)
+                    .await
                 {
                     return control_plane_problem(&request_id, error);
                 }
@@ -2443,23 +2678,24 @@ pub(in crate::app) async fn start_github_installation_from_ui(
                         visibility: selected.visibility.clone(),
                         created_unix_ms: now,
                     };
-                    if let Err(error) = state.control_plane.link_selected_github_repository(
-                        &LinkSelectedGitHubRepository {
+                    if let Err(error) = state
+                        .store
+                        .link_selected_github_repository(&LinkSelectedGitHubRepository {
                             tenant_id: context.tenant_id.clone(),
                             installation_id: reconciliation.installation.installation.id.clone(),
                             external_repository_id,
                             repository,
                             now_unix_ms: now,
-                        },
-                    ) {
+                        })
+                        .await
+                    {
                         return control_plane_problem(&request_id, error);
                     }
                 }
                 let mut response = StatusCode::SEE_OTHER.into_response();
-                response.headers_mut().insert(
-                    LOCATION,
-                    HeaderValue::from_static("/ui/github/installations?github=linked"),
-                );
+                response
+                    .headers_mut()
+                    .insert(LOCATION, HeaderValue::from_static("/?github=linked"));
                 protect_sensitive_response(&mut response);
                 return response;
             }
@@ -2476,11 +2712,13 @@ pub(in crate::app) async fn start_github_installation_from_ui(
             tenant_id: &context.tenant_id,
             principal_id: &context.principal_id,
             idempotency_key: &idempotency_key,
-            return_path: "/ui/github/installations?github=installed",
+            return_path: "/?github=installed",
             now_unix_ms: now,
             repository_preselection,
         },
-    ) {
+    )
+    .await
+    {
         Ok(setup) => setup,
         Err(response) => return response,
     };
@@ -2530,7 +2768,9 @@ pub(in crate::app) async fn link_github_repository_from_ui(
         SCM_WRITE_SCOPE,
         Some(&csrf),
         now,
-    ) {
+    )
+    .await
+    {
         Ok(value) => value,
         Err(response) => return *response,
     };
@@ -2539,12 +2779,15 @@ pub(in crate::app) async fn link_github_repository_from_ui(
         &request_id,
         &context,
         CedarAction::EditWorkflowSettings,
-    ) {
+    )
+    .await
+    {
         return *response;
     }
     let _installation = match state
-        .control_plane
+        .store
         .github_installation_for_tenant(&context.tenant_id, &installation_id)
+        .await
     {
         Ok(value) if value.installation.status == "active" => value,
         _ => {
@@ -2560,14 +2803,16 @@ pub(in crate::app) async fn link_github_repository_from_ui(
     let mut cursor = None;
     for _ in 0..10 {
         let page = match state
-            .control_plane
-            .list_github_repository_catalog_for_tenant(
+            .store
+            .github_repository_catalog_for_tenant(
                 &context.tenant_id,
                 &installation_id,
                 false,
                 cursor.as_deref(),
                 100,
-            ) {
+            )
+            .await
+        {
             Ok(value) => value,
             Err(error) => return control_plane_problem(&request_id, error),
         };
@@ -2604,20 +2849,21 @@ pub(in crate::app) async fn link_github_repository_from_ui(
         created_unix_ms: now,
     };
     match state
-        .control_plane
+        .store
         .link_selected_github_repository(&LinkSelectedGitHubRepository {
             tenant_id: context.tenant_id,
             installation_id: installation_id.clone(),
             external_repository_id,
             repository,
             now_unix_ms: now,
-        }) {
+        })
+        .await
+    {
         Ok(_) => {
             let mut response = StatusCode::SEE_OTHER.into_response();
-            response.headers_mut().insert(
-                LOCATION,
-                HeaderValue::from_static("/ui/github/installations?github=linked"),
-            );
+            response
+                .headers_mut()
+                .insert(LOCATION, HeaderValue::from_static("/?github=linked"));
             protect_sensitive_response(&mut response);
             response
         }
@@ -2635,6 +2881,63 @@ use axum::response::IntoResponse as _;
 mod user_catalog_tests {
     use super::*;
     use crate::human_oidc::GitHubUserRepository;
+    use runtrue_model::ContentDigest;
+    use runtrue_workflow_ir::{
+        ApprovalRequirements, CapsuleContext, ParityGrade, PermissionSet, SourceTrust,
+        WorkflowIdentity, CAPSULE_SCHEMA_VERSION, ENGINE_COMPATIBILITY_VERSION,
+    };
+
+    #[test]
+    fn run_source_links_to_the_originating_pull_request() {
+        let capsule = ExecutionCapsule {
+            schema_version: CAPSULE_SCHEMA_VERSION,
+            engine_compatibility_version: ENGINE_COMPATIBILITY_VERSION.to_owned(),
+            compiler_version: "test".to_owned(),
+            workflow: WorkflowIdentity {
+                name: "CI".to_owned(),
+                digest: ContentDigest::sha256(b"workflow"),
+                source_path: ".runtrue/workflows/ci.yaml".to_owned(),
+            },
+            context: CapsuleContext {
+                source_commit: "a".repeat(40),
+                source_tree_digest: None,
+                base_commit: Some("b".repeat(40)),
+                source_trust: SourceTrust::Trusted,
+                normalized_event_digest: ContentDigest::sha256(b"event"),
+                normalized_event_json: Some(
+                    json!({
+                        "event_type": {"kind": "pull_request", "action": "synchronize"},
+                        "actor": {"login": "ada"},
+                        "ref_name": "refs/heads/feature",
+                        "pull_request": {"number": 42}
+                    })
+                    .to_string(),
+                ),
+                scm: None,
+                event_context: BTreeMap::new(),
+                lockfile_digest: None,
+                workflow_frontend: None,
+                policy_version_ids: Vec::new(),
+            },
+            variables: BTreeMap::new(),
+            permissions: PermissionSet::default(),
+            jobs: Vec::new(),
+            dynamic_jobs: Vec::new(),
+            approval: ApprovalRequirements {
+                workflow_definition: false,
+                privileged_execution: false,
+                reasons: Vec::new(),
+            },
+            expected_parity: ParityGrade::AExact,
+        };
+
+        let source = browser_run_source(&capsule, Some("https://github.example/octo/repo"));
+        assert_eq!(source["workflowName"], "CI");
+        assert_eq!(source["eventKind"], "pull_request");
+        assert_eq!(source["actor"], "ada");
+        assert_eq!(source["pullRequestNumber"], 42);
+        assert_eq!(source["url"], "https://github.example/octo/repo/pull/42");
+    }
 
     #[test]
     fn recognizes_only_well_formed_unlinked_github_placeholders() {

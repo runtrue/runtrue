@@ -3,11 +3,13 @@ use std::sync::mpsc as std_mpsc;
 use tokio::sync::mpsc as tokio_mpsc;
 
 pub(super) struct StepLifecycleMessage {
+    pub(super) lease_id: String,
     pub(super) observation: StepStateObservation,
     pub(super) response: std_mpsc::SyncSender<Result<(), String>>,
 }
 
 pub(super) struct DaemonStepStateObserver {
+    pub(super) lease_id: String,
     pub(super) sender: tokio_mpsc::Sender<StepLifecycleMessage>,
 }
 
@@ -19,6 +21,7 @@ impl StepStateObserver for DaemonStepStateObserver {
         let (response, receiver) = std_mpsc::sync_channel(1);
         self.sender
             .blocking_send(StepLifecycleMessage {
+                lease_id: self.lease_id.clone(),
                 observation: observation.clone(),
                 response,
             })

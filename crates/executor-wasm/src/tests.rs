@@ -5,12 +5,20 @@ use runtrue_engine::{
     CancellationToken, Executor, ExecutorOutput, PreparedAction, StepExecutionRequest,
 };
 use runtrue_model::ContentDigest;
+use runtrue_runtime_metrics::{PhaseTiming, PreparationState, RuntimeMeasurement, RuntimePhase};
 use runtrue_workflow_ir::{
     Access, ApprovalRequirements, CapsuleContext, ExecutionCapsule, Isolation, ParityGrade,
     PermissionSet, PlannedJob, PlannedStep, RunnerRequirements, StepAction, StepCapabilitySet,
     Trust, WorkflowIdentity, CAPSULE_SCHEMA_VERSION, ENGINE_COMPATIBILITY_VERSION,
 };
-use std::{collections::BTreeMap, fs, path::Path, thread, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::Path,
+    sync::{Arc, Barrier},
+    thread,
+    time::Duration,
+};
 use tempfile::{tempdir, TempDir};
 
 fn component(wat_source: &str) -> Vec<u8> {
@@ -187,6 +195,25 @@ fn executor(bytes: &[u8], limits: WasmLimits) -> (TempDir, WasmExecutor) {
     (temporary, executor)
 }
 
+fn executor_with_package_cache(
+    cache_root: &Path,
+    components: &[Vec<u8>],
+    package_cache: WasmPackageCacheConfig,
+) -> WasmExecutor {
+    let mut config = WasmExecutorConfig::new(
+        target(),
+        AotCacheConfig::new(cache_root, AotAuthenticationKey::new([7; 32])),
+        HandleAuthenticationKey::new([8; 32]),
+    );
+    config.package_cache = package_cache;
+    for bytes in components {
+        config
+            .register_component(signed_artifact(bytes, |_| {}))
+            .unwrap();
+    }
+    WasmExecutor::new(config, CapabilityAdapters::new()).unwrap()
+}
+
 fn request(bytes: &[u8]) -> StepExecutionRequest {
     let target = target();
     StepExecutionRequest {
@@ -300,17 +327,158 @@ fn capsule(bytes: &[u8]) -> ExecutionCapsule {
 #[test]
 fn executes_component_without_ambient_imports() {
     let bytes = empty_component();
-    let (_temporary, mut executor) = executor(&bytes, WasmLimits::default());
+    let (_temporary, executor) = executor(&bytes, WasmLimits::default());
     let output = executor.execute_request(&request(&bytes)).unwrap();
     assert!(output.executor.succeeded());
     assert_eq!(output.aot_cache_status, AotCacheStatus::Miss);
+    assert_eq!(
+        output.measurement.preparation_state,
+        PreparationState::ProcessColdCacheCold
+    );
+    output.measurement.validate().unwrap();
     assert_eq!(output.component_output, None);
+
+    let hot = executor.execute_request(&request(&bytes)).unwrap();
+    assert_eq!(
+        hot.measurement.preparation_state,
+        PreparationState::ProcessWarmPackageHot
+    );
+    hot.measurement.validate().unwrap();
+}
+
+#[test]
+fn shared_executor_runs_concurrent_invocations_with_independent_stores() {
+    let bytes = empty_component();
+    let (_temporary, executor) = executor(&bytes, WasmLimits::default());
+    let executor = Arc::new(executor);
+    let barrier = Arc::new(Barrier::new(3));
+    let handles = (0..2)
+        .map(|_| {
+            let bytes = bytes.clone();
+            let executor = Arc::clone(&executor);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                executor.execute_request(&request(&bytes)).unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    for handle in handles {
+        assert!(handle.join().unwrap().executor.succeeded());
+    }
+}
+
+#[test]
+fn warm_eviction_demotes_to_authenticated_memory_aot() {
+    let first = empty_component();
+    let second = component(
+        r#"(component
+                (core module $m
+                    (func (export "run") i32.const 1 drop))
+                (core instance $i (instantiate $m))
+                (func (export "run") (canon lift (core func $i "run"))))"#,
+    );
+    let temporary = tempdir().unwrap();
+    let executor = executor_with_package_cache(
+        &temporary.path().join("cache"),
+        &[first.clone(), second.clone()],
+        WasmPackageCacheConfig {
+            max_warm_components: 1,
+            max_warmish_entries: 2,
+            max_warmish_bytes: 1024 * 1024,
+        },
+    );
+
+    executor.execute_request(&request(&first)).unwrap();
+    executor.execute_request(&request(&second)).unwrap();
+    assert_eq!(
+        executor.package_preparation_tiers().unwrap(),
+        BTreeMap::from([
+            (
+                ContentDigest::sha256(&first),
+                PackagePreparationTier::Warmish,
+            ),
+            (ContentDigest::sha256(&second), PackagePreparationTier::Warm,),
+        ])
+    );
+
+    let promoted = executor.execute_request(&request(&first)).unwrap();
+    assert_eq!(
+        promoted.measurement.preparation_state,
+        PreparationState::ProcessWarmAotPrepared
+    );
+    assert!(promoted
+        .measurement
+        .phases
+        .iter()
+        .any(|phase| { phase.detail.as_deref() == Some("aot_memory_deserialize") }));
+    assert!(!promoted
+        .measurement
+        .phases
+        .iter()
+        .any(|phase| phase.detail.as_deref() == Some("cache_inspect")));
+}
+
+#[test]
+fn warmish_eviction_falls_back_to_authenticated_disk_aot() {
+    let first = empty_component();
+    let second = component(
+        r#"(component
+                (core module $m
+                    (func (export "run") i64.const 1 drop))
+                (core instance $i (instantiate $m))
+                (func (export "run") (canon lift (core func $i "run"))))"#,
+    );
+    let temporary = tempdir().unwrap();
+    let executor = executor_with_package_cache(
+        &temporary.path().join("cache"),
+        &[first.clone(), second.clone()],
+        WasmPackageCacheConfig {
+            max_warm_components: 1,
+            max_warmish_entries: 1,
+            max_warmish_bytes: 1024 * 1024,
+        },
+    );
+
+    executor.execute_request(&request(&first)).unwrap();
+    executor.execute_request(&request(&second)).unwrap();
+    assert_eq!(
+        executor.package_preparation_tiers().unwrap(),
+        BTreeMap::from([(ContentDigest::sha256(&second), PackagePreparationTier::Warm,)])
+    );
+    let reloaded = executor.execute_request(&request(&first)).unwrap();
+    assert_eq!(
+        reloaded.measurement.preparation_state,
+        PreparationState::ProcessColdCacheHit
+    );
+}
+
+#[test]
+fn zero_package_cache_limits_are_rejected() {
+    let bytes = empty_component();
+    let temporary = tempdir().unwrap();
+    let artifact = signed_artifact(&bytes, |_| {});
+    let mut config = WasmExecutorConfig::new(
+        target(),
+        AotCacheConfig::new(
+            temporary.path().join("cache"),
+            AotAuthenticationKey::new([7; 32]),
+        ),
+        HandleAuthenticationKey::new([8; 32]),
+    );
+    config.package_cache.max_warm_components = 0;
+    config.register_component(artifact).unwrap();
+    assert!(matches!(
+        WasmExecutor::new(config, CapabilityAdapters::new()),
+        Err(WasmError::InvalidConfiguration(_))
+    ));
 }
 
 #[test]
 fn declared_versioned_host_interface_is_linked() {
     let bytes = declared_host_component();
-    let (_temporary, mut executor) = executor(&bytes, WasmLimits::default());
+    let (_temporary, executor) = executor(&bytes, WasmLimits::default());
     assert!(executor
         .execute_request(&request(&bytes))
         .unwrap()
@@ -321,7 +489,7 @@ fn declared_versioned_host_interface_is_linked() {
 #[test]
 fn admission_rejects_run_with_parameters_or_results_without_instantiating() {
     for bytes in [parameterized_run_component(), result_run_component()] {
-        let (_temporary, mut executor) = executor(&bytes, WasmLimits::default());
+        let (_temporary, executor) = executor(&bytes, WasmLimits::default());
         assert!(matches!(
             executor.execute_request(&request(&bytes)),
             Err(WasmError::Link(_))
@@ -376,7 +544,7 @@ fn infinite_loop_is_stopped_by_fuel() {
         fuel: 1_000,
         ..WasmLimits::default()
     };
-    let (_temporary, mut executor) = executor(&bytes, limits);
+    let (_temporary, executor) = executor(&bytes, limits);
     let output = executor.execute_request(&request(&bytes)).unwrap();
     assert_eq!(output.executor.exit_code, Some(1));
     assert!(!output.executor.timed_out);
@@ -395,7 +563,7 @@ fn infinite_loop_is_stopped_by_epoch_wall_timeout() {
         max_timeout: Duration::from_millis(100),
         ..WasmLimits::default()
     };
-    let (_temporary, mut executor) = executor(&bytes, limits);
+    let (_temporary, executor) = executor(&bytes, limits);
     let mut request = request(&bytes);
     request.timeout_ms = Some(10);
     let output = executor.execute_request(&request).unwrap();
@@ -415,7 +583,7 @@ fn cancellation_interrupts_component() {
         fuel: u64::MAX,
         ..WasmLimits::default()
     };
-    let (_temporary, mut executor) = executor(&bytes, limits);
+    let (_temporary, executor) = executor(&bytes, limits);
     let request = request(&bytes);
     let cancellation = request.cancellation.clone();
     let canceler = thread::spawn(move || {
@@ -433,7 +601,7 @@ fn precancellation_and_zero_timeout_skip_component_admission() {
     let bytes = b"not-a-component".to_vec();
     let temporary = tempdir().unwrap();
     let cache_root = temporary.path().join("cache");
-    let mut executor = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
+    let executor = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
 
     let canceled = request(&bytes);
     canceled.cancellation.cancel();
@@ -455,7 +623,7 @@ fn initial_memory_over_limit_traps_during_instantiation() {
         max_memory_bytes: 64 * 1024,
         ..WasmLimits::default()
     };
-    let (_temporary, mut executor) = executor(&bytes, limits);
+    let (_temporary, executor) = executor(&bytes, limits);
     let mut request = request(&bytes);
     request.runner.memory_bytes = 64 * 1024;
     let output = executor.execute_request(&request).unwrap();
@@ -470,7 +638,7 @@ fn memory_limit_is_aggregate_across_linear_memories() {
         max_memory_bytes: 64 * 1024,
         ..WasmLimits::default()
     };
-    let (_temporary, mut executor) = executor(&bytes, limits);
+    let (_temporary, executor) = executor(&bytes, limits);
     let mut request = request(&bytes);
     request.runner.memory_bytes = 64 * 1024;
     let output = executor.execute_request(&request).unwrap();
@@ -485,7 +653,7 @@ fn initial_table_over_limit_traps_during_instantiation() {
         max_table_elements: 10,
         ..WasmLimits::default()
     };
-    let (_temporary, mut executor) = executor(&bytes, limits);
+    let (_temporary, executor) = executor(&bytes, limits);
     let output = executor.execute_request(&request(&bytes)).unwrap();
     assert_eq!(output.executor.exit_code, Some(1));
     assert!(output.executor.stderr.contains("component trapped"));
@@ -498,7 +666,7 @@ fn component_inputs_are_bounded_before_instantiation() {
         max_input_bytes: 8,
         ..WasmLimits::default()
     };
-    let (_temporary, mut executor) = executor(&bytes, limits);
+    let (_temporary, executor) = executor(&bytes, limits);
     assert!(matches!(
         executor.execute_request(&request(&bytes)),
         Err(WasmError::LimitExceeded("component input"))
@@ -508,7 +676,7 @@ fn component_inputs_are_bounded_before_instantiation() {
 #[test]
 fn undeclared_wasi_random_import_is_not_linked() {
     let bytes = ambient_random_component();
-    let (_temporary, mut executor) = executor(&bytes, WasmLimits::default());
+    let (_temporary, executor) = executor(&bytes, WasmLimits::default());
     assert!(matches!(
         executor.execute_request(&request(&bytes)),
         Err(WasmError::Link(_))
@@ -518,7 +686,7 @@ fn undeclared_wasi_random_import_is_not_linked() {
 #[test]
 fn wasi_03_example_executes_end_to_end() {
     let bytes = wasi_03_environment_component();
-    let (_temporary, mut executor) = executor(&bytes, WasmLimits::default());
+    let (_temporary, executor) = executor(&bytes, WasmLimits::default());
     let output = executor.execute_request(&request(&bytes)).unwrap();
     assert!(output.executor.succeeded());
 }
@@ -526,7 +694,7 @@ fn wasi_03_example_executes_end_to_end() {
 #[test]
 fn inherited_environment_and_process_fallback_are_denied() {
     let bytes = empty_component();
-    let (_temporary, mut executor) = executor(&bytes, WasmLimits::default());
+    let (_temporary, executor) = executor(&bytes, WasmLimits::default());
     let mut with_environment = request(&bytes);
     with_environment
         .environment
@@ -552,7 +720,7 @@ fn manifest_compatibility_is_rejected_before_invalid_bytes_are_compiled() {
     let bytes = b"not-a-component".to_vec();
     let temporary = tempdir().unwrap();
     let cache_root = temporary.path().join("cache");
-    let mut executor = executor_at(&cache_root, &bytes, WasmLimits::default(), |manifest| {
+    let executor = executor_at(&cache_root, &bytes, WasmLimits::default(), |manifest| {
         manifest
             .compatibility
             .insert("wasmtime_version".to_owned(), "18.0.0".to_owned());
@@ -578,7 +746,7 @@ fn exact_expected_signer_is_required() {
         HandleAuthenticationKey::new([8; 32]),
     );
     config.register_component(artifact).unwrap();
-    let mut executor = WasmExecutor::new(config, CapabilityAdapters::new()).unwrap();
+    let executor = WasmExecutor::new(config, CapabilityAdapters::new()).unwrap();
     assert!(matches!(
         executor.execute_request(&request(&bytes)),
         Err(WasmError::SignerMismatch)
@@ -624,7 +792,7 @@ fn authenticated_aot_cache_is_reused_by_fresh_executor() {
     let temporary = tempdir().unwrap();
     let cache_root = temporary.path().join("cache");
     {
-        let mut first = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
+        let first = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
         assert_eq!(
             first
                 .execute_request(&request(&bytes))
@@ -637,14 +805,14 @@ fn authenticated_aot_cache_is_reused_by_fresh_executor() {
         regular_file_count_recursive(&cache_root.join("wasmtime")),
         0
     );
-    let mut second = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
+    let second = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
+    let reused = second.execute_request(&request(&bytes)).unwrap();
+    assert_eq!(reused.aot_cache_status, AotCacheStatus::Hit);
     assert_eq!(
-        second
-            .execute_request(&request(&bytes))
-            .unwrap()
-            .aot_cache_status,
-        AotCacheStatus::Hit
+        reused.measurement.preparation_state,
+        PreparationState::ProcessColdCacheHit
     );
+    reused.measurement.validate().unwrap();
 }
 
 #[test]
@@ -653,7 +821,7 @@ fn tampered_aot_authentication_tag_is_quarantined_and_rebuilt() {
     let temporary = tempdir().unwrap();
     let cache_root = temporary.path().join("cache");
     {
-        let mut first = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
+        let first = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
         first.execute_request(&request(&bytes)).unwrap();
     }
     let metadata_path = fs::read_dir(cache_root.join("authenticated"))
@@ -666,17 +834,21 @@ fn tampered_aot_authentication_tag_is_quarantined_and_rebuilt() {
         .unwrap();
     replace_json_string_value(&metadata_path, "authentication_tag", &"00".repeat(32));
 
-    let mut second = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
+    let second = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
     let output = second.execute_request(&request(&bytes)).unwrap();
     assert!(output.executor.succeeded());
     assert_eq!(output.aot_cache_status, AotCacheStatus::QuarantinedMiss);
+    assert_eq!(
+        output.measurement.preparation_state,
+        PreparationState::ProcessColdQuarantinedMiss
+    );
     assert_eq!(
         second.aot_cache_events().unwrap()[0].kind,
         AotCacheEventKind::AuthenticationFailed
     );
     assert!(fs::read_dir(cache_root.join("quarantine")).unwrap().count() >= 2);
     drop(second);
-    let mut healed = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
+    let healed = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
     assert_eq!(
         healed
             .execute_request(&request(&bytes))
@@ -692,7 +864,7 @@ fn incompatible_runtime_metadata_is_quarantined_and_rebuilt() {
     let temporary = tempdir().unwrap();
     let cache_root = temporary.path().join("cache");
     {
-        let mut first = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
+        let first = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
         first.execute_request(&request(&bytes)).unwrap();
     }
     let metadata_path = fs::read_dir(cache_root.join("authenticated"))
@@ -705,7 +877,7 @@ fn incompatible_runtime_metadata_is_quarantined_and_rebuilt() {
         .unwrap();
     replace_json_string_value(&metadata_path, "wasmtime_version", "18.0.0");
 
-    let mut second = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
+    let second = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
     let output = second.execute_request(&request(&bytes)).unwrap();
     assert!(output.executor.succeeded());
     assert_eq!(output.aot_cache_status, AotCacheStatus::QuarantinedMiss);
@@ -714,7 +886,7 @@ fn incompatible_runtime_metadata_is_quarantined_and_rebuilt() {
         AotCacheEventKind::Incompatible
     );
     drop(second);
-    let mut healed = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
+    let healed = executor_at(&cache_root, &bytes, WasmLimits::default(), |_| {});
     assert_eq!(
         healed
             .execute_request(&request(&bytes))
@@ -754,6 +926,11 @@ fn executor_trait_retains_canonical_component_output() {
         component_output: Some(r#"{"answer":42}"#.to_owned()),
         runtime_diagnostic: None,
         aot_cache_status: AotCacheStatus::Miss,
+        measurement: RuntimeMeasurement {
+            preparation_state: PreparationState::ProcessColdCacheCold,
+            cache_status: Some("miss".to_owned()),
+            phases: vec![PhaseTiming::new(RuntimePhase::GuestRun, None, 1)],
+        },
     });
     assert_eq!(
         output.structured_output.as_deref(),

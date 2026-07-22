@@ -27,6 +27,14 @@ pub(super) struct Args {
     #[arg(long)]
     pub(super) enrollment_token_file: Option<PathBuf>,
 
+    /// Mode-0600 autoscaler launch claim used only by `enroll-if-needed`.
+    #[arg(long)]
+    pub(super) launch_claim_file: Option<PathBuf>,
+
+    /// Mode-0600 fixed-host software-update claim used only by `enroll-if-needed`.
+    #[arg(long)]
+    pub(super) update_claim_file: Option<PathBuf>,
+
     /// Durable local fencing/completion state directory.
     #[arg(long)]
     pub(super) state_directory: Option<PathBuf>,
@@ -116,6 +124,10 @@ pub(super) struct Args {
     #[arg(long)]
     pub(super) wasm_runtime_key: Option<PathBuf>,
 
+    /// Maximum concurrent in-process Wasm jobs. Other backends stay exclusive.
+    #[arg(long)]
+    pub(super) wasm_max_concurrent_jobs: Option<u32>,
+
     /// Mode-0700 root for Firecracker recovery and quarantine state.
     #[arg(long)]
     pub(super) firecracker_state_directory: Option<PathBuf>,
@@ -176,6 +188,8 @@ pub(super) struct Args {
 pub(super) enum Command {
     /// Generate a local Ed25519 key, enroll its CSR, and atomically install credentials.
     Enroll,
+    /// Enroll from a bound launch claim when credentials are absent, then run as a daemon.
+    EnrollIfNeeded,
     /// Run until drained or the authenticated stream closes.
     Daemon,
     /// Accept and finish one lease, including exact completion retries.
@@ -198,6 +212,9 @@ mod tests {
         assert!(help.contains("enroll"));
         assert!(help.contains("--enrollment-endpoint"));
         assert!(help.contains("--enrollment-token-file"));
+        assert!(help.contains("--launch-claim-file"));
+        assert!(help.contains("--update-claim-file"));
+        assert!(help.contains("enroll-if-needed"));
         assert!(help.contains("--credential-directory"));
         assert!(help.contains("--protocol-version"));
         assert!(help.contains("--oci-state-directory"));
@@ -207,6 +224,7 @@ mod tests {
         assert!(help.contains("--wasm-component-keyring"));
         assert!(help.contains("--wasm-aot-cache"));
         assert!(help.contains("--wasm-runtime-key"));
+        assert!(help.contains("--wasm-max-concurrent-jobs"));
         assert!(help.contains("--firecracker-state-directory"));
         assert!(help.contains("--firecracker-jailer"));
         assert!(help.contains("--firecracker-binary"));

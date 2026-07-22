@@ -1,0 +1,15 @@
+{
+  "sequence": 4,
+  "migration_id": "user-management-v1",
+  "logical_schema_generation": 4,
+  "purpose": "Add provider-neutral teams, team membership, and direct or inherited repository access grants for tenant users.",
+  "preconditions": [
+    "legacy-human-identity-schema-present",
+    "repository-schema-present"
+  ],
+  "postconditions": [
+    "teams-are-tenant-scoped",
+    "repository-grants-have-one-user-or-team-subject",
+    "effective-user-access-is-derivable"
+  ]
+}

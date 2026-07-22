@@ -1,4 +1,4 @@
-use crate::app::{problem_response, AppState, Health, RequestId};
+use crate::app::{problem_response, AppState, Health, Readiness, RequestId};
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -11,8 +11,15 @@ pub(in crate::app) async fn readiness(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
 ) -> Response {
-    match state.control_plane.recovery_state() {
-        Ok(recovery) if !recovery.safe_mode => Json(Health { status: "ready" }).into_response(),
+    match state.store.load_database_readiness().await {
+        Ok(readiness) if !readiness.recovery.safe_mode => Json(Readiness {
+            status: "ready",
+            backend: readiness.backend,
+            schema_version: readiness.schema_version,
+            installation_id: readiness.installation_id,
+            fencing_epoch: readiness.recovery.fencing_epoch,
+        })
+        .into_response(),
         Ok(_) => problem_response(
             &request_id,
             StatusCode::SERVICE_UNAVAILABLE,

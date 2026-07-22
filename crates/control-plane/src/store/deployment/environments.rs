@@ -73,7 +73,7 @@ pub(in crate::store) fn require_active_policy_epoch_tx(
     Ok(())
 }
 
-pub(in crate::store) fn validate_environment(
+pub(crate) fn validate_environment(
     record: &EnvironmentRecord,
 ) -> Result<Vec<u8>, ControlPlaneError> {
     for value in [
@@ -129,7 +129,7 @@ pub(in crate::store) fn validate_environment(
     Ok(rules)
 }
 
-pub(in crate::store) fn environment_snapshot(
+pub(crate) fn environment_snapshot(
     record: &EnvironmentRecord,
 ) -> Result<(Vec<u8>, ContentDigest), ControlPlaneError> {
     #[derive(Serialize)]

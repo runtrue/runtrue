@@ -272,10 +272,44 @@ impl ControlPlane {
              WHERE kind = ?1 AND status = 'claimed' AND lease_expires_unix_ms <= ?2",
             params![kind, to_i64(now_unix_ms)?],
         )?;
+        if kind == crate::SCM_EVENT_TASK_KIND {
+            transaction.execute(
+                "UPDATE durable_tasks
+                 SET recoverable_until_unix_ms = created_unix_ms + 86400000
+                 WHERE kind = 'scm.event' AND status = 'failed'
+                   AND recoverable_until_unix_ms IS NULL
+                   AND created_unix_ms <= 9223372036768375807
+                   AND created_unix_ms + 86400000 > ?1
+                   AND last_error IN (
+                     'repository-action preparation is temporarily unavailable',
+                     'GitHub actor permission lookup is unavailable',
+                     'Git mirror repository is unavailable or unsafe',
+                     'source manifest CAS publication failed',
+                     'Git mirror repository changed while planning',
+                     'exact Git revision or trusted workflow is unavailable',
+                     'exact reusable workflow mirror or object is unavailable',
+                     'source snapshot construction is temporarily unavailable',
+                     'restore safe mode blocked the SCM event commit'
+                   )",
+                [to_i64(now_unix_ms)?],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE durable_tasks SET status = 'failed', available_unix_ms = ?2,
+             completed_unix_ms = ?2, lease_owner = NULL, lease_expires_unix_ms = NULL
+             WHERE kind = ?1 AND status = 'pending'
+               AND recoverable_until_unix_ms IS NOT NULL
+               AND recoverable_until_unix_ms <= ?2",
+            params![kind, to_i64(now_unix_ms)?],
+        )?;
         let id: Option<String> = transaction
             .query_row(
                 "SELECT id FROM durable_tasks
-                 WHERE kind = ?1 AND status = 'pending' AND available_unix_ms <= ?2
+                 WHERE kind = ?1 AND (
+                   (status = 'pending' AND available_unix_ms <= ?2)
+                   OR (status = 'failed' AND ?1 = 'scm.event'
+                       AND recoverable_until_unix_ms > ?2)
+                 )
                  ORDER BY available_unix_ms, id LIMIT 1",
                 params![kind, to_i64(now_unix_ms)?],
                 |row| row.get(0),
@@ -287,7 +321,8 @@ impl ControlPlane {
         };
         transaction.execute(
             "UPDATE durable_tasks SET status = 'claimed', attempts = attempts + 1,
-             lease_owner = ?2, lease_expires_unix_ms = ?3 WHERE id = ?1",
+             lease_owner = ?2, lease_expires_unix_ms = ?3, completed_unix_ms = NULL
+             WHERE id = ?1 AND status IN ('pending', 'failed')",
             params![id, worker, to_i64(lease_expires)?],
         )?;
         let task = task_tx(&transaction, &id)?;
@@ -320,6 +355,7 @@ impl ControlPlane {
         error: &str,
         now_unix_ms: u64,
         retry_at_unix_ms: Option<u64>,
+        recoverable_until_unix_ms: Option<u64>,
     ) -> Result<DurableTask, ControlPlaneError> {
         validate_text("task.error", error)?;
         let mut connection = self.connection()?;
@@ -335,11 +371,32 @@ impl ControlPlane {
         } else {
             ("failed", to_i64(now_unix_ms)?, Some(to_i64(now_unix_ms)?))
         };
+        let recoverable_until = match recoverable_until_unix_ms {
+            Some(deadline)
+                if retry_at_unix_ms.is_some_and(|retry_at| retry_at <= deadline)
+                    && deadline > now_unix_ms =>
+            {
+                Some(to_i64(deadline)?)
+            }
+            Some(_) => {
+                return Err(ControlPlaneError::InvalidInput(
+                    "task recovery deadline must bound a future retry",
+                ))
+            }
+            None => None,
+        };
         transaction.execute(
             "UPDATE durable_tasks SET status = ?2, available_unix_ms = ?3,
              last_error = ?4, completed_unix_ms = ?5, lease_owner = NULL,
-             lease_expires_unix_ms = NULL WHERE id = ?1",
-            params![task_id, status, available, error, completed],
+             lease_expires_unix_ms = NULL, recoverable_until_unix_ms = ?6 WHERE id = ?1",
+            params![
+                task_id,
+                status,
+                available,
+                error,
+                completed,
+                recoverable_until
+            ],
         )?;
         let task = task_tx(&transaction, task_id)?;
         transaction.commit()?;

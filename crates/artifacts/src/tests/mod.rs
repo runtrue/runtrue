@@ -87,6 +87,7 @@ fn signed_provenance(
         source_commit: producer.source_commit.clone(),
         workflow_digest: producer.workflow_digest.clone(),
         capsule_digest: producer.capsule_digest.clone(),
+        workflow_frontend: None,
         builder_id: producer.runner_id.clone(),
         runner_image_digest: producer.runner_image_digest.clone(),
         parity_grade: ParityGrade::AExact,

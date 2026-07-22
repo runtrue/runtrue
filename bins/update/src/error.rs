@@ -22,4 +22,15 @@ pub(crate) enum CliError {
     InvalidSubject(String),
     #[error("invalid locked Cargo dependency metadata: {0}")]
     InvalidCargoMetadata(String),
+    #[error("runner component profile is not exactly signed or safely installable: {0}")]
+    InvalidRunnerProfile(String),
+    #[error("immutable runner staging failed during {operation} at {}: {source}", path.display())]
+    StageIo {
+        operation: &'static str,
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not encode fixed-host update state: {0}")]
+    Json(#[from] serde_json::Error),
 }

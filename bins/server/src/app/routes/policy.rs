@@ -37,7 +37,7 @@ pub(in crate::app) async fn create_policy_version(
         Ok(key) => key,
         Err(response) => return response,
     };
-    let version = match state.control_plane.next_policy_version(&policy_id) {
+    let version = match state.store.next_policy_version_number(&policy_id).await {
         Ok(version) => version,
         Err(error) => return control_plane_problem(&request_id, error),
     };
@@ -59,8 +59,9 @@ pub(in crate::app) async fn create_policy_version(
         created_unix_ms: now,
     };
     match state
-        .control_plane
-        .create_policy_version_idempotent(&idempotency_key, &record)
+        .store
+        .create_policy_version(&idempotency_key, &record)
+        .await
     {
         Ok(result) => {
             let mut response = (StatusCode::CREATED, Json(result.value)).into_response();

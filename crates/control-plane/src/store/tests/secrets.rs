@@ -99,6 +99,18 @@ fn runner_broker_state_is_one_use_cross_scope_safe_and_restart_durable() {
                 &master_key,
             )
             .unwrap();
+        let rotated = control
+            .rotate_secret_idempotent(
+                "secret-broker-rotated-after-seal",
+                "tenant-1",
+                "repository:repo-1",
+                "TOKEN",
+                &SecretPlaintext::new(b"newer-secret-must-not-leak".to_vec()),
+                &master_key,
+                NOW + 2,
+            )
+            .unwrap();
+        assert_eq!(rotated.value.current_version, Some(2));
         let mut broker_run =
             approval_run_request("capsule-broker", "run-broker", "job-broker", NOW + 2);
         broker_run.jobs[0].job_key = "publish".to_owned();

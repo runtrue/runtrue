@@ -54,6 +54,8 @@ impl RunnerStateStore {
                 self.state.installation_fencing_epoch = Some(epoch);
                 self.state.active_lease = None;
                 self.state.pending_completion = None;
+                self.state.active_leases.clear();
+                self.state.pending_completions.clear();
                 self.persist()?;
             }
             Some(_) => {}
@@ -66,12 +68,22 @@ impl RunnerStateStore {
     }
 
     pub(crate) fn mark_active(&mut self, marker: ActiveLeaseMarker) -> Result<(), StateError> {
-        self.state.active_lease = Some(marker);
+        self.state
+            .active_leases
+            .insert(marker.lease_id.clone(), marker);
         self.persist()
     }
 
-    pub(crate) fn clear_active(&mut self) -> Result<(), StateError> {
-        self.state.active_lease = None;
+    pub(crate) fn clear_active_lease(&mut self, lease_id: &str) -> Result<(), StateError> {
+        self.state.active_leases.remove(lease_id);
+        if self
+            .state
+            .active_lease
+            .as_ref()
+            .is_some_and(|marker| marker.lease_id == lease_id)
+        {
+            self.state.active_lease = None;
+        }
         self.persist()
     }
 
@@ -95,31 +107,65 @@ impl RunnerStateStore {
         persisted.validate_committed_objects(&committed_objects)?;
         persisted.committed_objects = Some(committed_objects);
         persisted.credential_taint = Some(credential_taint);
-        self.state.pending_completion = Some(persisted);
+        self.state
+            .pending_completions
+            .insert(persisted.lease_id.clone(), persisted);
+        self.state.active_leases.remove(&completion.lease_id);
         self.persist()
     }
 
+    #[cfg(test)]
     pub(crate) fn pending_completion(
         &self,
     ) -> Result<Option<v1::CompleteLeaseRequest>, StateError> {
         self.state
             .pending_completion
             .as_ref()
+            .or_else(|| self.state.pending_completions.values().next())
             .map(PersistedCompletion::to_wire)
             .transpose()
     }
 
+    #[cfg(test)]
     pub(crate) fn pending_completion_record(&self) -> Option<PersistedCompletion> {
-        self.state.pending_completion.clone()
+        self.state
+            .pending_completion
+            .clone()
+            .or_else(|| self.state.pending_completions.values().next().cloned())
     }
 
-    pub(crate) fn clear_pending_completion(&mut self) -> Result<(), StateError> {
-        self.state.pending_completion = None;
+    pub(crate) fn pending_completion_records(&self) -> Vec<PersistedCompletion> {
+        self.state
+            .pending_completion
+            .iter()
+            .chain(self.state.pending_completions.values())
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn has_pending_completions(&self) -> bool {
+        self.state.pending_completion.is_some() || !self.state.pending_completions.is_empty()
+    }
+
+    pub(crate) fn clear_pending_completion_lease(
+        &mut self,
+        lease_id: &str,
+    ) -> Result<(), StateError> {
+        self.state.pending_completions.remove(lease_id);
+        if self
+            .state
+            .pending_completion
+            .as_ref()
+            .is_some_and(|completion| completion.lease_id == lease_id)
+        {
+            self.state.pending_completion = None;
+        }
         self.persist()
     }
 
     pub(crate) fn clear_stale_active_marker(&mut self) -> Result<bool, StateError> {
-        if self.state.active_lease.take().is_some() {
+        if self.state.active_lease.take().is_some() || !self.state.active_leases.is_empty() {
+            self.state.active_leases.clear();
             self.persist()?;
             Ok(true)
         } else {

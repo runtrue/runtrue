@@ -27,6 +27,53 @@ pub(in crate::store) fn human_identity_row(row: &Row<'_>) -> rusqlite::Result<Hu
     })
 }
 
+pub(in crate::store) fn validate_human_user(
+    record: &HumanUserRecord,
+) -> Result<(), ControlPlaneError> {
+    validate_r9_identifier(&record.id)?;
+    validate_r9_identifier(&record.display_name)?;
+    if record.primary_email.is_empty()
+        || record.primary_email.len() > 320
+        || !record.primary_email.contains('@')
+        || record
+            .primary_email
+            .bytes()
+            .any(|byte| byte.is_ascii_control())
+        || !matches!(record.status.as_str(), "active" | "suspended" | "disabled")
+        || record.version == 0
+        || record.updated_unix_ms < record.created_unix_ms
+        || record
+            .last_seen_unix_ms
+            .is_some_and(|seen| seen < record.created_unix_ms)
+    {
+        return Err(ControlPlaneError::InvalidInput("invalid human user"));
+    }
+    Ok(())
+}
+
+pub(in crate::store) fn validate_human_identity(
+    record: &HumanIdentityRecord,
+) -> Result<(), ControlPlaneError> {
+    for value in [
+        &record.id,
+        &record.tenant_id,
+        &record.user_id,
+        &record.provider_configuration_id,
+        &record.issuer,
+        &record.subject,
+    ] {
+        validate_r9_identifier(value)?;
+    }
+    if !matches!(
+        record.provider_kind.as_str(),
+        "oidc" | "github" | "recovery"
+    ) || record.last_authenticated_unix_ms < record.created_unix_ms
+    {
+        return Err(ControlPlaneError::InvalidInput("invalid human identity"));
+    }
+    Ok(())
+}
+
 impl ControlPlane {
     pub fn put_human_user(
         &self,
@@ -34,24 +81,7 @@ impl ControlPlane {
         record: &HumanUserRecord,
         expected_version: Option<u64>,
     ) -> Result<bool, ControlPlaneError> {
-        validate_r9_identifier(&record.id)?;
-        validate_r9_identifier(&record.display_name)?;
-        if record.primary_email.is_empty()
-            || record.primary_email.len() > 320
-            || !record.primary_email.contains('@')
-            || record
-                .primary_email
-                .bytes()
-                .any(|byte| byte.is_ascii_control())
-            || !matches!(record.status.as_str(), "active" | "suspended" | "disabled")
-            || record.version == 0
-            || record.updated_unix_ms < record.created_unix_ms
-            || record
-                .last_seen_unix_ms
-                .is_some_and(|seen| seen < record.created_unix_ms)
-        {
-            return Err(ControlPlaneError::InvalidInput("invalid human user"));
-        }
+        validate_human_user(record)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         require_r9_tenant_tx(&transaction, tenant_id)?;
@@ -150,23 +180,7 @@ impl ControlPlane {
         tenant_id: &str,
         record: &HumanIdentityRecord,
     ) -> Result<bool, ControlPlaneError> {
-        for value in [
-            &record.id,
-            &record.tenant_id,
-            &record.user_id,
-            &record.provider_configuration_id,
-            &record.issuer,
-            &record.subject,
-        ] {
-            validate_r9_identifier(value)?;
-        }
-        if !matches!(
-            record.provider_kind.as_str(),
-            "oidc" | "github" | "recovery"
-        ) || record.last_authenticated_unix_ms < record.created_unix_ms
-        {
-            return Err(ControlPlaneError::InvalidInput("invalid human identity"));
-        }
+        validate_human_identity(record)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         require_r9_tenant_tx(&transaction, tenant_id)?;

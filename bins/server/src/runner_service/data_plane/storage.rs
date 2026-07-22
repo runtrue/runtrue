@@ -2,27 +2,29 @@ use super::super::control_plane_status;
 use runtrue_artifacts::{ArtifactStore, ArtifactTicket, ArtifactTicketRequest};
 use runtrue_cache::{CacheStore, CacheWriteTicket, CacheWriteTicketRequest};
 use runtrue_control_plane::{
-    ControlPlane, ControlPlaneError, StorageReservationState, StorageTicketBinding,
+    ControlPlaneError, ControlPlaneStore, StorageReservationState, StorageTicketBinding,
     StorageTicketBindingState, TenantStorageReservation,
 };
 use runtrue_model::ContentDigest;
 use tonic::Status;
-pub(in crate::runner_service) fn reserve_or_recover_storage(
-    control: &ControlPlane,
+pub(in crate::runner_service) async fn reserve_or_recover_storage(
+    control: &dyn ControlPlaneStore,
     proposed: TenantStorageReservation,
     now_unix_ms: u64,
 ) -> Result<TenantStorageReservation, Status> {
     if let Some(existing) = control
         .tenant_storage_reservation(&proposed.tenant_id, &proposed.id)
+        .await
         .map_err(control_plane_status)?
     {
         return validate_recovered_storage_reservation(existing, &proposed, now_unix_ms);
     }
-    match control.reserve_tenant_storage(&proposed, now_unix_ms) {
+    match control.reserve_tenant_storage(&proposed, now_unix_ms).await {
         Ok(_) => Ok(proposed),
         Err(ControlPlaneError::IdempotencyConflict) => {
             let existing = control
                 .tenant_storage_reservation(&proposed.tenant_id, &proposed.id)
+                .await
                 .map_err(control_plane_status)?
                 .ok_or_else(|| Status::aborted("storage reservation race was lost"))?;
             validate_recovered_storage_reservation(existing, &proposed, now_unix_ms)
@@ -52,8 +54,8 @@ pub(in crate::runner_service) fn validate_recovered_storage_reservation(
     Ok(existing)
 }
 
-pub(in crate::runner_service) fn issue_or_recover_cache_ticket(
-    control: &ControlPlane,
+pub(in crate::runner_service) async fn issue_or_recover_cache_ticket(
+    control: &dyn ControlPlaneStore,
     cache: &CacheStore,
     reservation: &TenantStorageReservation,
     request: &CacheWriteTicketRequest,
@@ -61,6 +63,7 @@ pub(in crate::runner_service) fn issue_or_recover_cache_ticket(
 ) -> Result<CacheWriteTicket, Status> {
     if let Some(binding) = control
         .storage_ticket_binding_for_reservation(&reservation.tenant_id, &reservation.id)
+        .await
         .map_err(control_plane_status)?
     {
         return load_bound_cache_ticket(cache, reservation, request, &binding);
@@ -68,12 +71,14 @@ pub(in crate::runner_service) fn issue_or_recover_cache_ticket(
     let issued = match cache.issue_write_ticket(request.clone()) {
         Ok(ticket) => ticket,
         Err(error) => {
-            let _ = control.finish_tenant_storage_reservation(
-                &reservation.tenant_id,
-                &reservation.id,
-                StorageReservationState::Released,
-                now_unix_ms,
-            );
+            let _ = control
+                .finish_tenant_storage_reservation(
+                    &reservation.tenant_id,
+                    &reservation.id,
+                    StorageReservationState::Released,
+                    now_unix_ms,
+                )
+                .await;
             return Err(data_status(error));
         }
     };
@@ -90,11 +95,15 @@ pub(in crate::runner_service) fn issue_or_recover_cache_ticket(
         updated_unix_ms: now_unix_ms,
         completed_unix_ms: None,
     };
-    match control.bind_tenant_storage_ticket(&binding, now_unix_ms) {
+    match control
+        .bind_tenant_storage_ticket(&binding, now_unix_ms)
+        .await
+    {
         Ok(_) => Ok(issued),
         Err(ControlPlaneError::IdempotencyConflict) => {
             let winner = control
                 .storage_ticket_binding_for_reservation(&reservation.tenant_id, &reservation.id)
+                .await
                 .map_err(control_plane_status)?
                 .ok_or_else(|| Status::aborted("storage ticket binding race was lost"))?;
             load_bound_cache_ticket(cache, reservation, request, &winner)
@@ -151,8 +160,8 @@ pub(in crate::runner_service) fn cache_ticket_matches_request(
         && ticket.expires_at_unix_seconds == request.expires_at_unix_seconds
 }
 
-pub(in crate::runner_service) fn issue_or_recover_artifact_ticket(
-    control: &ControlPlane,
+pub(in crate::runner_service) async fn issue_or_recover_artifact_ticket(
+    control: &dyn ControlPlaneStore,
     artifacts: &ArtifactStore,
     reservation: &TenantStorageReservation,
     request: &ArtifactTicketRequest,
@@ -160,6 +169,7 @@ pub(in crate::runner_service) fn issue_or_recover_artifact_ticket(
 ) -> Result<ArtifactTicket, Status> {
     if let Some(binding) = control
         .storage_ticket_binding_for_reservation(&reservation.tenant_id, &reservation.id)
+        .await
         .map_err(control_plane_status)?
     {
         return load_bound_artifact_ticket(artifacts, reservation, request, &binding);
@@ -167,12 +177,14 @@ pub(in crate::runner_service) fn issue_or_recover_artifact_ticket(
     let issued = match artifacts.issue_ticket(request.clone()) {
         Ok(ticket) => ticket,
         Err(error) => {
-            let _ = control.finish_tenant_storage_reservation(
-                &reservation.tenant_id,
-                &reservation.id,
-                StorageReservationState::Released,
-                now_unix_ms,
-            );
+            let _ = control
+                .finish_tenant_storage_reservation(
+                    &reservation.tenant_id,
+                    &reservation.id,
+                    StorageReservationState::Released,
+                    now_unix_ms,
+                )
+                .await;
             return Err(data_status(error));
         }
     };
@@ -189,11 +201,15 @@ pub(in crate::runner_service) fn issue_or_recover_artifact_ticket(
         updated_unix_ms: now_unix_ms,
         completed_unix_ms: None,
     };
-    match control.bind_tenant_storage_ticket(&binding, now_unix_ms) {
+    match control
+        .bind_tenant_storage_ticket(&binding, now_unix_ms)
+        .await
+    {
         Ok(_) => Ok(issued),
         Err(ControlPlaneError::IdempotencyConflict) => {
             let winner = control
                 .storage_ticket_binding_for_reservation(&reservation.tenant_id, &reservation.id)
+                .await
                 .map_err(control_plane_status)?
                 .ok_or_else(|| Status::aborted("storage ticket binding race was lost"))?;
             load_bound_artifact_ticket(artifacts, reservation, request, &winner)

@@ -399,6 +399,7 @@ impl ControlPlane {
         let check_execution = PreparedScmExecution {
             capsule: replanned.clone(),
             metadata: metadata.clone(),
+            workflow_frontend_report: None,
             approvals: Vec::new(),
             run: run.clone(),
             continuation: Some(context.clone()),

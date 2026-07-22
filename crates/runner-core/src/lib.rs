@@ -18,7 +18,7 @@ pub use admission::{RunnerAdmission, DEFAULT_MAX_CANONICAL_CAPSULE_BYTES};
 pub use completion::LeaseCompletion;
 pub use error::RunnerAdmissionError;
 pub use lease::{AdmittedLease, LeaseExecutionGuard, LeaseExecutionState};
-pub use profile::VerifiedRunnerProfile;
+pub use profile::{VerifiedRunnerProfile, MAX_CONCURRENT_WASM_JOBS};
 pub use trust_store::CapsuleTrustStore;
 
 #[cfg(test)]

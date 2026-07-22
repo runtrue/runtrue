@@ -54,6 +54,16 @@ pub enum ProviderContractError {
     InvalidOperation(&'static str),
     #[error("Invocation capability contract is invalid: {0}")]
     InvalidInvocation(&'static str),
+    #[error("package pull contract is invalid: {0}")]
+    InvalidPackagePull(&'static str),
+    #[error("registry credential scope is already configured")]
+    DuplicateRegistryCredential,
+    #[error("a required registry credential is not configured")]
+    MissingRegistryCredential,
+    #[error("package fetch backend failed")]
+    PackageFetchFailed,
+    #[error("fetched package response is invalid: {0}")]
+    InvalidFetchedPackage(&'static str),
     #[error("conformance metadata is invalid: {0}")]
     InvalidConformance(&'static str),
     #[error("attestation is invalid: {0}")]

@@ -53,6 +53,36 @@ pub(crate) enum Command {
         #[arg(long)]
         now_unix_seconds: Option<u64>,
     },
+    /// Verify and stage an immutable fixed-host runner generation without activating it.
+    StageRunner {
+        #[arg(long)]
+        state: PathBuf,
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        target_path: String,
+        #[arg(long)]
+        target_file: PathBuf,
+        #[arg(long)]
+        component_profile: PathBuf,
+        #[arg(long)]
+        installation_root: PathBuf,
+        #[arg(long)]
+        generation: u64,
+        #[arg(long)]
+        now_unix_seconds: Option<u64>,
+    },
+    /// Sign one fresh fixed-host claim request with the registered updater identity.
+    FixedHostProof {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        pool_id: String,
+        #[arg(long)]
+        slot_id: String,
+        #[arg(long)]
+        issued_unix_ms: Option<u64>,
+    },
     /// Generate one Ed25519 role key through the operating-system RNG.
     Keygen {
         #[arg(long)]

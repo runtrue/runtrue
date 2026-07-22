@@ -8,7 +8,7 @@ use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use runtrue_control_plane::{
-    ControlPlaneError, DurableTask, DurableTaskStatus, NewScmWebhookEvent,
+    ControlPlaneError, DurableEventRecord, DurableEventSource, NewScmWebhookEvent,
     ReserveGitHubLifecycleDelivery,
 };
 use runtrue_model::ContentDigest;
@@ -59,13 +59,13 @@ pub(in crate::app) async fn github_webhook(
     }
     let envelope = match normalize_github(
         &delivery,
-        state.control_plane.installation_id(),
+        state.store.installation_id(),
         now,
         state.webhook_limits,
     ) {
         Ok(envelope) => envelope,
         Err(ScmError::UnsupportedEvent(_)) | Err(ScmError::UnsupportedAction(_)) => {
-            return journal_observed_github_delivery(&state, &request_id, &delivery, now);
+            return journal_observed_github_delivery(&state, &request_id, &delivery, now).await;
         }
         Err(error) => return scm_problem(&request_id, error),
     };
@@ -82,7 +82,7 @@ pub(in crate::app) async fn github_webhook(
         runtrue_scm::EventType::Ping => "ping",
     };
     let journal = match state
-        .control_plane
+        .store
         .record_scm_webhook_event(&NewScmWebhookEvent {
             delivery_id: delivery.delivery_id.clone(),
             installation_external_id: envelope.installation_id.clone(),
@@ -94,48 +94,73 @@ pub(in crate::app) async fn github_webhook(
             normalized_digest: envelope.normalized_digest.clone(),
             payload_digest: delivery.raw_payload_digest.clone(),
             received_unix_ms: now,
-        }) {
+        })
+        .await
+    {
         Ok(result) => result,
         Err(error) => return control_plane_problem(&request_id, error),
     };
-    if journal.replayed {
-        return StatusCode::ACCEPTED.into_response();
-    }
     let digest = ContentDigest::sha256(envelope.event_id.as_bytes());
-    let task = DurableTask {
-        id: format!(
-            "scm-github-{}",
-            digest.as_str().trim_start_matches("sha256:")
-        ),
-        kind: "scm.event".to_owned(),
-        payload,
-        status: DurableTaskStatus::Pending,
-        available_unix_ms: now,
-        attempts: 0,
-        lease_owner: None,
-        lease_expires_unix_ms: None,
-        last_error: None,
-        created_unix_ms: now,
-        completed_unix_ms: None,
-    };
-    match state.control_plane.enqueue_task(&task) {
-        Ok(()) => StatusCode::ACCEPTED.into_response(),
-        Err(error) => match state.control_plane.task(&task.id) {
-            Ok(existing) if same_webhook_task(&existing, &task) => {
-                StatusCode::ACCEPTED.into_response()
+    let event_id = format!(
+        "event-scm-github-{}",
+        digest.as_str().trim_start_matches("sha256:")
+    );
+    if journal.replayed {
+        match state.store.event(&event_id).await {
+            Ok(existing)
+                if existing.tenant_id == journal.value.tenant_id
+                    && existing.idempotency_identity == delivery.delivery_id
+                    && existing.handler_kind == "scm.event" =>
+            {
+                return StatusCode::ACCEPTED.into_response();
             }
-            Ok(_) => problem_response(
-                &request_id,
-                StatusCode::CONFLICT,
-                "Webhook conflict",
-                "the delivery identifier was already used for a different event",
-            ),
-            Err(_) => control_plane_problem(&request_id, error),
-        },
+            Ok(_) => {
+                return problem_response(
+                    &request_id,
+                    StatusCode::CONFLICT,
+                    "Webhook conflict",
+                    "the delivery identifier was already used for a different event",
+                );
+            }
+            Err(ControlPlaneError::NotFound { .. }) => {}
+            Err(error) => return control_plane_problem(&request_id, error),
+        }
+    }
+    let task_id = format!(
+        "scm-github-{}",
+        digest.as_str().trim_start_matches("sha256:")
+    );
+    let canonical_payload = runtrue_workflow_ir::canonicalize_value(payload.clone());
+    let payload_digest = match serde_json::to_vec(&canonical_payload) {
+        Ok(bytes) => ContentDigest::sha256(bytes),
+        Err(_) => return internal_problem(&request_id),
+    };
+    let event = DurableEventRecord {
+        id: event_id,
+        tenant_id: journal.value.tenant_id,
+        source: DurableEventSource::Backend,
+        kind: format!("github.{}.{event_kind}", delivery.event_name),
+        handler_kind: "scm.event".to_owned(),
+        payload: canonical_payload,
+        payload_digest,
+        idempotency_identity: delivery.delivery_id.clone(),
+        actor_identity: envelope.actor.login.clone(),
+        task_id,
+        created_unix_ms: journal.value.received_unix_ms,
+    };
+    match state.store.record_event(&event).await {
+        Ok(_) => StatusCode::ACCEPTED.into_response(),
+        Err(ControlPlaneError::IdempotencyConflict) => problem_response(
+            &request_id,
+            StatusCode::CONFLICT,
+            "Webhook conflict",
+            "the delivery identifier was already used for a different event",
+        ),
+        Err(error) => control_plane_problem(&request_id, error),
     }
 }
 
-pub(in crate::app) fn journal_observed_github_delivery(
+pub(in crate::app) async fn journal_observed_github_delivery(
     state: &AppState,
     request_id: &RequestId,
     delivery: &runtrue_scm::VerifiedDelivery,
@@ -143,7 +168,7 @@ pub(in crate::app) fn journal_observed_github_delivery(
 ) -> Response {
     let metadata = match inspect_github_delivery(
         delivery,
-        state.control_plane.installation_id(),
+        state.store.installation_id(),
         state.webhook_limits,
     ) {
         Ok(metadata) => metadata,
@@ -154,7 +179,7 @@ pub(in crate::app) fn journal_observed_github_delivery(
         |action| format!("{}.{}", delivery.event_name, action),
     );
     match state
-        .control_plane
+        .store
         .record_scm_webhook_event(&NewScmWebhookEvent {
             delivery_id: delivery.delivery_id.clone(),
             installation_external_id: metadata.installation_id,
@@ -166,7 +191,9 @@ pub(in crate::app) fn journal_observed_github_delivery(
             normalized_digest: metadata.normalized_digest,
             payload_digest: delivery.raw_payload_digest.clone(),
             received_unix_ms: now_unix_ms,
-        }) {
+        })
+        .await
+    {
         Ok(_) => StatusCode::ACCEPTED.into_response(),
         Err(error) => control_plane_problem(request_id, error),
     }
@@ -225,11 +252,15 @@ pub(in crate::app) async fn github_installation_webhook(
             },
         ),
     };
-    let current = match state.control_plane.github_installation_by_external_id(
-        github.public_config.web_origin(),
-        github.public_config.api_origin(),
-        &external_id.to_string(),
-    ) {
+    let current = match state
+        .store
+        .github_installation_by_external_id(
+            github.public_config.web_origin(),
+            github.public_config.api_origin(),
+            &external_id.to_string(),
+        )
+        .await
+    {
         Ok(current) => current,
         Err(ControlPlaneError::NotFound { .. }) => {
             // A created event commonly races the browser setup callback. The
@@ -251,8 +282,9 @@ pub(in crate::app) async fn github_installation_webhook(
         now_unix_ms,
     };
     match state
-        .control_plane
+        .store
         .reserve_github_lifecycle_delivery(&reservation)
+        .await
     {
         Ok(result) => {
             if result.replayed {
@@ -290,6 +322,5 @@ pub(in crate::app) fn webhook_header_pairs(
         })
         .collect()
 }
-use super::lifecycle::same_webhook_task;
 use axum::response::IntoResponse as _;
 use runtrue_scm::{inspect_github_delivery, normalize_github, parse_github_installation_webhook};

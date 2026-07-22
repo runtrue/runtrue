@@ -16,7 +16,7 @@ const MAX_STREAM_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INVENTORY_CAPABILITIES: usize = 256;
 const MAX_INVENTORY_LABELS: usize = 256;
-const MAX_ACTIVE_LEASES_PER_RUNNER: usize = 1;
+pub(crate) const MAX_ACTIVE_LEASES_PER_RUNNER: usize = 64;
 const MAX_LOG_FRAMES_PER_BATCH: usize = 256;
 const MAX_LOG_FRAME_BYTES: usize = 64 * 1024;
 const MAX_BLOB_CHUNK_BYTES: usize = 256 * 1024;
@@ -44,6 +44,7 @@ mod validation;
 pub use config::RunnerControlConfig;
 pub use control::RunnerControlService;
 pub use data_plane::RunnerDataPlane;
+pub(crate) use enrollment::launch_identity_proof_digest;
 pub use enrollment::RunnerEnrollmentService;
 pub use metrics::RunnerProtocolMetricsSnapshot;
 pub use status::RunnerServiceError;
@@ -70,7 +71,7 @@ use validation::{
     rotation_response, runner_upload_wait_until, timestamp_millis, validate_active_state,
     validate_bounded_identifiers, validate_bounded_text, validate_capsule_binding, validate_health,
     validate_identifier_status, validate_inventory, validate_locality, validate_observed_timestamp,
-    validate_runner_message_identity,
+    validate_runner_message_identity, wasm_concurrency,
 };
 #[cfg(test)]
 #[derive(Debug, Clone)]

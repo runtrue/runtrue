@@ -367,7 +367,19 @@ fn fixture() -> (
     v1::LeaseOffer,
     v1::FetchExecutionCapsuleResponse,
 ) {
-    let capsule = capsule();
+    fixture_for(Isolation::Native, 1)
+}
+
+fn fixture_for(
+    isolation: Isolation,
+    max_concurrent_wasm_jobs: u32,
+) -> (
+    RunnerDaemonConfig,
+    v1::LeaseOffer,
+    v1::FetchExecutionCapsuleResponse,
+) {
+    let mut capsule = capsule();
+    capsule.jobs[0].runner.isolation = isolation;
     let signing = CapsuleSigningKey::from_seed([5; 32]);
     let signature = signing.sign_capsule(&capsule).unwrap();
     let digest = v1::Digest::try_from(&signature.capsule_digest).unwrap();
@@ -378,7 +390,8 @@ fn fixture() -> (
         logical_cpus: 2,
         memory_bytes: 4096,
         storage_bytes: 4096,
-        isolation_backends: BTreeSet::from([Isolation::Native]),
+        max_concurrent_wasm_jobs,
+        isolation_backends: BTreeSet::from([isolation]),
         capabilities: BTreeSet::new(),
         region: None,
         posture_digest: ContentDigest::sha256(b"posture"),
@@ -390,7 +403,13 @@ fn fixture() -> (
         logical_cpus: 2,
         memory_bytes: 4096,
         local_storage_bytes: 4096,
-        isolation_backends: vec!["native".to_owned()],
+        isolation_backends: vec![match isolation {
+            Isolation::Wasm => "wasm",
+            Isolation::Oci => "oci",
+            Isolation::Microvm => "microvm",
+            Isolation::Native => "native",
+        }
+        .to_owned()],
         capabilities: Vec::new(),
         runner_binary_digest: Some(v1::Digest::try_from(ContentDigest::sha256(b"bin")).unwrap()),
         runner_image_digest: None,
@@ -419,7 +438,13 @@ fn fixture() -> (
         requirements: Some(v1::RunnerRequirements {
             os: "linux".to_owned(),
             architecture: "amd64".to_owned(),
-            isolation_floor: "native".to_owned(),
+            isolation_floor: match isolation {
+                Isolation::Wasm => "wasm",
+                Isolation::Oci => "oci",
+                Isolation::Microvm => "microvm",
+                Isolation::Native => "native",
+            }
+            .to_owned(),
             cpu: 1,
             memory_bytes: 1024,
             storage_bytes: 1024,
@@ -450,6 +475,7 @@ fn fixture() -> (
             max_capsule_bytes: 1024 * 1024,
             credential_store: None,
             admission_lock: None,
+            max_concurrent_wasm_jobs,
         },
         offer,
         fetched,

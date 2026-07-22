@@ -101,8 +101,9 @@ pub(in crate::app) async fn begin_human_oidc_login(
         return invalid_object_problem(&request_id, "return_to must be a bounded local path");
     }
     let provider = match state
-        .control_plane
-        .tenant_oidc_provider_configuration(&query.tenant_id, &query.provider_id)
+        .store
+        .oidc_provider(&query.tenant_id, &query.provider_id)
+        .await
     {
         Ok(provider) if provider.status == "active" => provider,
         _ => return hidden_login_resource(&request_id),
@@ -145,8 +146,9 @@ pub(in crate::app) async fn begin_human_oidc_login(
         occurred_unix_ms: now,
     };
     if state
-        .control_plane
-        .persist_oidc_browser_transaction(&issued.record, &audit)
+        .store
+        .persist_oidc_transaction(&issued.record, &audit)
+        .await
         .is_err()
     {
         return hidden_login_resource(&request_id);
@@ -209,10 +211,7 @@ pub(in crate::app) async fn begin_github_oauth_login(
     let Some(github) = human.github_oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let return_to = query
-        .return_to
-        .as_deref()
-        .unwrap_or("/ui/github/installations");
+    let return_to = query.return_to.as_deref().unwrap_or("/");
     if !valid_return_to(return_to) {
         return invalid_object_problem(&request_id, "return_to must be a bounded local path");
     }
@@ -225,8 +224,9 @@ pub(in crate::app) async fn begin_github_oauth_login(
         None => return internal_problem(&request_id),
     };
     let provider = match state
-        .control_plane
-        .tenant_oidc_provider_configuration(&github.tenant_id, &github.provider_id)
+        .store
+        .oidc_provider(&github.tenant_id, &github.provider_id)
+        .await
     {
         Ok(v) if v.status == "active" => v,
         _ => return hidden_login_resource(&request_id),
@@ -256,8 +256,9 @@ pub(in crate::app) async fn begin_github_oauth_login(
         occurred_unix_ms: now,
     };
     if state
-        .control_plane
-        .persist_oidc_browser_transaction(&issued.record, &audit)
+        .store
+        .persist_oidc_transaction(&issued.record, &audit)
+        .await
         .is_err()
     {
         return hidden_login_resource(&request_id);
@@ -335,15 +336,17 @@ pub(in crate::app) async fn finish_github_oauth_login(
         occurred_unix_ms: now,
     };
     let provider = match state
-        .control_plane
-        .tenant_oidc_provider_configuration(&github.tenant_id, &github.provider_id)
+        .store
+        .oidc_provider(&github.tenant_id, &github.provider_id)
+        .await
     {
         Ok(v) => v,
         Err(_) => return callback_failure(human, &request_id),
     };
     let mut transaction = match state
-        .control_plane
-        .oidc_browser_transaction(&github.tenant_id, &payload.transaction_id)
+        .store
+        .oidc_transaction(&github.tenant_id, &payload.transaction_id)
+        .await
     {
         Ok(v) => v,
         Err(_) => return callback_failure(human, &request_id),
@@ -367,17 +370,19 @@ pub(in crate::app) async fn finish_github_oauth_login(
             .is_err();
     if begin_failed {
         if transaction.status == OidcTransactionStatus::Pending {
-            let _ = reject_oidc_transaction(&state, &mut transaction, now, &audit);
+            let _ = reject_oidc_transaction(&state, &mut transaction, now, &audit).await;
         } else if transaction.status == OidcTransactionStatus::Expired {
             let _ = state
-                .control_plane
-                .persist_oidc_browser_transaction(&transaction, &audit);
+                .store
+                .persist_oidc_transaction(&transaction, &audit)
+                .await;
         }
         return callback_failure(human, &request_id);
     }
     if state
-        .control_plane
-        .persist_oidc_browser_transaction(&transaction, &audit)
+        .store
+        .persist_oidc_transaction(&transaction, &audit)
+        .await
         .is_err()
     {
         return callback_failure(human, &request_id);
@@ -397,12 +402,12 @@ pub(in crate::app) async fn finish_github_oauth_login(
     let verified = match verified {
         Ok(Ok(v)) => v,
         _ => {
-            let _ = reject_oidc_transaction(&state, &mut transaction, now, &audit);
+            let _ = reject_oidc_transaction(&state, &mut transaction, now, &audit).await;
             return callback_failure(human, &request_id);
         }
     };
     let Some(role) = github.allowed_roles.get(&verified.user_id).cloned() else {
-        let _ = reject_oidc_transaction(&state, &mut transaction, now, &audit);
+        let _ = reject_oidc_transaction(&state, &mut transaction, now, &audit).await;
         return callback_failure(human, &request_id);
     };
     let completed = now_unix_ms(&request_id).unwrap_or(now);
@@ -414,8 +419,9 @@ pub(in crate::app) async fn finish_github_oauth_login(
     }
     let user_id = format!("github-{}", verified.user_id);
     let existing_user = state
-        .control_plane
-        .human_user_for_tenant(&github.tenant_id, &user_id)
+        .store
+        .human_user(&github.tenant_id, &user_id)
+        .await
         .ok();
     if existing_user.is_none() {
         let email = verified
@@ -436,8 +442,9 @@ pub(in crate::app) async fn finish_github_oauth_login(
             version: 1,
         };
         if state
-            .control_plane
+            .store
             .put_human_user(&github.tenant_id, &user, None)
+            .await
             .is_err()
         {
             return callback_failure(human, &request_id);
@@ -458,24 +465,21 @@ pub(in crate::app) async fn finish_github_oauth_login(
             Ok(v) => v,
             Err(_) => return callback_failure(human, &request_id),
         };
-        if state
-            .control_plane
-            .put_tenant_membership(&membership, None)
-            .is_err()
-        {
+        if state.store.put_membership(&membership, None).await.is_err() {
             return callback_failure(human, &request_id);
         }
     }
     let subject = verified.user_id.to_string();
     let identity_id = format!("github-identity-{}", verified.user_id);
     let existing_identity = state
-        .control_plane
+        .store
         .human_identity_for_subject(
             &github.tenant_id,
             &github.provider_id,
             &github.issuer,
             &subject,
         )
+        .await
         .ok();
     let identity = HumanIdentityRecord {
         id: identity_id,
@@ -492,8 +496,9 @@ pub(in crate::app) async fn finish_github_oauth_login(
         last_authenticated_unix_ms: completed,
     };
     if state
-        .control_plane
+        .store
         .put_human_identity(&github.tenant_id, &identity)
+        .await
         .is_err()
     {
         return callback_failure(human, &request_id);
@@ -504,8 +509,9 @@ pub(in crate::app) async fn finish_github_oauth_login(
         occurred_unix_ms: completed,
     };
     if state
-        .control_plane
-        .persist_oidc_browser_transaction(&transaction, &completed_audit)
+        .store
+        .persist_oidc_transaction(&transaction, &completed_audit)
+        .await
         .is_err()
     {
         return callback_failure(human, &request_id);
@@ -539,8 +545,9 @@ pub(in crate::app) async fn finish_github_oauth_login(
         Err(_) => return callback_failure(human, &request_id),
     };
     if state
-        .control_plane
-        .persist_browser_session(&issued.record, None, &completed_audit)
+        .store
+        .persist_session(&issued.record, None, &completed_audit)
+        .await
         .is_err()
     {
         return callback_failure(human, &request_id);
@@ -604,26 +611,31 @@ pub(in crate::app) async fn finish_human_oidc_login(
         occurred_unix_ms: now,
     };
     let mut transaction = match state
-        .control_plane
-        .oidc_browser_transaction(&payload.tenant_id, &payload.transaction_id)
+        .store
+        .oidc_transaction(&payload.tenant_id, &payload.transaction_id)
+        .await
     {
         Ok(transaction) => transaction,
         Err(_) => return callback_failure(human, &request_id),
     };
     if now >= payload.expires_unix_ms {
-        if terminalize_oidc_callback_before_exchange(&state, &mut transaction, now, &audit).is_err()
+        if terminalize_oidc_callback_before_exchange(&state, &mut transaction, now, &audit)
+            .await
+            .is_err()
         {
             return internal_problem(&request_id);
         }
         return callback_failure(human, &request_id);
     }
     let provider = match state
-        .control_plane
-        .tenant_oidc_provider_configuration(&payload.tenant_id, &payload.provider_id)
+        .store
+        .oidc_provider(&payload.tenant_id, &payload.provider_id)
+        .await
     {
         Ok(provider) if provider.status == "active" => provider,
         _ => {
             if terminalize_oidc_callback_before_exchange(&state, &mut transaction, now, &audit)
+                .await
                 .is_err()
             {
                 return internal_problem(&request_id);
@@ -632,7 +644,9 @@ pub(in crate::app) async fn finish_human_oidc_login(
         }
     };
     if provider.redirect_uri != format!("{}/auth/oidc/callback", human.public_origin) {
-        if terminalize_oidc_callback_before_exchange(&state, &mut transaction, now, &audit).is_err()
+        if terminalize_oidc_callback_before_exchange(&state, &mut transaction, now, &audit)
+            .await
+            .is_err()
         {
             return internal_problem(&request_id);
         }
@@ -657,11 +671,12 @@ pub(in crate::app) async fn finish_human_oidc_login(
     };
     if begin.is_err() {
         let persisted = if transaction.status == OidcTransactionStatus::Pending {
-            reject_oidc_transaction(&state, &mut transaction, now, &audit)
+            reject_oidc_transaction(&state, &mut transaction, now, &audit).await
         } else if transaction.status == OidcTransactionStatus::Expired {
             state
-                .control_plane
-                .persist_oidc_browser_transaction(&transaction, &audit)
+                .store
+                .persist_oidc_transaction(&transaction, &audit)
+                .await
                 .map(drop)
         } else {
             Ok(())
@@ -672,8 +687,9 @@ pub(in crate::app) async fn finish_human_oidc_login(
         return callback_failure(human, &request_id);
     }
     if state
-        .control_plane
-        .persist_oidc_browser_transaction(&transaction, &audit)
+        .store
+        .persist_oidc_transaction(&transaction, &audit)
+        .await
         .is_err()
     {
         return callback_failure(human, &request_id);
@@ -682,7 +698,10 @@ pub(in crate::app) async fn finish_human_oidc_login(
     let permit = match Arc::clone(&human.exchange_admission).try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
-            if reject_oidc_transaction(&state, &mut transaction, now, &audit).is_err() {
+            if reject_oidc_transaction(&state, &mut transaction, now, &audit)
+                .await
+                .is_err()
+            {
                 return internal_problem(&request_id);
             }
             return human_oidc_unavailable(&request_id);
@@ -706,7 +725,10 @@ pub(in crate::app) async fn finish_human_oidc_login(
         Ok(Ok(verified)) => verified,
         _ => {
             let completed = now_unix_ms(&request_id).unwrap_or(now);
-            if reject_oidc_transaction(&state, &mut transaction, completed, &audit).is_err() {
+            if reject_oidc_transaction(&state, &mut transaction, completed, &audit)
+                .await
+                .is_err()
+            {
                 return internal_problem(&request_id);
             }
             return callback_failure(human, &request_id);
@@ -725,23 +747,31 @@ pub(in crate::app) async fn finish_human_oidc_login(
             ..audit
         };
         if state
-            .control_plane
-            .persist_oidc_browser_transaction(&transaction, &completed_audit)
+            .store
+            .persist_oidc_transaction(&transaction, &completed_audit)
+            .await
             .is_err()
         {
             return internal_problem(&request_id);
         }
         return callback_failure(human, &request_id);
     }
-    let mut identity = match state.control_plane.human_identity_for_subject(
-        &payload.tenant_id,
-        &payload.provider_id,
-        &verified.issuer,
-        &verified.subject,
-    ) {
+    let mut identity = match state
+        .store
+        .human_identity_for_subject(
+            &payload.tenant_id,
+            &payload.provider_id,
+            &verified.issuer,
+            &verified.subject,
+        )
+        .await
+    {
         Ok(identity) => identity,
         Err(_) => {
-            if reject_oidc_transaction(&state, &mut transaction, completed, &audit).is_err() {
+            if reject_oidc_transaction(&state, &mut transaction, completed, &audit)
+                .await
+                .is_err()
+            {
                 return internal_problem(&request_id);
             }
             return callback_failure(human, &request_id);
@@ -750,23 +780,31 @@ pub(in crate::app) async fn finish_human_oidc_login(
     identity.claims_digest = verified.claims_digest.clone();
     identity.last_authenticated_unix_ms = completed;
     let user = match state
-        .control_plane
-        .human_user_for_tenant(&payload.tenant_id, &identity.user_id)
+        .store
+        .human_user(&payload.tenant_id, &identity.user_id)
+        .await
     {
         Ok(user) if user.status == "active" => user,
         _ => {
-            if reject_oidc_transaction(&state, &mut transaction, completed, &audit).is_err() {
+            if reject_oidc_transaction(&state, &mut transaction, completed, &audit)
+                .await
+                .is_err()
+            {
                 return internal_problem(&request_id);
             }
             return callback_failure(human, &request_id);
         }
     };
     if state
-        .control_plane
+        .store
         .put_human_identity(&payload.tenant_id, &identity)
+        .await
         .is_err()
     {
-        if reject_oidc_transaction(&state, &mut transaction, completed, &audit).is_err() {
+        if reject_oidc_transaction(&state, &mut transaction, completed, &audit)
+            .await
+            .is_err()
+        {
             return internal_problem(&request_id);
         }
         return callback_failure(human, &request_id);
@@ -777,8 +815,9 @@ pub(in crate::app) async fn finish_human_oidc_login(
         occurred_unix_ms: completed,
     };
     if state
-        .control_plane
-        .persist_oidc_browser_transaction(&transaction, &completed_audit)
+        .store
+        .persist_oidc_transaction(&transaction, &completed_audit)
+        .await
         .is_err()
     {
         return callback_failure(human, &request_id);
@@ -814,8 +853,9 @@ pub(in crate::app) async fn finish_human_oidc_login(
         Err(_) => return callback_failure(human, &request_id),
     };
     if state
-        .control_plane
-        .persist_browser_session(&issued_session.record, None, &completed_audit)
+        .store
+        .persist_session(&issued_session.record, None, &completed_audit)
+        .await
         .is_err()
     {
         return callback_failure(human, &request_id);
@@ -845,7 +885,7 @@ pub(in crate::app) async fn finish_human_oidc_login(
     response
 }
 
-pub(in crate::app) fn terminalize_oidc_callback_before_exchange(
+pub(in crate::app) async fn terminalize_oidc_callback_before_exchange(
     state: &AppState,
     transaction: &mut OidcAuthorizationTransaction,
     now: u64,
@@ -858,15 +898,16 @@ pub(in crate::app) fn terminalize_oidc_callback_before_exchange(
         transaction.status = OidcTransactionStatus::Expired;
         transaction.finished_unix_ms = Some(now);
         state
-            .control_plane
-            .persist_oidc_browser_transaction(transaction, audit)
+            .store
+            .persist_oidc_transaction(transaction, audit)
+            .await
             .map(drop)
     } else {
-        reject_oidc_transaction(state, transaction, now, audit)
+        reject_oidc_transaction(state, transaction, now, audit).await
     }
 }
 
-pub(in crate::app) fn reject_oidc_transaction(
+pub(in crate::app) async fn reject_oidc_transaction(
     state: &AppState,
     transaction: &mut OidcAuthorizationTransaction,
     now: u64,
@@ -887,7 +928,8 @@ pub(in crate::app) fn reject_oidc_transaction(
         ..audit.clone()
     };
     state
-        .control_plane
-        .persist_oidc_browser_transaction(transaction, &audit)
+        .store
+        .persist_oidc_transaction(transaction, &audit)
+        .await
         .map(drop)
 }

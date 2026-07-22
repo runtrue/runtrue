@@ -1,0 +1,6 @@
+{
+  "backend": "sqlite",
+  "trust_sql": "CREATE INDEX approval_requests_reusable_subject ON approval_requests(repository_id, subject_digest, status, expires_unix_ms, created_unix_ms, id);",
+  "sql": "UPDATE run_approval_authorizations SET subject_digest = (SELECT metadata.approval_subject_digest FROM runs JOIN capsule_api_metadata AS metadata ON metadata.capsule_id = runs.capsule_id WHERE runs.id = run_approval_authorizations.run_id) WHERE kind = 'privileged-execution' AND one_shot = 0 AND EXISTS (SELECT 1 FROM runs JOIN capsule_api_metadata AS metadata ON metadata.capsule_id = runs.capsule_id WHERE runs.id = run_approval_authorizations.run_id AND metadata.approval_subject_digest <> run_approval_authorizations.subject_digest);",
+  "post_sql": "SELECT 1;"
+}

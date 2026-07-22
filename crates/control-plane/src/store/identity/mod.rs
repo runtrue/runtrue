@@ -1,3 +1,4 @@
+mod access;
 mod memberships;
 mod oidc;
 mod sessions;
@@ -5,7 +6,11 @@ mod tenants;
 mod users;
 
 use super::*;
+#[cfg(feature = "postgres")]
+pub(in crate::store) use memberships::validate_tenant_membership;
 pub(super) use sessions::*;
+#[cfg(feature = "postgres")]
+pub(in crate::store) use users::{validate_human_identity, validate_human_user};
 
 // ---- Migration 23: tenant, human identity, and provider configuration. ----
 
@@ -23,7 +28,7 @@ pub(in crate::store) fn r9_json_bytes<T: Serialize + ?Sized>(
     Ok(bytes)
 }
 
-pub(in crate::store) fn validate_r9_identifier(value: &str) -> Result<(), ControlPlaneError> {
+pub(crate) fn validate_r9_identifier(value: &str) -> Result<(), ControlPlaneError> {
     if value.is_empty() || value.len() > 512 || value.bytes().any(|byte| byte.is_ascii_control()) {
         return Err(ControlPlaneError::InvalidInput("invalid R9 identifier"));
     }
@@ -122,7 +127,7 @@ pub(in crate::store) fn tenant_identity_tx(
         .optional()?)
 }
 
-pub(in crate::store) fn validate_tenant_identity(
+pub(crate) fn validate_tenant_identity(
     record: &TenantIdentityRecord,
 ) -> Result<Vec<u8>, ControlPlaneError> {
     validate_r9_identifier(&record.id)?;

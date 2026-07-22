@@ -227,7 +227,7 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
-  /ui/github/installations/start:
+  /github/installations/start:
     post:
       operationId: startGithubAppInstallationFromUi
       security:
@@ -314,6 +314,258 @@ paths:
               schema: {$ref: '#/components/schemas/Repository'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/repositories/{repository_id}/access:
+    get:
+      operationId: listRepositoryAccessGrants
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+      responses:
+        '200':
+          description: Direct user and team repository grants
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RepositoryAccessGrantPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      operationId: putRepositoryAccessGrant
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PutRepositoryAccessGrantRequest'}
+      responses:
+        '200': {description: Existing grant updated}
+        '201': {description: Grant created}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/repositories/{repository_id}/access/{grant_id}:
+    delete:
+      operationId: revokeRepositoryAccessGrant
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+        - name: grant_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+      responses:
+        '204': {description: Grant revoked}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/tenants/{tenant_id}/users:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Identifier'}
+    get:
+      operationId: listUsers
+      responses:
+        '200':
+          description: Tenant user page
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HumanUserPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateHumanUserRequest'}
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HumanUser'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/tenants/{tenant_id}/users/{user_id}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Identifier'}
+      - name: user_id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Identifier'}
+    get:
+      operationId: getUser
+      responses:
+        '200':
+          description: Tenant user
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HumanUser'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      operationId: updateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateHumanUserRequest'}
+      responses:
+        '200': {description: User updated}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/tenants/{tenant_id}/users/{user_id}/repositories:
+    get:
+      operationId: listEffectiveUserRepositoryAccess
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+        - name: user_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+      responses:
+        '200':
+          description: Strongest direct or team-inherited access for each repository
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EffectiveRepositoryAccessPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/tenants/{tenant_id}/teams:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Identifier'}
+    get:
+      operationId: listTeams
+      responses:
+        '200':
+          description: Tenant team page
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TeamPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      operationId: createTeam
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateTeamRequest'}
+      responses:
+        '201': {description: Team created}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/tenants/{tenant_id}/teams/{team_id}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Identifier'}
+      - name: team_id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Identifier'}
+    get:
+      operationId: getTeam
+      responses:
+        '200': {description: Team}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      operationId: updateTeam
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateTeamRequest'}
+      responses:
+        '200': {description: Team updated}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/tenants/{tenant_id}/teams/{team_id}/members:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Identifier'}
+      - name: team_id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Identifier'}
+    get:
+      operationId: listTeamMembers
+      responses:
+        '200':
+          description: Team membership page
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TeamMembershipPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      operationId: addTeamMember
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AddTeamMemberRequest'}
+      responses:
+        '200': {description: Existing member role unchanged}
+        '201': {description: Member added or role changed}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/tenants/{tenant_id}/teams/{team_id}/members/{user_id}:
+    delete:
+      operationId: removeTeamMember
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+        - name: team_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+        - name: user_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+      responses:
+        '204': {description: Member removed}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/v1/repositories/{repository_id}/capsules:
     post:
       operationId: createCapsule
@@ -348,6 +600,26 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ExecutionCapsule'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/capsules/{capsule_id}/workflow-frontend-report:
+    get:
+      operationId: getWorkflowFrontendReport
+      description: Returns the exact bounded source-translation diagnostic attachment. This client-produced compilation artifact is not Provider Evidence.
+      parameters:
+        - {$ref: '#/components/parameters/CapsuleId'}
+      responses:
+        '200':
+          description: Exact workflow frontend compatibility report bytes
+          headers:
+            X-Runtrue-Content-Digest:
+              description: Qualified SHA-256 digest signed into the capsule frontend provenance
+              schema: {$ref: '#/components/schemas/Digest'}
+            Cache-Control:
+              schema: {type: string, const: 'private, no-store'}
+          content:
+            '*/*':
+              schema: {type: string, format: binary, maxLength: 1048576}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
   /api/v1/capsules/{capsule_id}/runs:
@@ -403,6 +675,41 @@ paths:
               schema: {$ref: '#/components/schemas/Run'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/events/{event_id}:
+    get:
+      operationId: getEvent
+      description: Returns replay-safe event metadata; the stored payload is intentionally omitted.
+      parameters:
+        - {$ref: '#/components/parameters/EventId'}
+      responses:
+        '200':
+          description: Durable event metadata and original delivery state
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DurableEvent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/events/{event_id}/replay:
+    post:
+      operationId: replayEvent
+      description: Queues an exact redelivery of a failed event using its immutable stored payload.
+      parameters:
+        - {$ref: '#/components/parameters/EventId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202':
+          description: Event replay durably queued
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EventReplay'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /api/v1/runs/{run_id}/logs:
     get:
       operationId: getRunLogs
@@ -602,6 +909,214 @@ paths:
               schema: {$ref: '#/components/schemas/RunnerPool'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/runner-pools/{runner_pool_id}/fleet:
+    get:
+      operationId: getRunnerFleet
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+      responses:
+        '200':
+          description: Current scaling policy, templates, requests, and observed fleet demand for the runner pool
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunnerFleet'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/runner-pools/{runner_pool_id}/fleet/lease:
+    post:
+      operationId: acquireRunnerFleetLease
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AcquireRunnerFleetLeaseRequest'}
+      responses:
+        '200':
+          description: Autoscaler lease acquired or renewed with a monotonically fenced generation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunnerAutoscalerLease'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/runner-pools/{runner_pool_id}/fleet/requests:
+    post:
+      operationId: createRunnerFleetRequest
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateRunnerFleetRequest'}
+      responses:
+        '201':
+          description: Fenced runner provisioning request created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunnerFleetRequest'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/runner-pools/{runner_pool_id}/fleet/requests/{fleet_request_id}/transition:
+    post:
+      operationId: transitionRunnerFleetRequest
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+        - {$ref: '#/components/parameters/RunnerFleetRequestId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TransitionRunnerFleetRequest'}
+      responses:
+        '200':
+          description: Fenced fleet request state transition recorded
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunnerFleetRequest'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/runner-pools/{runner_pool_id}/fleet/requests/{fleet_request_id}/launch-claim:
+    post:
+      operationId: createRunnerLaunchClaim
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+        - {$ref: '#/components/parameters/RunnerFleetRequestId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateRunnerLaunchClaim'}
+      responses:
+        '201':
+          description: One-time launch claim bearer for the provider instance
+          headers:
+            Cache-Control:
+              description: One-time bearer responses are never cacheable.
+              schema: {type: string, const: no-store}
+            Pragma:
+              description: Legacy cache prevention for the one-time bearer response.
+              schema: {type: string, const: no-cache}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunnerLaunchClaim'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/runner-pools/{runner_pool_id}/update-releases:
+    post:
+      operationId: putRunnerUpdateRelease
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/VerifiedRunnerUpdateReleaseRegistration'}
+      responses:
+        '201': {description: Exact signed runner component profile registered}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/runner-pools/{runner_pool_id}/update-policy:
+    post:
+      operationId: putRunnerUpdatePolicy
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RunnerPoolUpdatePolicy'}
+      responses:
+        '201': {description: New immutable runner update policy version registered}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/runner-pools/{runner_pool_id}/fleet/replacements:
+    post:
+      operationId: planRunnerReplacement
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlanRunnerReplacement'}
+      responses:
+        '201': {description: Fenced surge-first immutable replacement planned}
+        '204': {description: No source generation is currently eligible}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/runner-pools/{runner_pool_id}/fleet/replacements/{replacement_id}/activate:
+    post:
+      operationId: activateRunnerReplacement
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+        - name: replacement_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlanRunnerReplacement'}
+      responses:
+        '200': {description: Healthy probationary target activated and source atomically drained}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/runner-pools/{runner_pool_id}/slots:
+    post:
+      operationId: putRunnerSlot
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/RunnerSlot'}}
+      responses:
+        '201': {description: Fixed-host runner slot and updater identity registered}
+        '400': {$ref: '#/components/responses/BadRequest'}
+  /api/v1/runner-pools/{runner_pool_id}/slots/{slot_id}/update-claim:
+    post:
+      operationId: createFixedRunnerUpdateClaim
+      parameters:
+        - {$ref: '#/components/parameters/RunnerPoolId'}
+        - name: slot_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [public_key_hex, signature_hex, nonce_digest, issued_unix_ms]
+              properties:
+                public_key_hex: {type: string, pattern: '^[0-9a-f]{64}$'}
+                signature_hex: {type: string, pattern: '^[0-9a-f]{128}$'}
+                nonce_digest: {$ref: '#/components/schemas/Digest'}
+                issued_unix_ms: {type: integer, minimum: 0}
+                expires_in_ms: {type: integer, minimum: 1, maximum: 900000, default: 300000}
+      responses:
+        '201': {description: Bound one-time fixed-host software replacement claim}
+        '400': {$ref: '#/components/responses/BadRequest'}
   /api/v1/runner-pools/{runner_pool_id}/enrollment-tokens:
     post:
       operationId: createRunnerEnrollmentToken
@@ -1042,6 +1557,95 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/ui/secrets:
+    get:
+      operationId: getBrowserSecretInventory
+      security:
+        - browserAccess: []
+      responses:
+        '200':
+          description: Readable secret metadata and configuration scopes; secret values are omitted
+          headers:
+            Cache-Control:
+              description: Secret inventory is never cacheable.
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BrowserSecretInventory'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      operationId: saveBrowserScopedSecret
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: '#/components/schemas/BrowserScopedSecretPutForm'}
+      responses:
+        '200':
+          description: Scoped built-in secret created or rotated; only metadata is returned
+          headers:
+            Cache-Control:
+              description: Secret mutation responses are never cacheable.
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretMetadata'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/ui/secrets/delete:
+    post:
+      operationId: deleteBrowserScopedSecret
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: '#/components/schemas/BrowserScopedSecretDeleteForm'}
+      responses:
+        '200':
+          description: Scoped secret tombstoned; only metadata is returned
+          headers:
+            Cache-Control:
+              description: Secret mutation responses are never cacheable.
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretMetadata'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/ui/secret-projects:
+    post:
+      operationId: saveBrowserConfigurationProject
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: '#/components/schemas/BrowserConfigurationProjectForm'}
+      responses:
+        '200':
+          description: Configuration project created or updated at the expected version
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigurationProject'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /api/v1/ui/organization/settings:
     get:
       operationId: getBrowserOrganizationSettings
@@ -1171,6 +1775,21 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/ui/repositories/{repository_id}/workflow-directory:
+    post:
+      operationId: saveBrowserRepositoryWorkflowDirectory
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - {$ref: '#/components/parameters/RepositoryId'}
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: Repository workflow directory override saved}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/v1/ui/repositories/{repository_id}/uninstall:
     post:
       operationId: uninstallBrowserRepository
@@ -1209,6 +1828,102 @@ paths:
       requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
       responses:
         '200': {description: Workflow approval decision recorded}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/ui/identity:
+    get:
+      operationId: getBrowserIdentity
+      security:
+        - browserAccess: []
+      responses:
+        '200':
+          description: Tenant users and policy teams for the administration UI
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BrowserIdentity'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/ui/teams:
+    post:
+      operationId: createBrowserTeam
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: Team created and refreshed browser identity returned}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/ui/teams/{team_id}:
+    post:
+      operationId: updateBrowserTeam
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - name: team_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: Team updated and refreshed browser identity returned}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/ui/teams/{team_id}/members:
+    post:
+      operationId: changeBrowserTeamMember
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - name: team_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: Team membership changed and refreshed browser identity returned}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/ui/users:
+    post:
+      operationId: createBrowserUser
+      description: Creates a tenant directory user without creating a sign-in identity, tenant role, or UI access grant.
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: Directory user created and refreshed browser identity returned}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/ui/users/{user_id}:
+    post:
+      operationId: updateBrowserUser
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Identifier'}
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '200': {description: User updated and refreshed browser identity returned}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
@@ -1361,6 +2076,11 @@ components:
       in: path
       required: true
       schema: {$ref: '#/components/schemas/Identifier'}
+    EventId:
+      name: event_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
     ApprovalId:
       name: approval_id
       in: path
@@ -1368,6 +2088,11 @@ components:
       schema: {$ref: '#/components/schemas/Identifier'}
     RunnerPoolId:
       name: runner_pool_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Identifier'}
+    RunnerFleetRequestId:
+      name: fleet_request_id
       in: path
       required: true
       schema: {$ref: '#/components/schemas/Identifier'}
@@ -1542,6 +2267,187 @@ components:
           type: array
           items: {$ref: '#/components/schemas/Repository'}
         next_cursor: {type: ['string', 'null']}
+    BrowserIdentity:
+      type: object
+      additionalProperties: false
+      required: [users, teams]
+      properties:
+        users: {type: array, items: {$ref: '#/components/schemas/BrowserIdentityUser'}}
+        teams: {type: array, items: {$ref: '#/components/schemas/BrowserIdentityTeam'}}
+    BrowserIdentityUser:
+      type: object
+      additionalProperties: false
+      required: [id, display_name, primary_email, status, created_at, updated_at, last_seen_at, version, team_ids]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        display_name: {type: string, minLength: 1, maxLength: 512}
+        primary_email: {type: string, format: email, maxLength: 320}
+        status: {type: string, enum: [active, suspended, disabled]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        last_seen_at: {type: ['string', 'null'], format: date-time}
+        version: {type: integer, minimum: 1}
+        team_ids: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Identifier'}}
+    BrowserIdentityTeam:
+      type: object
+      additionalProperties: false
+      required: [id, name, description, status, created_at, updated_at, version, member_ids]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string, minLength: 1, maxLength: 512}
+        description: {type: string, maxLength: 8192}
+        status: {type: string, enum: [active, disabled]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        version: {type: integer, minimum: 1}
+        member_ids: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Identifier'}}
+    HumanUser:
+      type: object
+      additionalProperties: false
+      required: [id, display_name, primary_email, status, created_unix_ms, updated_unix_ms, last_seen_unix_ms, version]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        display_name: {type: string, minLength: 1, maxLength: 512}
+        primary_email: {type: string, format: email, maxLength: 320}
+        status: {type: string, enum: [active, suspended, disabled]}
+        created_unix_ms: {type: integer, minimum: 0}
+        updated_unix_ms: {type: integer, minimum: 0}
+        last_seen_unix_ms: {type: [integer, 'null'], minimum: 0}
+        version: {type: integer, minimum: 1}
+    CreateHumanUserRequest:
+      type: object
+      additionalProperties: false
+      required: [display_name, primary_email]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        display_name: {type: string, minLength: 1, maxLength: 512}
+        primary_email: {type: string, format: email, maxLength: 320}
+    UpdateHumanUserRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_version]
+      properties:
+        expected_version: {type: integer, minimum: 1}
+        display_name: {type: string, minLength: 1, maxLength: 512}
+        primary_email: {type: string, format: email, maxLength: 320}
+        status: {type: string, enum: [active, suspended, disabled]}
+    HumanUserPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/HumanUser'}}
+        next_cursor: {type: ['string', 'null']}
+    Team:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, name, description, status, created_unix_ms, updated_unix_ms, version]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string, minLength: 1, maxLength: 512}
+        description: {type: string, maxLength: 8192}
+        status: {type: string, enum: [active, disabled]}
+        created_unix_ms: {type: integer, minimum: 0}
+        updated_unix_ms: {type: integer, minimum: 0}
+        version: {type: integer, minimum: 1}
+    CreateTeamRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string, minLength: 1, maxLength: 512}
+        description: {type: string, maxLength: 8192, default: ''}
+    UpdateTeamRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_version]
+      properties:
+        expected_version: {type: integer, minimum: 1}
+        name: {type: string, minLength: 1, maxLength: 512}
+        description: {type: string, maxLength: 8192}
+        status: {type: string, enum: [active, disabled]}
+    TeamPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Team'}}
+        next_cursor: {type: ['string', 'null']}
+    TeamMembership:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, team_id, user_id, role, created_unix_ms]
+      properties:
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        team_id: {$ref: '#/components/schemas/Identifier'}
+        user_id: {$ref: '#/components/schemas/Identifier'}
+        role: {type: string, enum: [member, maintainer]}
+        created_unix_ms: {type: integer, minimum: 0}
+    AddTeamMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [user_id]
+      properties:
+        user_id: {$ref: '#/components/schemas/Identifier'}
+        role: {type: string, enum: [member, maintainer], default: member}
+    TeamMembershipPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/TeamMembership'}}
+        next_cursor: {type: ['string', 'null']}
+    RepositoryAccessGrant:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, repository_id, subject, permission, created_unix_ms, updated_unix_ms, version]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        repository_id: {$ref: '#/components/schemas/Identifier'}
+        subject:
+          oneOf:
+            - {type: object, additionalProperties: false, required: [user], properties: {user: {$ref: '#/components/schemas/Identifier'}}}
+            - {type: object, additionalProperties: false, required: [team], properties: {team: {$ref: '#/components/schemas/Identifier'}}}
+        permission: {type: string, enum: [read, write, admin]}
+        created_unix_ms: {type: integer, minimum: 0}
+        updated_unix_ms: {type: integer, minimum: 0}
+        version: {type: integer, minimum: 1}
+    PutRepositoryAccessGrantRequest:
+      type: object
+      additionalProperties: false
+      required: [subject_kind, subject_id, permission]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        subject_kind: {type: string, enum: [user, team, group]}
+        subject_id: {$ref: '#/components/schemas/Identifier'}
+        permission: {type: string, enum: [read, write, admin]}
+        expected_version: {type: integer, minimum: 1}
+    RepositoryAccessGrantPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/RepositoryAccessGrant'}}
+        next_cursor: {type: ['string', 'null']}
+    EffectiveRepositoryAccess:
+      type: object
+      additionalProperties: false
+      required: [repository_id, permission, direct, team_ids]
+      properties:
+        repository_id: {$ref: '#/components/schemas/Identifier'}
+        permission: {type: string, enum: [read, write, admin]}
+        direct: {type: boolean}
+        team_ids: {type: array, items: {$ref: '#/components/schemas/Identifier'}}
+    EffectiveRepositoryAccessPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/EffectiveRepositoryAccess'}}
+        next_cursor: {type: ['string', 'null']}
     CreateCapsuleRequest:
       type: object
       additionalProperties: false
@@ -1585,7 +2491,7 @@ components:
     ExecutionCapsule:
       type: object
       additionalProperties: false
-      required: [id, repository_id, digest, status, workflow_digest, lock_digest, risk_score, approval_required, approval_requests, parity_grade, created_at, signature, capsule]
+      required: [id, repository_id, digest, status, workflow_digest, lock_digest, risk_score, approval_required, approval_requests, parity_grade, created_at, signature, capsule, workflow_frontend_report]
       properties:
         id: {$ref: '#/components/schemas/Identifier'}
         repository_id: {$ref: '#/components/schemas/Identifier'}
@@ -1606,6 +2512,18 @@ components:
         created_at: {type: string, format: date-time}
         signature: {type: object}
         capsule: {type: object}
+        workflow_frontend_report:
+          oneOf:
+            - {$ref: '#/components/schemas/WorkflowFrontendReportLink'}
+            - {type: 'null'}
+    WorkflowFrontendReportLink:
+      type: object
+      additionalProperties: false
+      required: [media_type, digest, download_url]
+      properties:
+        media_type: {type: string, minLength: 3, maxLength: 255}
+        digest: {$ref: '#/components/schemas/Digest'}
+        download_url: {type: string, minLength: 1, maxLength: 8192}
     CreateRunRequest:
       type: object
       additionalProperties: false
@@ -1648,6 +2566,28 @@ components:
           type: array
           items: {$ref: '#/components/schemas/Run'}
         next_cursor: {type: ['string', 'null']}
+    DurableEvent:
+      type: object
+      additionalProperties: false
+      required: [id, source, kind, payload_digest, status, attempts, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        source: {type: string, enum: [frontend, backend, system]}
+        kind: {type: string, minLength: 1, maxLength: 8192}
+        payload_digest: {$ref: '#/components/schemas/Digest'}
+        status: {type: string, enum: [pending, claimed, completed, failed]}
+        attempts: {type: integer, minimum: 0}
+        created_at: {type: string, format: date-time}
+    EventReplay:
+      type: object
+      additionalProperties: false
+      required: [id, event_id, task_id, status, queued_at]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        event_id: {$ref: '#/components/schemas/Identifier'}
+        task_id: {$ref: '#/components/schemas/Identifier'}
+        status: {type: string, const: pending}
+        queued_at: {type: string, format: date-time}
     RunLogFrame:
       type: object
       additionalProperties: false
@@ -1768,6 +2708,304 @@ components:
           type: array
           items: {$ref: '#/components/schemas/ApprovalRequest'}
         next_cursor: {type: ['string', 'null']}
+    AcquireRunnerFleetLeaseRequest:
+      type: object
+      additionalProperties: false
+      required: [expires_in_ms]
+      properties:
+        expires_in_ms: {type: integer, minimum: 10000, maximum: 300000}
+    RunnerAutoscalerLease:
+      type: object
+      additionalProperties: false
+      required: [pool_id, owner_id, fencing_generation, acquired_unix_ms, expires_unix_ms]
+      properties:
+        pool_id: {$ref: '#/components/schemas/Identifier'}
+        owner_id: {$ref: '#/components/schemas/Identifier'}
+        fencing_generation: {type: integer, minimum: 1}
+        acquired_unix_ms: {type: integer, minimum: 0}
+        expires_unix_ms: {type: integer, minimum: 1}
+    RunnerPoolScalingPolicy:
+      type: object
+      additionalProperties: false
+      required: [pool_id, minimum_workers, minimum_idle_workers, maximum_workers, scale_up_batch, idle_timeout_ms, offline_grace_ms, cooldown_ms, enabled, updated_unix_ms]
+      properties:
+        pool_id: {$ref: '#/components/schemas/Identifier'}
+        baseline_runtime_compatibility_digest: {$ref: '#/components/schemas/Digest'}
+        minimum_workers: {type: integer, minimum: 0}
+        minimum_idle_workers: {type: integer, minimum: 0}
+        maximum_workers: {type: integer, minimum: 0}
+        scale_up_batch: {type: integer, minimum: 0}
+        idle_timeout_ms: {type: integer, minimum: 0}
+        offline_grace_ms: {type: integer, minimum: 0}
+        cooldown_ms: {type: integer, minimum: 0}
+        enabled: {type: boolean}
+        updated_unix_ms: {type: integer, minimum: 0}
+    RunnerPoolTemplate:
+      type: object
+      additionalProperties: false
+      required: [pool_id, runtime_compatibility_digest, provider, provider_template_id, runner_template_digest, created_unix_ms, updated_unix_ms]
+      properties:
+        pool_id: {$ref: '#/components/schemas/Identifier'}
+        runtime_compatibility_digest: {$ref: '#/components/schemas/Digest'}
+        provider: {type: string, minLength: 1, maxLength: 8192}
+        provider_template_id: {$ref: '#/components/schemas/Identifier'}
+        runner_template_digest: {$ref: '#/components/schemas/Digest'}
+        created_unix_ms: {type: integer, minimum: 0}
+        updated_unix_ms: {type: integer, minimum: 0}
+    RunnerFleetRequestState:
+      type: string
+      enum: [requested, provisioning, bootstrapping, enrolled, online, draining, terminating, terminated, failed, quarantined]
+    RunnerFleetRequest:
+      type: object
+      additionalProperties: false
+      required: [id, pool_id, runtime_compatibility_digest, provider, provider_template_id, runner_template_digest, state, created_unix_ms, updated_unix_ms]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        pool_id: {$ref: '#/components/schemas/Identifier'}
+        runtime_compatibility_digest: {$ref: '#/components/schemas/Digest'}
+        provider: {type: string, minLength: 1, maxLength: 8192}
+        provider_template_id: {$ref: '#/components/schemas/Identifier'}
+        runner_template_digest: {$ref: '#/components/schemas/Digest'}
+        state: {$ref: '#/components/schemas/RunnerFleetRequestState'}
+        provider_request_id: {$ref: '#/components/schemas/Identifier'}
+        provider_instance_id: {$ref: '#/components/schemas/Identifier'}
+        runner_id: {$ref: '#/components/schemas/Identifier'}
+        failure_code: {type: string, minLength: 1, maxLength: 8192}
+        created_unix_ms: {type: integer, minimum: 0}
+        updated_unix_ms: {type: integer, minimum: 0}
+    RunnerFleetRequestView:
+      type: object
+      additionalProperties: false
+      required: [id, pool_id, runtime_compatibility_digest, provider, provider_template_id, runner_template_digest, state, created_unix_ms, updated_unix_ms, runner_active_jobs, runner_last_heartbeat_unix_ms, runner_status]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        pool_id: {$ref: '#/components/schemas/Identifier'}
+        runtime_compatibility_digest: {$ref: '#/components/schemas/Digest'}
+        provider: {type: string, minLength: 1, maxLength: 8192}
+        provider_template_id: {$ref: '#/components/schemas/Identifier'}
+        runner_template_digest: {$ref: '#/components/schemas/Digest'}
+        state: {$ref: '#/components/schemas/RunnerFleetRequestState'}
+        provider_request_id: {$ref: '#/components/schemas/Identifier'}
+        provider_instance_id: {$ref: '#/components/schemas/Identifier'}
+        runner_id: {$ref: '#/components/schemas/Identifier'}
+        failure_code: {type: string, minLength: 1, maxLength: 8192}
+        created_unix_ms: {type: integer, minimum: 0}
+        updated_unix_ms: {type: integer, minimum: 0}
+        runner_active_jobs: {type: integer, minimum: 0}
+        runner_last_heartbeat_unix_ms: {type: integer, minimum: 0}
+        runner_status:
+          oneOf:
+            - {type: string, enum: [probationary, online, draining, quarantined, offline, revoked]}
+            - {type: 'null'}
+    SchedulingRequirements:
+      type: object
+      additionalProperties: false
+      required: [os, arch, isolation, cpu, memory_bytes, storage_bytes, required_capabilities, allowed_pools]
+      properties:
+        os: {type: string, enum: [linux, windows, macos]}
+        arch: {type: string, enum: [amd64, arm64]}
+        isolation: {type: string, enum: [wasm, oci, microvm, native]}
+        cpu: {type: integer, minimum: 0}
+        memory_bytes: {type: integer, minimum: 0}
+        storage_bytes: {type: integer, minimum: 0}
+        region: {type: string, minLength: 1, maxLength: 8192}
+        required_capabilities:
+          type: array
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 8192}
+        allowed_pools:
+          type: array
+          uniqueItems: true
+          items: {$ref: '#/components/schemas/Identifier'}
+    RunnerDemandGroup:
+      type: object
+      additionalProperties: false
+      required: [runtime_compatibility_digest, requirements, queued_jobs, idle_workers, active_workers, pending_workers]
+      properties:
+        runtime_compatibility_digest: {$ref: '#/components/schemas/Digest'}
+        requirements: {$ref: '#/components/schemas/SchedulingRequirements'}
+        queued_jobs: {type: integer, minimum: 0}
+        idle_workers: {type: integer, minimum: 0}
+        active_workers: {type: integer, minimum: 0}
+        pending_workers: {type: integer, minimum: 0}
+    RunnerFleet:
+      type: object
+      additionalProperties: false
+      required: [policy, templates, requests, replacements, pool_id, observed_unix_ms, demand, online_workers, draining_workers, offline_workers, quarantined_workers]
+      properties:
+        policy: {$ref: '#/components/schemas/RunnerPoolScalingPolicy'}
+        templates:
+          type: array
+          items: {$ref: '#/components/schemas/RunnerPoolTemplate'}
+        requests:
+          type: array
+          items: {$ref: '#/components/schemas/RunnerFleetRequestView'}
+        replacements:
+          type: array
+          items: {$ref: '#/components/schemas/RunnerReplacement'}
+        pool_id: {$ref: '#/components/schemas/Identifier'}
+        observed_unix_ms: {type: integer, minimum: 0}
+        demand:
+          type: array
+          items: {$ref: '#/components/schemas/RunnerDemandGroup'}
+        online_workers: {type: integer, minimum: 0}
+        draining_workers: {type: integer, minimum: 0}
+        offline_workers: {type: integer, minimum: 0}
+        quarantined_workers: {type: integer, minimum: 0}
+    CreateRunnerFleetRequest:
+      type: object
+      additionalProperties: false
+      required: [fencing_generation, template]
+      properties:
+        request_id: {$ref: '#/components/schemas/Identifier'}
+        fencing_generation: {type: integer, minimum: 1}
+        template:
+          type: object
+          additionalProperties: false
+          required: [runtime_compatibility_digest, provider, provider_template_id, runner_template_digest]
+          properties:
+            runtime_compatibility_digest: {$ref: '#/components/schemas/Digest'}
+            provider: {type: string, minLength: 1, maxLength: 8192}
+            provider_template_id: {$ref: '#/components/schemas/Identifier'}
+            runner_template_digest: {$ref: '#/components/schemas/Digest'}
+    PlanRunnerReplacement:
+      type: object
+      additionalProperties: false
+      required: [fencing_generation]
+      properties:
+        fencing_generation: {type: integer, minimum: 1}
+        source_runner_id: {$ref: '#/components/schemas/Identifier'}
+    RunnerReplacement:
+      type: object
+      additionalProperties: false
+      required: [id, pool_id, mode, source_runner_id, source_posture_digest, generation, policy_version, release_id, channel, rollout_ring, state, created_unix_ms, updated_unix_ms]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        pool_id: {$ref: '#/components/schemas/Identifier'}
+        mode: {type: string, enum: [autoscaled, fixed-host]}
+        source_runner_id: {$ref: '#/components/schemas/Identifier'}
+        source_posture_digest: {$ref: '#/components/schemas/Digest'}
+        target_runner_id: {$ref: '#/components/schemas/Identifier'}
+        target_posture_digest: {$ref: '#/components/schemas/Digest'}
+        runner_slot_id: {$ref: '#/components/schemas/Identifier'}
+        source_fleet_request_id: {$ref: '#/components/schemas/Identifier'}
+        target_fleet_request_id: {$ref: '#/components/schemas/Identifier'}
+        generation: {type: integer, minimum: 1}
+        policy_version: {type: integer, minimum: 1}
+        release_id: {$ref: '#/components/schemas/Identifier'}
+        channel: {type: string, minLength: 1}
+        rollout_ring: {type: integer, minimum: 0}
+        state: {type: string, enum: [requested, claim-issued, enrolled, probationary, active, draining-source, completed, failed, canceled]}
+        failure_code: {type: string}
+        created_unix_ms: {type: integer, minimum: 0}
+        updated_unix_ms: {type: integer, minimum: 0}
+    RunnerSlot:
+      type: object
+      additionalProperties: false
+      required: [id, pool_id, updater_identity_digest, active_generation, created_unix_ms, updated_unix_ms]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        pool_id: {$ref: '#/components/schemas/Identifier'}
+        updater_identity_digest: {$ref: '#/components/schemas/Digest'}
+        active_generation: {type: integer, minimum: 0}
+        active_runner_id: {$ref: '#/components/schemas/Identifier'}
+        created_unix_ms: {type: integer, minimum: 0}
+        updated_unix_ms: {type: integer, minimum: 0}
+    RunnerUpdateRelease:
+      type: object
+      additionalProperties: false
+      required: [id, channel, profile, component_profile_digest, update_root_digest, targets_metadata_digest, snapshot_metadata_digest, timestamp_metadata_digest, created_unix_ms]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        channel: {type: string, minLength: 1}
+        profile: {$ref: '#/components/schemas/RunnerComponentProfile'}
+        component_profile_digest: {$ref: '#/components/schemas/Digest'}
+        update_root_digest: {$ref: '#/components/schemas/Digest'}
+        targets_metadata_digest: {$ref: '#/components/schemas/Digest'}
+        snapshot_metadata_digest: {$ref: '#/components/schemas/Digest'}
+        timestamp_metadata_digest: {$ref: '#/components/schemas/Digest'}
+        created_unix_ms: {type: integer, minimum: 0}
+        revoked_unix_ms: {type: integer, minimum: 0}
+    VerifiedRunnerUpdateReleaseRegistration:
+      type: object
+      additionalProperties: false
+      required: [release, target_path, bundle]
+      properties:
+        release: {$ref: '#/components/schemas/RunnerUpdateRelease'}
+        target_path: {type: string, minLength: 1}
+        bundle: {type: object}
+        bootstrap_trusted_state: {type: object}
+    RunnerComponentProfile:
+      type: object
+      additionalProperties: false
+      required: [component_name, release_version, artifact_name, artifact_length, artifact_digest, artifact_media_type, platform, architecture, installed_digest, runner_version, engine_version, protocol_min, protocol_max, package_format, allowed_installation_paths, allowed_modes]
+      properties:
+        component_name: {type: string, enum: [runtrue-runner]}
+        release_version: {type: string, minLength: 1}
+        artifact_name: {type: string, minLength: 1}
+        artifact_length: {type: integer, minimum: 1}
+        artifact_digest: {$ref: '#/components/schemas/Digest'}
+        artifact_media_type: {type: string, minLength: 1}
+        platform: {type: string, minLength: 1}
+        architecture: {type: string, minLength: 1}
+        installed_digest: {$ref: '#/components/schemas/Digest'}
+        runner_version: {type: string, minLength: 1}
+        engine_version: {type: string, minLength: 1}
+        protocol_min: {type: integer, minimum: 1}
+        protocol_max: {type: integer, minimum: 1}
+        package_format: {type: string, enum: [raw, oci-image]}
+        allowed_installation_paths: {type: array, items: {type: string}}
+        allowed_modes: {type: array, items: {type: integer, minimum: 0, maximum: 511}}
+    RunnerPoolUpdatePolicy:
+      type: object
+      additionalProperties: false
+      required: [pool_id, version, enabled, release_id, runtime_compatibility_digest, provider, provider_template_id, runner_template_digest, channel, maintenance_windows, rings, minimum_healthy, maximum_surge, maximum_unavailable, failure_threshold, required_attestation_grade, protocol_min, protocol_max, paused, created_unix_ms]
+      properties:
+        pool_id: {$ref: '#/components/schemas/Identifier'}
+        version: {type: integer, minimum: 1}
+        enabled: {type: boolean}
+        release_id: {$ref: '#/components/schemas/Identifier'}
+        runtime_compatibility_digest: {$ref: '#/components/schemas/Digest'}
+        provider: {type: string, minLength: 1}
+        provider_template_id: {$ref: '#/components/schemas/Identifier'}
+        runner_template_digest: {$ref: '#/components/schemas/Digest'}
+        channel: {type: string, minLength: 1}
+        maintenance_windows: {type: array, items: {type: string}}
+        rings: {type: array, minItems: 1, items: {type: string}}
+        minimum_healthy: {type: integer, minimum: 0}
+        maximum_surge: {type: integer, minimum: 0}
+        maximum_unavailable: {type: integer, minimum: 0}
+        failure_threshold: {type: integer, minimum: 1}
+        required_attestation_grade: {type: string}
+        protocol_min: {type: integer, minimum: 1}
+        protocol_max: {type: integer, minimum: 1}
+        paused: {type: boolean}
+        created_unix_ms: {type: integer, minimum: 0}
+    TransitionRunnerFleetRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_state, next_state, fencing_generation]
+      properties:
+        expected_state: {$ref: '#/components/schemas/RunnerFleetRequestState'}
+        next_state: {$ref: '#/components/schemas/RunnerFleetRequestState'}
+        fencing_generation: {type: integer, minimum: 1}
+        detail: {type: ['string', 'null'], maxLength: 8192}
+    CreateRunnerLaunchClaim:
+      type: object
+      additionalProperties: false
+      required: [fencing_generation, provider_instance_id, identity_proof_digest]
+      properties:
+        fencing_generation: {type: integer, minimum: 1}
+        provider_instance_id: {$ref: '#/components/schemas/Identifier'}
+        identity_proof_digest: {$ref: '#/components/schemas/Digest'}
+        expires_in_ms: {type: integer, minimum: 60000, maximum: 900000, default: 300000}
+    RunnerLaunchClaim:
+      type: object
+      additionalProperties: false
+      required: [token, expires_unix_ms]
+      properties:
+        token: {type: string, minLength: 1, writeOnly: true}
+        expires_unix_ms: {type: integer, minimum: 1}
     RunnerPool:
       type: object
       additionalProperties: false
@@ -1828,6 +3066,103 @@ components:
       properties:
         token: {type: string, writeOnly: true}
         expires_at: {type: string, format: date-time}
+    BrowserConfigurationProjectForm:
+      type: object
+      additionalProperties: false
+      required: [csrf_token, name]
+      properties:
+        csrf_token: {type: string, minLength: 1, maxLength: 8192}
+        id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string, minLength: 1, maxLength: 8192}
+        description: {type: string, maxLength: 1048576}
+        expected_version: {type: string, pattern: '^[0-9]+$', maxLength: 20, default: '0'}
+        targets:
+          type: string
+          maxLength: 1048576
+          default: '[]'
+          description: JSON-encoded array of objects with kind `scm_account` or `repository` and a non-empty id.
+    BrowserScopedSecretPutForm:
+      type: object
+      additionalProperties: false
+      required: [csrf_token, scope_kind, scope_id, name, value, idempotency_key]
+      properties:
+        csrf_token: {type: string, minLength: 1, maxLength: 8192}
+        scope_kind: {type: string, enum: [workspace, scm_account, project, repository]}
+        scope_id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string, minLength: 1, maxLength: 8192}
+        value: {type: string, minLength: 1, maxLength: 1048576, writeOnly: true}
+        idempotency_key: {type: string, minLength: 1, maxLength: 8192}
+    BrowserScopedSecretDeleteForm:
+      type: object
+      additionalProperties: false
+      required: [csrf_token, scope_kind, scope_id, name]
+      properties:
+        csrf_token: {type: string, minLength: 1, maxLength: 8192}
+        scope_kind: {type: string, enum: [workspace, scm_account, project, repository]}
+        scope_id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string, minLength: 1, maxLength: 8192}
+    ConfigurationProjectTarget:
+      type: object
+      additionalProperties: false
+      required: [kind, id, created_unix_ms]
+      properties:
+        kind: {type: string, enum: [scm_account, repository]}
+        id: {$ref: '#/components/schemas/Identifier'}
+        created_unix_ms: {type: integer, minimum: 0}
+    ConfigurationProject:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, name, description, status, version, created_unix_ms, updated_unix_ms, targets]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string, minLength: 1, maxLength: 8192}
+        description: {type: string, maxLength: 1048576}
+        status: {type: string, const: active}
+        version: {type: integer, minimum: 1}
+        created_unix_ms: {type: integer, minimum: 0}
+        updated_unix_ms: {type: integer, minimum: 0}
+        targets:
+          type: array
+          items: {$ref: '#/components/schemas/ConfigurationProjectTarget'}
+    BrowserScmAccount:
+      type: object
+      additionalProperties: false
+      required: [id, name, kind]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string, minLength: 1, maxLength: 8192}
+        kind: {type: string, enum: [organization, user]}
+    BrowserSecretRepository:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, owner, name, default_branch, visibility, created_unix_ms]
+      properties:
+        id: {$ref: '#/components/schemas/Identifier'}
+        tenant_id: {$ref: '#/components/schemas/Identifier'}
+        owner: {type: string, minLength: 1, maxLength: 8192}
+        name: {type: string, minLength: 1, maxLength: 8192}
+        default_branch: {type: string, minLength: 1, maxLength: 8192}
+        visibility: {type: string, minLength: 1, maxLength: 8192}
+        created_unix_ms: {type: integer, minimum: 0}
+    BrowserSecretInventory:
+      type: object
+      additionalProperties: false
+      required: [workspace_id, secrets, projects, scm_accounts, repositories]
+      properties:
+        workspace_id: {$ref: '#/components/schemas/Identifier'}
+        secrets:
+          type: array
+          items: {$ref: '#/components/schemas/SecretMetadata'}
+        projects:
+          type: array
+          items: {$ref: '#/components/schemas/ConfigurationProject'}
+        scm_accounts:
+          type: array
+          items: {$ref: '#/components/schemas/BrowserScmAccount'}
+        repositories:
+          type: array
+          items: {$ref: '#/components/schemas/BrowserSecretRepository'}
     SecretMetadata:
       type: object
       additionalProperties: false

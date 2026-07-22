@@ -88,7 +88,7 @@ from the dashboard journal.
 ## Tenant installation setup
 
 The server-rendered administration page is available at
-`/ui/github/installations` after human OIDC is configured. Its operator-console
+`/` after human OIDC is configured. Its operator-console
 layout puts installation health and required permissions before the repository
 catalog. All mutations use authenticated POST requests with session-bound CSRF
 and one-use idempotency values. Page responses are `Cache-Control: no-store`;

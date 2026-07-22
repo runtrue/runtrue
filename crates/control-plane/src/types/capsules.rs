@@ -22,6 +22,20 @@ pub struct CapsuleApiMetadata {
     pub risk_score: u32,
 }
 
+/// Durable frontend diagnostic attachment for a signed capsule.
+///
+/// The attachment is deliberately not named Evidence: it is produced by a
+/// source translator, while ADR 0015 reserves portable Provider Evidence for
+/// authenticated execution-plane observations. The signed capsule binds the
+/// complete provenance and report digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowFrontendReportRecord {
+    pub capsule_id: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
 impl fmt::Debug for SignedCapsuleRecord {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

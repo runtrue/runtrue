@@ -28,19 +28,21 @@ impl RunnerControlService {
             .ok_or_else(|| Status::failed_precondition("runner data plane is not configured"))
     }
 
-    pub(in crate::runner_service) fn request_cache_ticket_authenticated(
+    pub(in crate::runner_service) async fn request_cache_ticket_authenticated(
         &self,
         authenticated: &AuthenticatedIdentity,
         request: v1::CacheTicketRequest,
     ) -> Result<v1::CacheTicketResponse, Status> {
-        let subject = self.active_data_subject(
-            authenticated,
-            &request.execution_lease_id,
-            request.fencing_generation,
-            &request.job_id,
-            request.job_attempt,
-            &request.step_id,
-        )?;
+        let subject = self
+            .active_data_subject(
+                authenticated,
+                &request.execution_lease_id,
+                request.fencing_generation,
+                &request.job_id,
+                request.job_attempt,
+                &request.step_id,
+            )
+            .await?;
         let data = self.data_plane()?;
         let job = subject
             .capsule
@@ -230,11 +232,10 @@ impl RunnerControlService {
                 expires_unix_ms: now_ms.saturating_add(300_000),
                 completed_unix_ms: None,
             };
-            Some(reserve_or_recover_storage(
-                &self.inner.control_plane,
-                proposed,
-                now_ms,
-            )?)
+            Some(
+                reserve_or_recover_storage(self.inner.control_plane.as_ref(), proposed, now_ms)
+                    .await?,
+            )
         } else {
             None
         };
@@ -267,12 +268,13 @@ impl RunnerControlService {
         };
         let ticket = if let Some(reservation) = &reservation {
             issue_or_recover_cache_ticket(
-                &self.inner.control_plane,
+                self.inner.control_plane.as_ref(),
                 &data.cache,
                 reservation,
                 &ticket_request,
                 now_ms,
-            )?
+            )
+            .await?
         } else {
             data.cache
                 .issue_write_ticket(ticket_request)
@@ -330,6 +332,7 @@ impl RunnerControlService {
                     breaker_state: "closed".to_owned(),
                     created_unix_ms: ticket.issued_at_unix_seconds.saturating_mul(1000),
                 })
+                .await
                 .map_err(control_plane_status)?;
         }
         let cache_entry_json = restore_entry
@@ -351,7 +354,7 @@ impl RunnerControlService {
         })
     }
 
-    pub(in crate::runner_service) fn commit_cache_authenticated(
+    pub(in crate::runner_service) async fn commit_cache_authenticated(
         &self,
         authenticated: &AuthenticatedIdentity,
         request: v1::CommitCacheEntryRequest,
@@ -364,15 +367,18 @@ impl RunnerControlService {
             .inner
             .control_plane
             .signed_capsule_for_lease(&request.execution_lease_id)
+            .await
             .map_err(control_plane_status)?;
-        let subject = self.active_data_subject(
-            authenticated,
-            &request.execution_lease_id,
-            request.fencing_generation,
-            &job_key,
-            request.job_attempt,
-            &ticket.step_id,
-        )?;
+        let subject = self
+            .active_data_subject(
+                authenticated,
+                &request.execution_lease_id,
+                request.fencing_generation,
+                &job_key,
+                request.job_attempt,
+                &ticket.step_id,
+            )
+            .await?;
         if ticket.job_attempt != request.job_attempt {
             return Err(Status::failed_precondition("cache ticket attempt is stale"));
         }
@@ -437,6 +443,7 @@ impl RunnerControlService {
                 1,
                 committed_unix_ms,
             )
+            .await
             .map_err(control_plane_status)?;
         let key_material_digest = CacheKeyMaterial::from(&entry.manifest.identity)
             .digest(data.cache.limits())
@@ -466,10 +473,11 @@ impl RunnerControlService {
                 },
                 ticket.expected_head.as_ref().map(|head| head.generation),
             )
+            .await
             .map_err(control_plane_status)?;
         self.inner
             .control_plane
-            .record_runner_data_commit(
+            .record_runner_data_commit_journal(
                 &RunnerDataCommit {
                     kind: RunnerDataCommitKind::Cache,
                     object_id: cache_entry_id.to_string(),
@@ -487,6 +495,7 @@ impl RunnerControlService {
                 },
                 &authenticated.runner_id,
             )
+            .await
             .map_err(control_plane_status)?;
         self.inner
             .control_plane
@@ -496,6 +505,7 @@ impl RunnerControlService {
                 cache_entry_id.as_str(),
                 committed_unix_ms,
             )
+            .await
             .map_err(control_plane_status)?;
         self.inner
             .control_plane
@@ -521,6 +531,7 @@ impl RunnerControlService {
                 breaker_state: "closed".to_owned(),
                 created_unix_ms: ticket.issued_at_unix_seconds.saturating_mul(1000),
             })
+            .await
             .map_err(control_plane_status)?;
         Ok(v1::CommitCacheEntryResponse {
             cache_entry_id: cache_entry_id.to_string(),

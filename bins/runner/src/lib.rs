@@ -19,7 +19,10 @@ pub use credentials::{
 pub use daemon::{
     NativeJobExecutor, RemoteJobExecutor, RunMode, RunnerDaemon, RunnerDaemonConfig, RunnerError,
 };
-pub use enrollment::{enroll_runner, enroll_runner_from_token_file, EnrollmentError};
+pub use enrollment::{
+    enroll_runner, enroll_runner_from_launch_claim_file, enroll_runner_from_token_file,
+    enroll_runner_from_update_claim_file, EnrollmentError,
+};
 pub use firecracker::{FirecrackerJobExecutor, FirecrackerRuntimePaths};
 pub use inventory::{
     apply_authoritative_posture, load_capsule_trust_store, probe_inventory,

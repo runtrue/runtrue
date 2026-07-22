@@ -148,6 +148,27 @@ fn full_chain_verifies_exact_target_and_advances_monotonic_state() {
 }
 
 #[test]
+fn control_plane_can_verify_signed_target_metadata_without_downloading_artifact_bytes() {
+    let (state, _keys, bundle, target) = state_and_bundle();
+    let verified = state
+        .verify_release_metadata(&bundle, TARGET_PATH, NOW)
+        .unwrap();
+    assert_eq!(verified.target.sha256, ContentDigest::sha256(&target));
+    assert_eq!(verified.target.length, target.len() as u64);
+    let mut changed = bundle;
+    changed
+        .targets
+        .signed
+        .targets
+        .get_mut(TARGET_PATH)
+        .unwrap()
+        .version = "substituted".into();
+    assert!(state
+        .verify_release_metadata(&changed, TARGET_PATH, NOW)
+        .is_err());
+}
+
+#[test]
 fn digest_length_path_and_mix_and_match_substitution_fail_closed() {
     let (state, _keys, bundle, target) = state_and_bundle();
     assert!(matches!(

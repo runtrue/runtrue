@@ -10,9 +10,9 @@ use runtrue_cache::{
 };
 use runtrue_control_plane::{
     CacheTrustGenerationRecord, CapsuleApiMetadata, ControlPlane, ControlPlaneError,
-    CreateRunRequest, CredentialTaintState, NewJob, RepositoryRecord, RunnerPoolRecord,
-    RunnerPoolStatus, SecretMetadataReference, SignedCapsuleRecord, StorageReservationState,
-    TenantStorageReservation,
+    ControlPlaneStore, CreateRunRequest, CredentialTaintState, NewJob, RepositoryRecord,
+    RunnerPoolRecord, RunnerPoolStatus, SecretMetadataReference, SignedCapsuleRecord,
+    StorageReservationState, TenantStorageReservation,
 };
 use runtrue_git::{GitTreeEntryKind, GitTreeManifest};
 use runtrue_lifecycle::JobState;
@@ -51,6 +51,40 @@ struct Fixture {
     lease: Lease,
     capsule: SignedCapsuleRecord,
     posture_digest: ContentDigest,
+}
+
+#[test]
+fn package_locality_requires_a_valid_exact_digest_and_tier() {
+    let digest = ContentDigest::sha256(b"package");
+    let encoded = v1::Digest::try_from(&digest).unwrap();
+    let valid = v1::LocalitySummary {
+        content_digests: vec![encoded.clone()],
+        package_locality: vec![v1::PackageLocality {
+            digest: Some(encoded.clone()),
+            tier: v1::PackagePreparationTier::Warm.into(),
+        }],
+        generated_at: Some(proto_timestamp(now_unix_ms().unwrap())),
+        ..Default::default()
+    };
+    let (exact, tiers) = validate_locality(&valid).unwrap();
+    assert!(exact.contains(&digest));
+    assert_eq!(
+        tiers.get(&digest),
+        Some(&runtrue_scheduler::PackagePreparationTier::Warm)
+    );
+
+    let mut missing_exact = valid.clone();
+    missing_exact.content_digests.clear();
+    assert_eq!(
+        validate_locality(&missing_exact).unwrap_err().code(),
+        tonic::Code::InvalidArgument
+    );
+    let mut unspecified = valid;
+    unspecified.package_locality[0].tier = v1::PackagePreparationTier::Unspecified.into();
+    assert_eq!(
+        validate_locality(&unspecified).unwrap_err().code(),
+        tonic::Code::InvalidArgument
+    );
 }
 
 #[test]
@@ -204,8 +238,8 @@ async fn slow_trickle_deadline_expires_and_private_staging_is_removed() {
     assert!(!path.exists(), "expired upload staging must be removed");
 }
 
-#[test]
-fn artifact_quota_ticket_binding_recovers_restart_and_rejects_orphans() {
+#[tokio::test]
+async fn artifact_quota_ticket_binding_recovers_restart_and_rejects_orphans() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("control.sqlite");
     let control = ControlPlane::open(&database, "ticket-recovery", 1_000).unwrap();
@@ -237,7 +271,9 @@ fn artifact_quota_ticket_binding_recovers_restart_and_rejects_orphans() {
         expires_unix_ms: 301_001,
         completed_unix_ms: None,
     };
-    let reservation = reserve_or_recover_storage(&control, proposed.clone(), 1_001).unwrap();
+    let reservation = reserve_or_recover_storage(&control, proposed.clone(), 1_001)
+        .await
+        .unwrap();
     let request = ArtifactTicketRequest {
         tenant_id: reservation.tenant_id.clone(),
         repository_id: "repo-ticket".to_owned(),
@@ -256,6 +292,7 @@ fn artifact_quota_ticket_binding_recovers_restart_and_rejects_orphans() {
     };
     let issued =
         issue_or_recover_artifact_ticket(&control, &data.artifacts, &reservation, &request, 1_001)
+            .await
             .unwrap();
     drop(data);
     drop(control);
@@ -269,8 +306,9 @@ fn artifact_quota_ticket_binding_recovers_restart_and_rejects_orphans() {
     let mut retried_proposal = proposed;
     retried_proposal.created_unix_ms = 2_000;
     retried_proposal.expires_unix_ms = 302_000;
-    let recovered_reservation =
-        reserve_or_recover_storage(&control, retried_proposal, 2_000).unwrap();
+    let recovered_reservation = reserve_or_recover_storage(&control, retried_proposal, 2_000)
+        .await
+        .unwrap();
     let recovered_request = ArtifactTicketRequest {
         issued_at_unix_seconds: recovered_reservation.created_unix_ms / 1_000,
         expires_at_unix_seconds: recovered_reservation.expires_unix_ms / 1_000,
@@ -283,6 +321,7 @@ fn artifact_quota_ticket_binding_recovers_restart_and_rejects_orphans() {
         &recovered_request,
         2_000,
     )
+    .await
     .unwrap();
     assert_eq!(recovered.ticket_id, issued.ticket_id);
     let mut substitution = recovered_request;
@@ -294,6 +333,7 @@ fn artifact_quota_ticket_binding_recovers_restart_and_rejects_orphans() {
         &substitution,
         2_000,
     )
+    .await
     .is_err());
 
     let orphan_reservation = TenantStorageReservation {
@@ -326,8 +366,8 @@ fn artifact_quota_ticket_binding_recovers_restart_and_rejects_orphans() {
     ));
 }
 
-#[test]
-fn cache_promotion_worker_requires_exact_evidence_and_replays_after_restart() {
+#[tokio::test]
+async fn cache_promotion_worker_requires_exact_evidence_and_replays_after_restart() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("control.sqlite");
     let control = ControlPlane::open(&database, "installation", 1_000).unwrap();
@@ -460,6 +500,7 @@ fn cache_promotion_worker_requires_exact_evidence_and_replays_after_restart() {
         .unwrap();
     assert!(data
         .execute_cache_promotion(&control, "tenant-cache", &changed_evidence.id, 1_003,)
+        .await
         .is_err());
     // Simulate a crash after the immutable store effect and before the
     // SQLite journal result. The worker must recognize and reconcile the
@@ -477,6 +518,7 @@ fn cache_promotion_worker_requires_exact_evidence_and_replays_after_restart() {
     let promoted = promoted_effect.immutable_id().unwrap();
     assert_eq!(
         data.execute_cache_promotion(&control, "tenant-cache", &promotion.id, 1_003)
+            .await
             .unwrap(),
         promoted
     );
@@ -490,6 +532,7 @@ fn cache_promotion_worker_requires_exact_evidence_and_replays_after_restart() {
     .unwrap();
     assert_eq!(
         data.execute_cache_promotion(&control, "tenant-cache", &promotion.id, 1_004)
+            .await
             .unwrap(),
         promoted
     );
@@ -599,6 +642,12 @@ fn broker_execution_capsule() -> ExecutionCapsule {
                 metadata_id: "secret-1".to_owned(),
                 name: "TOKEN".to_owned(),
                 purpose: Some("publish".to_owned()),
+                resolution: Some(runtrue_model::SecretResolutionBinding {
+                    scope: "repository:repo-1".to_owned(),
+                    metadata_version: Some(1),
+                    resolution_digest: ContentDigest::sha256(b"server-test-resolution"),
+                    project_versions: Vec::new(),
+                }),
             }],
             oidc_audiences: vec!["https://registry.example".to_owned()],
             ..StepCapabilitySet::default()
@@ -637,15 +686,18 @@ fn runner_record() -> RunnerRecord {
         logical_cpus: 2,
         memory_bytes: 4096,
         storage_bytes: 4096,
+        max_concurrent_wasm_jobs: 1,
         region: None,
         verified_capabilities: BTreeSet::new(),
         self_reported_capabilities: BTreeSet::new(),
         status: RunnerStatus::Online,
         active_jobs: 0,
+        active_wasm_jobs: 0,
         used_cpus: 0,
         used_memory_bytes: 0,
         used_storage_bytes: 0,
         locality: BTreeSet::new(),
+        package_tiers: Default::default(),
         last_heartbeat_unix_ms: 1,
     }
 }
@@ -829,16 +881,17 @@ fn fixture_with_capsule(
         certificate_rotation_notice: Duration::from_secs(2),
         protocol_minimum: PROTOCOL_MIN,
     };
+    let store: Arc<dyn ControlPlaneStore> = control.clone();
     let service = match broker_security {
         Some((master_key, oidc)) => RunnerControlService::with_optional_security(
-            Arc::clone(&control),
+            Arc::clone(&store),
             None,
             Some(master_key),
             Some(oidc),
             None,
             config,
         ),
-        None => RunnerControlService::with_test_config(Arc::clone(&control), config),
+        None => RunnerControlService::with_test_config(store, config),
     }
     .expect("service");
     Fixture {
@@ -1232,6 +1285,7 @@ async fn stale_runner_connection_fence_and_capsule_identifiers_fail_closed() {
                 &fixture.lease.id,
                 fixture.lease.fencing_generation
             )
+            .await
             .expect_err("wrong runner")
             .code(),
         tonic::Code::PermissionDenied
@@ -1355,6 +1409,7 @@ async fn unary_calls_must_use_the_certificate_that_owns_the_open_session() {
         runner_id: "runner-1".to_owned(),
         connection_id: "fingerprint-session".to_owned(),
         protocol_version: PROTOCOL_MAX,
+        max_concurrent_wasm_jobs: 1,
         posture_digest: fixture.posture_digest.clone(),
         runner_image_digest: ContentDigest::sha256(b"test runner image"),
         certificate_fingerprint: owner.certificate_fingerprint.clone(),
@@ -1372,6 +1427,7 @@ async fn unary_calls_must_use_the_certificate_that_owns_the_open_session() {
             rotation_notice_sent: false,
         }),
         offer_lock: tokio::sync::Mutex::new(()),
+        broker_lock: tokio::sync::Mutex::new(()),
     });
     fixture
         .service
@@ -1444,6 +1500,7 @@ async fn secret_and_oidc_brokers_require_exact_live_step_and_are_one_use() {
         fixture
             .service
             .request_secret_authenticated(&identity, secret_request.clone())
+            .await
             .expect_err("step is not running")
             .code(),
         tonic::Code::FailedPrecondition
@@ -1473,6 +1530,7 @@ async fn secret_and_oidc_brokers_require_exact_live_step_and_are_one_use() {
         fixture
             .service
             .request_secret_authenticated(&identity, unsigned_attempt)
+            .await
             .expect_err("attempt exceeds signed retry bound")
             .code(),
         tonic::Code::PermissionDenied
@@ -1481,6 +1539,7 @@ async fn secret_and_oidc_brokers_require_exact_live_step_and_are_one_use() {
     let delivered = fixture
         .service
         .request_secret_authenticated(&identity, secret_request.clone())
+        .await
         .expect("secret delivery");
     assert_eq!(delivered.delivery_kind, ENVELOPE_DELIVERY_KIND);
     assert!(delivered.encrypted_envelope.starts_with(b"ANVSEC01"));
@@ -1488,6 +1547,7 @@ async fn secret_and_oidc_brokers_require_exact_live_step_and_are_one_use() {
         fixture
             .service
             .request_secret_authenticated(&identity, secret_request)
+            .await
             .expect_err("secret replay")
             .code(),
         tonic::Code::AlreadyExists
@@ -1505,6 +1565,7 @@ async fn secret_and_oidc_brokers_require_exact_live_step_and_are_one_use() {
         fixture
             .service
             .mint_oidc_authenticated(&identity, wrong_audience.clone())
+            .await
             .expect_err("undeclared audience")
             .code(),
         tonic::Code::PermissionDenied
@@ -1513,12 +1574,14 @@ async fn secret_and_oidc_brokers_require_exact_live_step_and_are_one_use() {
     let token = fixture
         .service
         .mint_oidc_authenticated(&identity, wrong_audience.clone())
+        .await
         .expect("OIDC token");
     assert_eq!(token.token.split('.').count(), 3);
     assert_eq!(
         fixture
             .service
             .mint_oidc_authenticated(&identity, wrong_audience)
+            .await
             .expect_err("OIDC replay")
             .code(),
         tonic::Code::AlreadyExists
@@ -1533,10 +1596,12 @@ async fn secret_and_oidc_brokers_require_exact_live_step_and_are_one_use() {
     fixture
         .service
         .revoke_secret_authenticated(&identity, revoke.clone())
+        .await
         .expect("revoke");
     fixture
         .service
         .revoke_secret_authenticated(&identity, revoke)
+        .await
         .expect("idempotent revoke");
     assert_eq!(
         fixture
@@ -1550,6 +1615,7 @@ async fn secret_and_oidc_brokers_require_exact_live_step_and_are_one_use() {
                     job_attempt: 1,
                 },
             )
+            .await
             .expect_err("stale revoke")
             .code(),
         tonic::Code::PermissionDenied
@@ -1606,7 +1672,8 @@ async fn enrollment_replay_and_rotation_are_durably_certificate_fenced() {
         .create_enrollment_token("pool-1", now, now + 60_000)
         .unwrap();
     let authority = certificate_authority();
-    let service = RunnerControlService::new(Arc::clone(&control), Arc::clone(&authority)).unwrap();
+    let store: Arc<dyn ControlPlaneStore> = control.clone();
+    let service = RunnerControlService::new(store, Arc::clone(&authority)).unwrap();
     let inventory = hello(&ContentDigest::sha256(b"posture"), "unused")
         .inventory
         .unwrap();
@@ -1788,8 +1855,9 @@ async fn newest_common_selection_and_security_minimum_preserve_unconsumed_token(
         .create_enrollment_token("pool-protocol", now, now + 60_000)
         .unwrap();
     let authority = certificate_authority();
+    let store: Arc<dyn ControlPlaneStore> = control.clone();
     let service = RunnerControlService::with_config(
-        Arc::clone(&control),
+        store,
         Arc::clone(&authority),
         RunnerControlConfig {
             protocol_minimum: PROTOCOL_MAX,
@@ -1869,14 +1937,15 @@ async fn newest_common_selection_and_security_minimum_preserve_unconsumed_token(
     assert_eq!(service.protocol_metrics().stream_version_rejected, 1);
 }
 
-#[test]
-fn requests_require_mtls_identity_and_broker_rpcs_do_not_fake_success() {
+#[tokio::test]
+async fn requests_require_mtls_identity_and_broker_rpcs_do_not_fake_success() {
     let fixture = fixture();
     let request = Request::new(v1::CacheTicketRequest::default());
     assert_eq!(
         fixture
             .service
             .authenticate(&request)
+            .await
             .expect_err("missing identity")
             .code(),
         tonic::Code::Unauthenticated
@@ -1889,6 +1958,7 @@ fn requests_require_mtls_identity_and_broker_rpcs_do_not_fake_success() {
         fixture
             .service
             .authenticate(&authenticated)
+            .await
             .expect("identity")
             .runner_id,
         "runner-1"

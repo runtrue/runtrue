@@ -5,6 +5,14 @@ pub(crate) fn runner(runner: &RunnerRecord) -> Result<(), SchedulerError> {
         || runner.tenant_id.is_empty()
         || runner.pool_id.is_empty()
         || runner.logical_cpus == 0
+        || runner.max_concurrent_wasm_jobs == 0
+        || runner.max_concurrent_wasm_jobs > 64
+        || (runner.max_concurrent_wasm_jobs > 1
+            && !runner
+                .isolation_backends
+                .contains(&runtrue_workflow_ir::Isolation::Wasm))
+        || runner.active_wasm_jobs > runner.active_jobs
+        || runner.active_wasm_jobs > runner.max_concurrent_wasm_jobs
         || runner.memory_bytes == 0
         || runner.storage_bytes == 0
         || runner.isolation_backends.is_empty()

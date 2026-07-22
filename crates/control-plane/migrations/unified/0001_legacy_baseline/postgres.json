@@ -1,0 +1,7 @@
+{
+  "backend": "postgres",
+  "legacy_lineage": "postgres-v1-through-v12",
+  "legacy_head": 12,
+  "legacy_history_sha256": "4700a0ff8cb94bc8474dd85676d3339a21b24e1d676d888b14083dacc5b14b1c",
+  "schema_contract": "postgres-control-plane-v12"
+}

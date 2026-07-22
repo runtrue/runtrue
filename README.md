@@ -10,10 +10,11 @@ subject. The **Bisim** conformance suite compares portable Provider behavior,
 while a graded, credential-free **Replay Bundle** makes admitted execution
 state reproducible on a developer machine.
 
-CI workflows—and GitHub Actions workflows in particular—remain Runtrue's first
-main use case. They are implemented as a source frontend and orchestration
-integration over the public execution boundary, so the adapter can move to a
-separate repository without moving GitHub concepts into the execution kernel.
+GitHub Actions is a source frontend over that execution model. Its adapter is
+isolated as a replaceable workspace package and is not part of the trusted
+planner or runtime engine. The current monorepo boundary and later repository
+extraction are documented in
+[the workflow frontend boundary](docs/architecture/workflow-frontend-extraction.md).
 
 The canonical product vocabulary is defined in the
 [Runtrue naming contract](docs/adr/0005-runtrue-naming.md).
@@ -21,7 +22,7 @@ The canonical product vocabulary is defined in the
 This repository implements a v0.x release candidate for the supported
 single-node evaluation profile described in the
 [technical design](docs/technical-design.md), including local execution,
-isolated executor libraries, a durable SQLite control plane, SCM planning,
+isolated executor libraries, a durable SQLite or PostgreSQL control plane, SCM planning,
 runner admission/fencing, policy, secrets, identity, artifacts, and recovery.
 It is not a hosted-service or high-availability production recommendation, and
 does not claim that every roadmap item in the design is complete. The explicit
@@ -31,15 +32,6 @@ v0.x support boundaries are listed below.
 
 Workflow and planning:
 
-- A domain-neutral public Rust facade for canonical Program, runtime,
-  Execution, Session, Capsule, Seal, Provider, capability, external-effect,
-  Checkpoint, Replay Bundle, Evidence, warm-pool, failure, and Bisim contracts.
-  The generic kernel has no workflow, SCM, GitHub, executor, database, or
-  transport dependency.
-- Exact runtime inventory matching is separate from expiring capacity hints;
-  Session children use bounded reservations and fenced single-winner workspace
-  publication; warm runtime members are one-shot and can never become sterile
-  after assignment begins.
 - Strict, bounded workflow-v1 YAML decoding with unknown/duplicate-field
   rejection, typed values, deny-by-default permissions, expressions, DAGs,
   conditions, static matrices, retries, services, caches, and artifact
@@ -51,10 +43,8 @@ Workflow and planning:
   target-branch workflow by default; proposed workflow changes are independently
   compiled and risk-analyzed and require an exact matching approval subject
   before they can be selected.
-- A bounded, fail-closed GitHub Actions frontend with `SUPPORTED`, `EMULATED`,
-  `REQUIRES_GITHUB`, `UNSAFE`, and `UNSUPPORTED` findings. Standard
-  `.github/workflows/*.yml` files are discovered directly; translated input,
-  native output, and compatibility report identities are digest-bound.
+- A bounded, fail-closed GitHub Actions importer with `SUPPORTED`, `EMULATED`,
+  `REQUIRES_GITHUB`, `UNSAFE`, and `UNSUPPORTED` findings.
 
 Execution boundaries:
 
@@ -100,24 +90,11 @@ Control plane and security:
   accepted fence, run-authorized signed Capsule, and currently running declared
   step. Remote Wasm consumes both just in time through opaque WIT handles,
   authenticated ephemeral envelopes, zeroizing host adapters, and live fenced
-  step transitions. OCI steps can receive only explicitly sealed SCM or local
-  secret grants through private, step-scoped runtime files; provider grants also
-  require the signed SCM context and declared permission, and credentials are
-  never injected as ambient environment variables. Native execution cannot
-  receive brokered credentials. Firecracker rejects secret and OIDC capabilities
-  before invoking the driver because its guest adapter does not yet implement
-  credential delivery.
+  step transitions; native and OCI jobs cannot receive either capability.
   Remote retries are attempt-bound across step transitions, logs, secret/OIDC
   brokers, revocation, completion journals, and durable broker records. Native,
   OCI, and Wasm jobs support whole-job retries; the v1 MicroVM guest remains
   fail-closed until its guest report carries the same attempt identity.
-- Credential taint becomes monotonic after a credential is successfully exposed
-  to a Wasm guest or written to an OCI private runtime file. Generation-two
-  runner completion persists that evidence across restarts; legacy or missing
-  evidence is treated as unknown and fails closed. Tainted execution suppresses
-  subsequent durable logs, cache publication, artifacts, and Replay Bundles.
-  The same fail-closed predicate is defined for execution Checkpoint publication;
-  no tenant execution-Checkpoint publication route is implemented in v0.x.
 - Tamper-evident audit events and signed checkpoints, break-glass and debug
   session state machines, non-exportable signing-operation contracts, protected
   deployment gates, and restore-time fencing.
@@ -163,6 +140,7 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
+tests/conformance/verify_workflow_frontend.sh
 python3 tests/conformance/check_schema.py
 python3 tests/conformance/check_openapi_routes.py
 python3 tests/conformance/check_migrations.py
@@ -209,10 +187,12 @@ workflows on a trusted or disposable host.
 ## GitHub Actions import
 
 The released server and CLI composition enables the `github-actions` frontend
-feature by default. Core-only builds can omit the adapter with
-`--no-default-features`; the private-repository dependency and extraction rules
-are defined in
-[`docs/architecture/workflow-frontend-extraction.md`](docs/architecture/workflow-frontend-extraction.md).
+feature by default. A native-only composition can omit the adapter with
+`--no-default-features`; both compositions are required to compile.
+The adapter is selected from
+[`runtrue/github-actions-frontend`](https://github.com/runtrue/github-actions-frontend)
+at the exact revision recorded in `Cargo.toml`; its own repository runs the
+adapter's locked formatting, test, and strict Clippy gates.
 
 Analyze a workflow and emit native YAML only if no blocking compatibility
 finding remains:
@@ -323,6 +303,36 @@ cargo run -p runtrue-server -- \
   --data-root .runtrue/server/data
 ```
 
+For a fresh external PostgreSQL database, put the migration-owner URL in an
+exact mode-`0600` file with no trailing newline, initialize the schema, then
+start the server with a separate runtime-role URL file:
+
+```bash
+cargo run -p runtrue-server --bin runtrue-db-transfer -- initialize \
+  --postgres-url-file .runtrue/server/postgres-migrate.url \
+  --installation-id local-runtrue
+
+cargo run -p runtrue-server -- \
+  --bootstrap-token-file .runtrue/server/bootstrap.token \
+  --database-url-file .runtrue/server/postgres-runtime.url \
+  --installation-id local-runtrue \
+  --data-root .runtrue/server/data
+```
+
+The runtime role needs schema usage plus table/sequence data privileges, but
+not schema ownership or DDL. An offline SQLite installation can be moved with
+`runtrue-db-transfer transfer` followed by the exact `activate` command printed
+by the transfer report. There is no dual-write mode.
+
+Schema changes are ordered by the backend-neutral catalog under
+`crates/control-plane/migrations/unified`. `initialize` also upgrades a
+recognized legacy PostgreSQL v1-v12 database and atomically bridges it into
+that catalog; normal runtime startup refuses a legacy-only ledger. Embedded
+SQLite opens perform the equivalent one-time bridge for recognized v1-v34
+databases. Afterward, `runtrue_schema_migrations` is authoritative and the
+reserved `PRAGMA user_version` value exists only to make older binaries reject
+the database.
+
 Use `Authorization: Bearer ...` for the API. The preliminary contract is
 [api/openapi.yaml](api/openapi.yaml), and server/SCM configuration is described
 in [bins/server/README.md](bins/server/README.md). Configure a mode-`0700` Git
@@ -368,8 +378,9 @@ boundary.
   automated mirror lifecycle management remain outside the v0.x profile.
 - Promotion requests are durable, but a complete asynchronous scan/promotion
   worker and cloud-specific signing/deployment integrations are not complete.
-- The default deployment is SQLite plus local files. PostgreSQL, S3-compatible
-  blobs, multi-replica HA, regional cache agents, persistent BuildKit/sticky
+- The default deployment is SQLite plus local files. A parity-tested external
+  PostgreSQL backend is available for a single server; multi-replica HA,
+  S3-compatible blobs, regional cache agents, persistent BuildKit/sticky
   volume services, and full air-gap tooling remain roadmap work. The runnable
   [single-node evaluation package](deploy/README.md) and signed release assets
   are not an HA or production TLS topology.
@@ -382,9 +393,6 @@ or a permissive policy result.
 
 ## Repository map
 
-- [docs/architecture/v1-long-term-design.md](docs/architecture/v1-long-term-design.md):
-  the long-term generic workload-control-plane goal, the role of GitHub Actions
-  as the first frontend, and the gates required before declaring v1.
 - [docs/technical-design.md](docs/technical-design.md): product, threat model,
   architecture, protocols, roadmap, and acceptance criteria.
 - [schemas/workflow/v1.json](schemas/workflow/v1.json): native workflow schema.

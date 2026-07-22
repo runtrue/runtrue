@@ -9,11 +9,10 @@
 use crate::{
     analysis::absent_workflow_digest,
     derive_source_trust,
-    limits::normalize_policy_versions,
     locks::{lock_identity, parse_analysis_lock, parse_required_lock},
     provider::hydrate_reusable_sources,
     ProposedAnalysisFailure, ProposedWorkflowAnalysis, ReusableWorkflowSourceProvider,
-    TrustedCapsuleResult, TrustedPlannerError, TrustedPlannerLimits, DEFAULT_LOCKFILE_PATH,
+    SecretMetadataResolver, TrustedCapsuleResult, TrustedPlannerError, DEFAULT_LOCKFILE_PATH,
 };
 use runtrue_compiler::{semantic_risk_diff, Compilation, CompileContext, Compiler};
 use runtrue_git::{GitBlob, GitError, GitRepository};
@@ -21,25 +20,25 @@ use runtrue_lock::LockFile;
 use runtrue_model::ContentDigest;
 use runtrue_scm::{
     select_trusted_workflow_source, EventEnvelope, EventType, GitRevision,
-    TrustedWorkflowSelection, WorkflowDefinitionApprovalEvidence,
+    TrustedWorkflowSelection, WebhookLimits, WorkflowDefinitionApprovalEvidence,
     WorkflowDefinitionApprovalVerifier, WorkflowSourceInputs,
 };
 use runtrue_workflow_frontend::{
-    ResolvedRepositoryAction, WorkflowFrontendOptions, WorkflowFrontendRegistry,
+    PreparedWorkflowSource, WorkflowFrontendOptions, WorkflowFrontendRegistry,
+    MAX_FRONTEND_REPORT_BYTES, MAX_GENERATED_LOCKFILE_BYTES, MAX_NATIVE_WORKFLOW_BYTES,
+    MAX_REPORT_MEDIA_TYPE_BYTES, WORKFLOW_FRONTEND_CONTRACT_GENERATION,
 };
 use runtrue_workflow_ir::SourceTrust;
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 pub struct TrustedPlanner<'a> {
     repository: &'a GitRepository,
     reusable_source_provider: Option<&'a dyn ReusableWorkflowSourceProvider>,
-    compiler: Compiler,
-    limits: TrustedPlannerLimits,
     source_tree_digest: Option<ContentDigest>,
     scm_api_url: Option<String>,
-    default_job_container_image: Option<String>,
-    resolved_repository_actions: BTreeMap<String, ResolvedRepositoryAction>,
+    source_frontend_options: WorkflowFrontendOptions,
     source_frontends: Option<&'a WorkflowFrontendRegistry<'a>>,
+    secret_resolver: Option<&'a dyn SecretMetadataResolver>,
 }
 
 impl<'a> TrustedPlanner<'a> {
@@ -48,32 +47,11 @@ impl<'a> TrustedPlanner<'a> {
         Self {
             repository,
             reusable_source_provider: None,
-            compiler: Compiler::default(),
-            limits: TrustedPlannerLimits::default(),
             source_tree_digest: None,
             scm_api_url: None,
-            default_job_container_image: None,
-            resolved_repository_actions: BTreeMap::new(),
+            source_frontend_options: WorkflowFrontendOptions::default(),
             source_frontends: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_compiler(
-        repository: &'a GitRepository,
-        compiler: Compiler,
-        limits: TrustedPlannerLimits,
-    ) -> Self {
-        Self {
-            repository,
-            reusable_source_provider: None,
-            compiler,
-            limits,
-            source_tree_digest: None,
-            scm_api_url: None,
-            default_job_container_image: None,
-            resolved_repository_actions: BTreeMap::new(),
-            source_frontends: None,
+            secret_resolver: None,
         }
     }
 
@@ -103,32 +81,30 @@ impl<'a> TrustedPlanner<'a> {
         self
     }
 
-    /// Configure an immutable OCI image for imported hosted-Linux jobs when
-    /// the installation deliberately operates without a microVM runner.
+    /// Bind source-adapter configuration to the translation and its signed
+    /// provenance without teaching the trusted planner adapter-specific keys.
     #[must_use]
-    pub fn with_default_job_container_image(mut self, image: impl Into<String>) -> Self {
-        self.default_job_container_image = Some(image.into());
+    pub fn with_source_frontend_options(mut self, options: WorkflowFrontendOptions) -> Self {
+        self.source_frontend_options = options;
         self
     }
 
-    /// Supply exact repository-action Programs prepared by a trusted external
-    /// resolver. Source-language frontends can consume only exact reference
-    /// matches and the generated lock binds each mapping.
-    #[must_use]
-    pub fn with_resolved_repository_actions(
-        mut self,
-        actions: BTreeMap<String, ResolvedRepositoryAction>,
-    ) -> Self {
-        self.resolved_repository_actions = actions;
-        self
-    }
-
-    /// Override source-language translation without changing the execution
-    /// kernel. This is the seam used when an integration moves to a separate
-    /// repository or deployment artifact.
+    /// Inject source-language translation without adding integration behavior
+    /// to the trusted planner or execution kernel.
     #[must_use]
     pub fn with_source_frontends(mut self, frontends: &'a WorkflowFrontendRegistry<'a>) -> Self {
         self.source_frontends = Some(frontends);
+        self
+    }
+
+    /// Resolve declared names to exact durable metadata before approval
+    /// comparison and trusted source selection.
+    #[must_use]
+    pub fn with_secret_metadata_resolver(
+        mut self,
+        resolver: &'a dyn SecretMetadataResolver,
+    ) -> Self {
+        self.secret_resolver = Some(resolver);
         self
     }
 
@@ -147,7 +123,7 @@ impl<'a> TrustedPlanner<'a> {
         now_unix_ms: u64,
     ) -> Result<TrustedCapsuleResult, TrustedPlannerError> {
         event
-            .verify(self.limits.webhook)
+            .verify(WebhookLimits::default())
             .map_err(|_| TrustedPlannerError::InvalidEvent)?;
         let source_trust = derive_source_trust(event, default_branch)?;
         let policy_version_ids = normalize_policy_versions(policy_version_ids)?;
@@ -199,7 +175,7 @@ impl<'a> TrustedPlanner<'a> {
         policy_version_ids: Vec<String>,
     ) -> Result<TrustedCapsuleResult, TrustedPlannerError> {
         event
-            .verify(self.limits.webhook)
+            .verify(WebhookLimits::default())
             .map_err(|_| TrustedPlannerError::InvalidEvent)?;
         if !matches!(
             event.event_type,
@@ -343,7 +319,9 @@ impl<'a> TrustedPlanner<'a> {
                     ),
                     Err(
                         TrustedPlannerError::Compile(_)
+                        | TrustedPlannerError::WorkflowFrontendRegistry(_)
                         | TrustedPlannerError::WorkflowFrontend(_)
+                        | TrustedPlannerError::InvalidWorkflowFrontendOutput(_)
                         | TrustedPlannerError::ReusableSourceProviderRequired
                         | TrustedPlannerError::ReusableSource(_)
                         | TrustedPlannerError::ReusableBundle(_),
@@ -383,7 +361,7 @@ impl<'a> TrustedPlanner<'a> {
             approval,
             verifier,
             now_unix_ms,
-            self.limits.webhook,
+            WebhookLimits::default(),
         )?;
 
         let execution = if selection.trusted_base_workflow_executed {
@@ -443,7 +421,7 @@ impl<'a> TrustedPlanner<'a> {
             approval,
             verifier,
             now_unix_ms,
-            self.limits.webhook,
+            WebhookLimits::default(),
         )?;
         Ok(TrustedCapsuleResult {
             execution,
@@ -508,25 +486,14 @@ impl<'a> TrustedPlanner<'a> {
             .source_frontends
             .map(|frontends| frontends.frontend_for(workflow_path))
             .transpose()
-            .map_err(|error| TrustedPlannerError::WorkflowFrontend(error.to_string()))?
+            .map_err(TrustedPlannerError::from)?
             .flatten();
         let prepared = frontend
-            .map(|frontend| {
-                frontend.prepare(
-                    source,
-                    workflow_path,
-                    &WorkflowFrontendOptions {
-                        default_job_container_image: self.default_job_container_image.clone(),
-                        resolved_repository_actions: self.resolved_repository_actions.clone(),
-                    },
-                )
-            })
+            .map(|frontend| frontend.prepare(source, workflow_path, &self.source_frontend_options))
             .transpose()
-            .map_err(TrustedPlannerError::WorkflowFrontend)?;
+            .map_err(TrustedPlannerError::from)?;
         if let Some(prepared) = &prepared {
-            prepared
-                .validate_for(source)
-                .map_err(|error| TrustedPlannerError::WorkflowFrontend(error.to_string()))?;
+            validate_frontend_output(prepared)?;
             lockfile = prepared
                 .generated_lockfile_toml
                 .as_deref()
@@ -540,16 +507,20 @@ impl<'a> TrustedPlanner<'a> {
         let source = prepared
             .as_ref()
             .map_or(source, |prepared| prepared.native_yaml.as_str());
-        let workflow_frontend =
-            prepared
-                .as_ref()
-                .map(|prepared| runtrue_workflow_ir::WorkflowFrontendProvenance {
-                    frontend_id: prepared.frontend_id.to_owned(),
-                    frontend_generation: prepared.frontend_generation,
-                    input_digest: prepared.input_digest.clone(),
-                    native_digest: prepared.native_digest.clone(),
-                    report_digest: prepared.report.as_ref().map(|report| report.digest.clone()),
-                });
+        let workflow_frontend = frontend.zip(prepared.as_ref()).map(|(frontend, prepared)| {
+            runtrue_workflow_ir::WorkflowFrontendProvenance {
+                frontend_id: frontend.frontend_id().to_owned(),
+                contract_generation: WORKFLOW_FRONTEND_CONTRACT_GENERATION,
+                frontend_generation: frontend.frontend_generation(),
+                configuration_digest: self.source_frontend_options.digest(),
+                input_digest: ContentDigest::sha256(workflow.bytes.as_slice()),
+                native_digest: ContentDigest::sha256(prepared.native_yaml.as_bytes()),
+                report_digest: prepared
+                    .report
+                    .as_ref()
+                    .map(|report| ContentDigest::sha256(&report.bytes)),
+            }
+        });
         let reusable_workflows =
             hydrate_reusable_sources(self.reusable_source_provider, lockfile.as_ref())?;
         let event_value = serde_json::to_value(event)?;
@@ -571,13 +542,28 @@ impl<'a> TrustedPlanner<'a> {
             workflow_changed,
             ..CompileContext::default()
         };
-        Ok(match &self.source_tree_digest {
+        let compiler = Compiler::default();
+        let mut compilation = match &self.source_tree_digest {
             Some(digest) => {
-                self.compiler
-                    .compile_yaml_with_source_snapshot(source, context, digest.clone())?
+                compiler.compile_yaml_with_source_snapshot(source, context, digest.clone())?
             }
-            None => self.compiler.compile_yaml(source, context)?,
-        })
+            None => compiler.compile_yaml(source, context)?,
+        };
+        compilation.workflow_frontend_report = prepared.and_then(|prepared| {
+            prepared.report.map(
+                |report| runtrue_workflow_ir::WorkflowFrontendReportArtifact {
+                    media_type: report.media_type,
+                    digest: ContentDigest::sha256(&report.bytes),
+                    bytes: report.bytes,
+                },
+            )
+        });
+        if let Some(resolver) = self.secret_resolver {
+            resolver.bind_exact(&mut compilation)?;
+        } else if !compilation.resolvable_secret_names().is_empty() {
+            return Err(crate::SecretResolutionError::Missing.into());
+        }
+        Ok(compilation)
     }
 
     fn required_blob(
@@ -606,6 +592,65 @@ impl<'a> TrustedPlanner<'a> {
             Err(error) => Err(TrustedPlannerError::Git(error)),
         }
     }
+}
+
+fn validate_frontend_output(prepared: &PreparedWorkflowSource) -> Result<(), TrustedPlannerError> {
+    if prepared.native_yaml.trim().is_empty() {
+        return Err(TrustedPlannerError::InvalidWorkflowFrontendOutput(
+            "empty native workflow",
+        ));
+    }
+    if prepared.native_yaml.len() > MAX_NATIVE_WORKFLOW_BYTES {
+        return Err(TrustedPlannerError::InvalidWorkflowFrontendOutput(
+            "oversized native workflow",
+        ));
+    }
+    if prepared
+        .generated_lockfile_toml
+        .as_ref()
+        .is_some_and(|lockfile| lockfile.len() > MAX_GENERATED_LOCKFILE_BYTES)
+    {
+        return Err(TrustedPlannerError::InvalidWorkflowFrontendOutput(
+            "oversized generated lockfile",
+        ));
+    }
+    if let Some(report) = &prepared.report {
+        if report.media_type.is_empty()
+            || report.media_type.len() > MAX_REPORT_MEDIA_TYPE_BYTES
+            || !report.media_type.contains('/')
+            || report
+                .media_type
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'*' | b','))
+        {
+            return Err(TrustedPlannerError::InvalidWorkflowFrontendOutput(
+                "invalid report media type",
+            ));
+        }
+        if report.bytes.len() > MAX_FRONTEND_REPORT_BYTES {
+            return Err(TrustedPlannerError::InvalidWorkflowFrontendOutput(
+                "oversized report",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_policy_versions(mut values: Vec<String>) -> Result<Vec<String>, TrustedPlannerError> {
+    values.sort();
+    values.dedup();
+    if values.is_empty()
+        || values.len() > 128
+        || values.iter().any(|value| {
+            value.is_empty()
+                || value.len() > 512
+                || value.bytes().any(|byte| byte.is_ascii_control())
+        })
+        || values.iter().collect::<BTreeSet<_>>().len() != values.len()
+    {
+        return Err(TrustedPlannerError::InvalidPolicyVersions);
+    }
+    Ok(values)
 }
 
 #[cfg(test)]

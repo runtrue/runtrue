@@ -2,7 +2,7 @@ use axum::http::HeaderName;
 use hmac::Hmac;
 use runtrue_auth::AuthContext;
 #[cfg(test)]
-use runtrue_control_plane::ControlPlane;
+use runtrue_control_plane::{ControlPlane, ControlPlaneStore};
 use serde::Serialize;
 use sha2::Sha256;
 #[cfg(test)]
@@ -74,6 +74,15 @@ struct Health {
     status: &'static str,
 }
 
+#[derive(Serialize)]
+struct Readiness {
+    status: &'static str,
+    backend: runtrue_control_plane::DatabaseBackendKind,
+    schema_version: u32,
+    installation_id: String,
+    fencing_epoch: u64,
+}
+
 mod audit;
 mod authorization;
 mod browser;
@@ -102,15 +111,17 @@ use browser::{
 };
 use github::{
     browser_decide_workflow_approval, browser_organization_settings, browser_repository_settings,
-    browser_run_detail, create_github_setup, delete_browser_organization_secret,
-    delete_browser_organization_variable, delete_browser_repository_secret,
-    delete_browser_repository_variable, finish_github_installation, github_app_status,
+    browser_run_detail, browser_secret_inventory, create_github_setup,
+    delete_browser_organization_secret, delete_browser_organization_variable,
+    delete_browser_repository_secret, delete_browser_repository_variable,
+    delete_browser_scoped_secret, finish_github_installation, github_app_status,
     github_browser_state, github_webhook, link_github_repository_from_ui,
     reconcile_claimed_github_lifecycle, revoke_github_installation,
-    save_browser_organization_secret, save_browser_organization_variable,
-    save_browser_repository_secret, save_browser_repository_variable,
-    save_browser_repository_workflow_directory, start_github_installation_from_ui,
-    sync_github_installation, uninstall_browser_repository, GitHubSetupView,
+    save_browser_configuration_project, save_browser_organization_secret,
+    save_browser_organization_variable, save_browser_repository_secret,
+    save_browser_repository_variable, save_browser_repository_workflow_directory,
+    save_browser_scoped_secret, start_github_installation_from_ui, sync_github_installation,
+    uninstall_browser_repository, GitHubSetupView,
 };
 use middleware::{
     authentication_problem, request_context, require_bearer, require_writable_control_plane,
@@ -123,16 +134,25 @@ use problem::{
 };
 pub use router::router;
 use routes::{
-    cancel_run, create_api_token, create_artifact_download_ticket, create_capsule,
-    create_enrollment_token, create_policy_version, create_promotion_response,
-    create_replay_bundle, create_repository, create_run, create_runner_pool, create_secret,
-    decide_approval, delete_secret, delete_variable, download_artifact, drain_runner, get_approval,
-    get_artifact, get_artifact_provenance, get_capsule, get_replay_bundle, get_repository, get_run,
-    get_run_logs, get_runner, get_runner_capsule_trust_key, get_runner_pool, get_secret_metadata,
-    get_variable, health, list_api_tokens, list_approvals, list_repositories, list_runner_pools,
-    list_runners, list_runs, list_secret_metadata, promote_artifact, promote_cache,
-    protect_sensitive_response, put_variable, readiness, revoke_api_token, rotate_secret,
-    route_not_found, scope_tenant, scoped_resource, Items,
+    acquire_runner_fleet_lease, activate_runner_replacement, add_team_member,
+    browser_change_team_member, browser_create_team, browser_create_user, browser_identity,
+    browser_update_team, browser_update_user, cancel_run, create_api_token,
+    create_artifact_download_ticket, create_capsule, create_enrollment_token,
+    create_fixed_update_claim, create_policy_version, create_promotion_response,
+    create_replay_bundle, create_repository, create_run, create_runner_fleet_request,
+    create_runner_launch_claim, create_runner_pool, create_secret, create_team, create_user,
+    decide_approval, delete_secret, delete_variable, download_artifact, drain_runner,
+    effective_user_repository_access, get_approval, get_artifact, get_artifact_provenance,
+    get_capsule, get_event, get_replay_bundle, get_repository, get_run, get_run_logs, get_runner,
+    get_runner_capsule_trust_key, get_runner_fleet, get_runner_pool, get_secret_metadata, get_team,
+    get_user, get_variable, get_workflow_frontend_report, health, list_api_tokens, list_approvals,
+    list_repositories, list_repository_access, list_runner_pools, list_runners, list_runs,
+    list_secret_metadata, list_team_members, list_teams, list_users, plan_runner_replacement,
+    promote_artifact, promote_cache, protect_sensitive_response, put_repository_access,
+    put_runner_slot, put_runner_update_policy, put_runner_update_release, put_variable, readiness,
+    remove_team_member, replay_event, revoke_api_token, revoke_repository_access, rotate_secret,
+    route_not_found, scope_tenant, scoped_resource, transition_runner_fleet_request, update_team,
+    update_user, Items,
 };
 use state::{authentication_tag, GitHubInstallationState, HumanOidcState};
 pub use state::{
@@ -153,7 +173,8 @@ mod tests {
 
     #[test]
     fn state_can_override_timeout_for_server_tests() {
-        let control_plane = Arc::new(ControlPlane::open_in_memory("test", 1).unwrap());
+        let control_plane: Arc<dyn ControlPlaneStore> =
+            Arc::new(ControlPlane::open_in_memory("test", 1).unwrap());
         let state = AppState::new(control_plane, "token", None)
             .unwrap()
             .with_request_timeout(Duration::from_millis(1));

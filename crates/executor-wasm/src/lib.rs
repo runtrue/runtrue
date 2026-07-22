@@ -11,6 +11,7 @@ mod executor;
 mod host;
 mod invocation;
 mod limits;
+mod package_cache;
 #[cfg(target_os = "linux")]
 mod rooted_fs;
 mod target;
@@ -19,12 +20,13 @@ mod watchdog;
 
 pub use authentication::HandleAuthenticationKey;
 pub use component::WasmComponentArtifact;
-pub use config::WasmExecutorConfig;
+pub use config::{WasmExecutorConfig, WasmPackageCacheConfig};
 pub use error::WasmError;
 pub(crate) use executor::expected_compatibility;
 pub use executor::WasmExecutor;
 pub use invocation::WasmExecutionOutput;
 pub use limits::WasmLimits;
+pub use package_cache::PackagePreparationTier;
 pub use target::WasmTarget;
 pub(crate) use validation::{exact_reference_digest, validate_bounded_text};
 wasmtime::component::bindgen!({

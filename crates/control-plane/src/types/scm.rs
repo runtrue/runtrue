@@ -1,4 +1,6 @@
-use crate::types::capsules::{CapsuleApiMetadata, SignedCapsuleRecord};
+use crate::types::capsules::{
+    CapsuleApiMetadata, SignedCapsuleRecord, WorkflowFrontendReportRecord,
+};
 use crate::types::runs::{CreateRunRequest, IdempotentResult, RunRecord, SourceSnapshotRecord};
 use runtrue_model::ContentDigest;
 use runtrue_policy::ApprovalRequest;
@@ -254,6 +256,7 @@ fn is_empty_object(value: &Value) -> bool {
 pub struct PreparedScmExecution {
     pub capsule: SignedCapsuleRecord,
     pub metadata: CapsuleApiMetadata,
+    pub workflow_frontend_report: Option<WorkflowFrontendReportRecord>,
     pub approvals: Vec<ApprovalRequest>,
     pub run: CreateRunRequest,
     pub continuation: Option<ScmContinuationContext>,
@@ -267,6 +270,13 @@ impl fmt::Debug for PreparedScmExecution {
             .debug_struct("PreparedScmExecution")
             .field("capsule", &self.capsule)
             .field("metadata", &self.metadata)
+            .field(
+                "workflow_frontend_report",
+                &self
+                    .workflow_frontend_report
+                    .as_ref()
+                    .map(|record| (&record.media_type, record.bytes.len())),
+            )
             .field("approval_count", &self.approvals.len())
             .field("run", &self.run)
             .field("continuation", &self.continuation)

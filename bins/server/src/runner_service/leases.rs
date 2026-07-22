@@ -33,9 +33,12 @@ impl RunnerControlService {
         validate_observed_timestamp(heartbeat.observed_at.as_ref(), now)?;
         self.inner
             .control_plane
-            .mark_runner_connected(&session.runner_id, now)
+            .set_pool_runner_connected(&session.runner_id, true, now)
+            .await
             .map_err(control_plane_status)?;
-        if heartbeat.active_leases.len() > MAX_ACTIVE_LEASES_PER_RUNNER {
+        if heartbeat.active_leases.len() > session.max_concurrent_wasm_jobs
+            || heartbeat.active_leases.len() > MAX_ACTIVE_LEASES_PER_RUNNER
+        {
             return Err(Status::resource_exhausted(
                 "runner reported too many active leases",
             ));
@@ -48,11 +51,13 @@ impl RunnerControlService {
                 return Err(Status::invalid_argument("duplicate active lease heartbeat"));
             }
             require_session_lease(session, &active.lease_id, active.fencing_generation, true)?;
-            let lease = self.bound_lease(
-                &session.runner_id,
-                &active.lease_id,
-                active.fencing_generation,
-            )?;
+            let lease = self
+                .bound_lease(
+                    &session.runner_id,
+                    &active.lease_id,
+                    active.fencing_generation,
+                )
+                .await?;
             if !matches!(
                 lease.state,
                 LeaseState::Active | LeaseState::CancelRequested
@@ -65,7 +70,7 @@ impl RunnerControlService {
                 .ok_or_else(|| Status::out_of_range("heartbeat lease expiry overflow"))?;
             self.inner
                 .control_plane
-                .heartbeat_lease(
+                .heartbeat_runner_execution_lease(
                     &lease.id,
                     &session.runner_id,
                     lease.fencing_generation,
@@ -73,6 +78,7 @@ impl RunnerControlService {
                     now,
                     new_expiry,
                 )
+                .await
                 .map_err(control_plane_status)?;
         }
         self.synchronize_session(session, now).await
@@ -105,30 +111,35 @@ impl RunnerControlService {
                 ));
             }
         }
-        let lease = self.bound_lease(
-            &session.runner_id,
-            &decision.lease_id,
-            decision.fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &session.runner_id,
+                &decision.lease_id,
+                decision.fencing_generation,
+            )
+            .await?;
         let now = now_unix_ms()?;
         if decision.accepted {
             self.inner
                 .control_plane
-                .accept_lease(
+                .accept_runner_execution_lease(
                     &lease.id,
                     &session.runner_id,
                     lease.fencing_generation,
                     lease.installation_fencing_epoch,
                     now,
                 )
+                .await
                 .map_err(control_plane_status)?;
-            let mut state = session.state()?;
-            state.offered.remove(&lease.id);
-            state.accepted.insert(lease.id, lease.fencing_generation);
+            {
+                let mut state = session.state()?;
+                state.offered.remove(&lease.id);
+                state.accepted.insert(lease.id, lease.fencing_generation);
+            }
         } else {
             self.inner
                 .control_plane
-                .reject_lease_with_code(
+                .reject_runner_execution_lease(
                     &lease.id,
                     &session.runner_id,
                     lease.fencing_generation,
@@ -136,6 +147,7 @@ impl RunnerControlService {
                     &decision.rejection_code,
                     now,
                 )
+                .await
                 .map_err(control_plane_status)?;
             session.state()?.offered.remove(&lease.id);
             self.offer_next(session, now).await?;
@@ -143,9 +155,9 @@ impl RunnerControlService {
         Ok(())
     }
 
-    pub(super) fn handle_job_state(
+    pub(super) async fn handle_job_state(
         &self,
-        session: &RunnerSession,
+        session: &Arc<RunnerSession>,
         update: &v1::JobStateUpdate,
     ) -> Result<(), Status> {
         validate_identifier_status("lease id", &update.lease_id)?;
@@ -154,11 +166,13 @@ impl RunnerControlService {
         validate_bounded_text("job state detail", &update.detail, true)?;
         validate_observed_timestamp(update.observed_at.as_ref(), now_unix_ms()?)?;
         require_session_lease(session, &update.lease_id, update.fencing_generation, true)?;
-        let lease = self.bound_lease(
-            &session.runner_id,
-            &update.lease_id,
-            update.fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &session.runner_id,
+                &update.lease_id,
+                update.fencing_generation,
+            )
+            .await?;
         let next = match update.state.as_str() {
             "preparing" => return Ok(()),
             "running" => JobState::Running,
@@ -167,10 +181,11 @@ impl RunnerControlService {
             }
             _ => return Err(Status::invalid_argument("unsupported runner job state")),
         };
-        match self
+        let transitioned = match self
             .inner
             .control_plane
             .transition_job_state(&lease.job_id, next, now_unix_ms()?)
+            .await
         {
             Ok(_) => Ok(()),
             Err(ControlPlaneError::InvalidTransition {
@@ -179,14 +194,20 @@ impl RunnerControlService {
                 to,
             }) if from == job_state_name(next) && to == job_state_name(next) => Ok(()),
             Err(error) => Err(control_plane_status(error)),
+        };
+        transitioned?;
+        if next == JobState::Running {
+            self.offer_next(session, now_unix_ms()?).await?;
         }
+        Ok(())
     }
 
-    pub(super) fn validate_step_state(
+    pub(super) async fn validate_step_state(
         &self,
         session: &RunnerSession,
         update: &v1::StepStateUpdate,
     ) -> Result<(), Status> {
+        let _broker_guard = session.broker_lock.lock().await;
         validate_identifier_status("lease id", &update.lease_id)?;
         validate_identifier_status("step id", &update.step_id)?;
         validate_bounded_text("step state", &update.state, false)?;
@@ -203,17 +224,20 @@ impl RunnerControlService {
                 .map_err(|_| Status::invalid_argument("invalid step output digest"))?;
         }
         require_session_lease(session, &update.lease_id, update.fencing_generation, true)?;
-        let lease = self.bound_lease(
-            &session.runner_id,
-            &update.lease_id,
-            update.fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &session.runner_id,
+                &update.lease_id,
+                update.fencing_generation,
+            )
+            .await?;
         if lease.state != LeaseState::Active {
             return Err(Status::failed_precondition(
                 "step transitions require an active execution lease",
             ));
         }
-        self.require_declared_attempt_step(&lease, update.job_attempt, &update.step_id)?;
+        self.require_declared_attempt_step(&lease, update.job_attempt, &update.step_id)
+            .await?;
         let key = (lease.id.clone(), update.job_attempt, update.step_id.clone());
         let mut state = session.state()?;
         let current_attempt = state.current_attempts.get(&lease.id).copied().unwrap_or(0);
@@ -286,7 +310,7 @@ impl RunnerControlService {
         Ok(())
     }
 
-    pub(super) fn validate_log_batch(
+    pub(super) async fn validate_log_batch(
         &self,
         session: &RunnerSession,
         batch: &v1::LogBatch,
@@ -296,11 +320,13 @@ impl RunnerControlService {
             return Err(Status::resource_exhausted("log batch frame limit exceeded"));
         }
         require_session_lease(session, &batch.lease_id, batch.fencing_generation, true)?;
-        let lease = self.bound_lease(
-            &session.runner_id,
-            &batch.lease_id,
-            batch.fencing_generation,
-        )?;
+        let lease = self
+            .bound_lease(
+                &session.runner_id,
+                &batch.lease_id,
+                batch.fencing_generation,
+            )
+            .await?;
         let mut next_sequences = BTreeMap::new();
         let current_sequences = session.state()?.log_sequences.clone();
         for frame in &batch.frames {
@@ -316,7 +342,8 @@ impl RunnerControlService {
             {
                 return Err(Status::invalid_argument("invalid bounded log frame"));
             }
-            self.require_declared_attempt_step(&lease, frame.job_attempt, &frame.step_id)?;
+            self.require_declared_attempt_step(&lease, frame.job_attempt, &frame.step_id)
+                .await?;
             if session.state()?.current_attempts.get(&lease.id).copied() != Some(frame.job_attempt)
             {
                 return Err(Status::failed_precondition(
@@ -380,7 +407,7 @@ impl RunnerControlService {
             .collect::<Result<Vec<_>, Status>>()?;
         self.inner
             .control_plane
-            .append_runner_logs(
+            .append_runner_log_frames(
                 &AppendRunnerLogsRequest {
                     execution_lease_id: lease.id,
                     fencing_generation: lease.fencing_generation,
@@ -389,12 +416,13 @@ impl RunnerControlService {
                 },
                 now_unix_ms()?,
             )
+            .await
             .map_err(control_plane_status)?;
         session.state()?.log_sequences.extend(next_sequences);
         Ok(())
     }
 
-    pub(super) fn handle_cancellation_ack(
+    pub(super) async fn handle_cancellation_ack(
         &self,
         session: &RunnerSession,
         ack: &v1::CancellationAck,
@@ -402,7 +430,9 @@ impl RunnerControlService {
         validate_identifier_status("lease id", &ack.lease_id)?;
         validate_observed_timestamp(ack.observed_at.as_ref(), now_unix_ms()?)?;
         require_session_lease(session, &ack.lease_id, ack.fencing_generation, true)?;
-        let lease = self.bound_lease(&session.runner_id, &ack.lease_id, ack.fencing_generation)?;
+        let lease = self
+            .bound_lease(&session.runner_id, &ack.lease_id, ack.fencing_generation)
+            .await?;
         if lease.state != LeaseState::CancelRequested {
             return Err(Status::failed_precondition(
                 "cancellation acknowledgement has no active request",
@@ -423,7 +453,8 @@ impl RunnerControlService {
         if let Some(fingerprint) = &session.certificate_fingerprint {
             self.inner
                 .control_plane
-                .authenticate_runner_certificate(fingerprint, now_unix_ms)
+                .authenticate_pool_runner_certificate(fingerprint, now_unix_ms)
+                .await
                 .map_err(control_plane_status)?;
         }
         if let Some(expires_unix_ms) = session.certificate_expires_unix_ms {
@@ -456,6 +487,7 @@ impl RunnerControlService {
             .inner
             .control_plane
             .recovery_state()
+            .await
             .map_err(control_plane_status)?;
         if recovery.safe_mode {
             return Err(Status::unavailable(
@@ -465,7 +497,8 @@ impl RunnerControlService {
         let runner = self
             .inner
             .control_plane
-            .runner(&session.runner_id)
+            .pool_runner(&session.runner_id)
+            .await
             .map_err(control_plane_status)?;
         match runner.runner.status {
             RunnerStatus::Revoked | RunnerStatus::Quarantined => {
@@ -489,12 +522,14 @@ impl RunnerControlService {
                 )
                 .await?;
             }
-            RunnerStatus::Online | RunnerStatus::Offline => {}
+            RunnerStatus::Probationary | RunnerStatus::Online | RunnerStatus::Offline => {}
         }
 
         let accepted = session.state()?.accepted.clone();
         for (lease_id, generation) in accepted {
-            let lease = self.bound_lease(&session.runner_id, &lease_id, generation)?;
+            let lease = self
+                .bound_lease(&session.runner_id, &lease_id, generation)
+                .await?;
             if lease.state == LeaseState::CancelRequested
                 && !session
                     .state()?
@@ -531,14 +566,16 @@ impl RunnerControlService {
         let _offer_guard = session.offer_lock.lock().await;
         {
             let state = session.state()?;
-            if !state.offered.is_empty() || !state.accepted.is_empty() {
+            if !state.offered.is_empty() || state.accepted.len() >= session.max_concurrent_wasm_jobs
+            {
                 return Ok(());
             }
         }
         let leases = self
             .inner
             .control_plane
-            .open_leases_for_runner(&session.runner_id, MAX_ACTIVE_LEASES_PER_RUNNER + 1)
+            .open_runner_execution_leases(&session.runner_id, MAX_ACTIVE_LEASES_PER_RUNNER)
+            .await
             .map_err(control_plane_status)?;
         let existing = leases.into_iter().find(|lease| {
             lease.state == LeaseState::Offered && now_unix_ms < lease.accept_by_unix_ms
@@ -548,7 +585,8 @@ impl RunnerControlService {
             None => match self
                 .inner
                 .control_plane
-                .offer_next_lease_for_runner(&session.runner_id, now_unix_ms)
+                .offer_next_runner_lease(&session.runner_id, now_unix_ms)
+                .await
                 .map_err(control_plane_status)?
             {
                 Some(lease) => lease,
@@ -559,11 +597,13 @@ impl RunnerControlService {
             .inner
             .control_plane
             .signed_capsule_for_lease(&lease.id)
+            .await
             .map_err(control_plane_status)?;
         let hard_deadline = self
             .inner
             .control_plane
-            .lease_hard_deadline_unix_ms(&lease.id)
+            .runner_execution_lease_hard_deadline(&lease.id)
+            .await
             .map_err(control_plane_status)?;
         let offer = lease_offer(
             &lease,
@@ -590,7 +630,7 @@ impl RunnerControlService {
         result
     }
 
-    pub(super) fn bound_lease(
+    pub(super) async fn bound_lease(
         &self,
         runner_id: &str,
         lease_id: &str,
@@ -600,6 +640,7 @@ impl RunnerControlService {
             .inner
             .control_plane
             .recovery_state()
+            .await
             .map_err(control_plane_status)?;
         if recovery.safe_mode {
             return Err(Status::unavailable(
@@ -609,7 +650,8 @@ impl RunnerControlService {
         let lease = self
             .inner
             .control_plane
-            .lease(lease_id)
+            .runner_execution_lease(lease_id)
+            .await
             .map_err(control_plane_status)?;
         if lease.runner_id != runner_id {
             return Err(Status::permission_denied("lease belongs to another runner"));
@@ -624,7 +666,7 @@ impl RunnerControlService {
         Ok(lease)
     }
 
-    pub(super) fn require_declared_attempt_step(
+    pub(super) async fn require_declared_attempt_step(
         &self,
         lease: &Lease,
         job_attempt: u32,
@@ -634,6 +676,7 @@ impl RunnerControlService {
             .inner
             .control_plane
             .signed_capsule_for_lease(&lease.id)
+            .await
             .map_err(control_plane_status)?;
         validate_capsule_binding(lease, &signed_capsule)?;
         let capsule: ExecutionCapsule =
