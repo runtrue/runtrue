@@ -105,7 +105,7 @@ import sys
 
 model = json.loads(pathlib.Path(sys.argv[1]).read_text())
 services = model["services"]
-required = {"server", "frontend", "traefik", "autoscaler"}
+required = {"server", "traefik", "autoscaler"}
 if set(services) != required:
     raise SystemExit(f"unexpected default services: {set(services)!r}")
 for name, service in services.items():
@@ -115,17 +115,12 @@ for name, service in services.items():
         raise SystemExit(f"{name} received the Docker socket")
 if "/var/run/docker.sock" not in json.dumps(services["autoscaler"]):
     raise SystemExit("autoscaler is missing the Docker socket")
-if services["server"].get("ports") or services["frontend"].get("ports"):
+if services["server"].get("ports"):
     raise SystemExit("Traefik overlay retained direct application ports")
-if services["frontend"].get("build"):
-    raise SystemExit("Runtrue core must not build the GitHub Actions UI")
-frontend_image = services["frontend"].get("image", "")
-frontend_repository = "ghcr.io/runtrue/github-actions-frontend-ui"
-if not (
-    frontend_image.startswith(f"{frontend_repository}:")
-    or frontend_image.startswith(f"{frontend_repository}@sha256:")
-):
-    raise SystemExit(f"unexpected GitHub Actions UI image: {frontend_image!r}")
+if "frontend" in services:
+    raise SystemExit("Runtrue core must not define a product frontend service")
+if "control" not in services["traefik"].get("networks", {}):
+    raise SystemExit("Traefik must reach the control server over the internal network")
 published = {port["published"] for port in services["traefik"].get("ports", [])}
 if published != {"80", "443"}:
     raise SystemExit(f"unexpected public ports: {published!r}")

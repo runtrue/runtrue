@@ -72,41 +72,6 @@ services:
     networks:
       - control
 
-  frontend:
-    <<: *runtrue-security
-    # The GitHub Actions UI is independently versioned and owned by
-    # runtrue/github-actions-frontend. Core never builds UI source.
-    image: "${RUNTRUE_GITHUB_ACTIONS_UI_IMAGE:-ghcr.io/runtrue/github-actions-frontend-ui@sha256:477eb289f97ca6535761f75b41f9ae57278edb3f1aa94e2ff47ac33869c13241}"
-    environment:
-      BACKEND_ORIGIN: http://server:8080
-      PORT: "3000"
-    ports:
-      - "127.0.0.1:${RUNTRUE_WEB_PORT:-3000}:3000"
-    expose:
-      - "3000"
-    tmpfs:
-      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
-    healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - "fetch('http://127.0.0.1:3000/frontend-healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
-    restart: unless-stopped
-    stop_grace_period: 15s
-    pids_limit: 128
-    mem_limit: 256m
-    cpus: 0.5
-    depends_on:
-      server:
-        condition: service_healthy
-    networks:
-      - control
-
   backup:
     <<: *runtrue-security
     profiles:

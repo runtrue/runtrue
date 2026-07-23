@@ -17,8 +17,6 @@ mod reusable;
 #[path = "strict_json.rs"]
 mod strict_json;
 
-#[cfg(feature = "github-actions")]
-use commands::import_workflow;
 use commands::{
     bisim, capsule, compare_capsule, doctor, init, replay, validate, write_atomic_output,
 };
@@ -67,8 +65,6 @@ impl Cli {
             Command::CompareCapsule(args) => args.json,
             Command::Bisim(args) => args.json,
             Command::Doctor(args) => args.json,
-            #[cfg(feature = "github-actions")]
-            Command::Import(args) => args.wants_json(),
             Command::Submit(args) => args.json,
             Command::Seal(args) => args.wants_json(),
             Command::Secrets(args) => args.wants_json(),
@@ -95,9 +91,6 @@ enum Command {
     Bisim(BisimArgs),
     /// Inspect local configuration, security boundaries, and backend availability.
     Doctor(DoctorArgs),
-    /// Import a foreign workflow through a fail-closed compatibility front end.
-    #[cfg(feature = "github-actions")]
-    Import(ImportArgs),
     /// Compile locally, prove exact remote capsule parity, and create a remote run.
     Submit(remote::SubmitArgs),
     /// Approve or deny an exact Capsule and manage its Seal evidence.
@@ -215,49 +208,6 @@ struct DoctorArgs {
     json: bool,
 }
 
-#[cfg(feature = "github-actions")]
-#[derive(Debug, Args)]
-struct ImportArgs {
-    #[command(subcommand)]
-    source: ImportSource,
-}
-
-#[cfg(feature = "github-actions")]
-impl ImportArgs {
-    const fn wants_json(&self) -> bool {
-        match &self.source {
-            ImportSource::Github(args) => args.json,
-        }
-    }
-}
-
-#[cfg(feature = "github-actions")]
-#[derive(Debug, Subcommand)]
-enum ImportSource {
-    /// Analyze and import a GitHub Actions workflow.
-    Github(GithubImportArgs),
-}
-
-#[cfg(feature = "github-actions")]
-#[derive(Debug, Args)]
-struct GithubImportArgs {
-    /// GitHub Actions workflow YAML file.
-    #[arg(value_name = "WORKFLOW")]
-    workflow: PathBuf,
-    /// Write compatible native Runtrue YAML to this path.
-    #[arg(long, value_name = "PATH")]
-    output: Option<PathBuf>,
-    /// Write the machine-readable compatibility report to this path.
-    #[arg(long, visible_alias = "report", value_name = "PATH")]
-    report_output: Option<PathBuf>,
-    /// Write exact image lock requirements to this path when services are mapped.
-    #[arg(long, value_name = "PATH")]
-    lock_output: Option<PathBuf>,
-    /// Emit the complete import result as machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
 #[derive(Debug, Args)]
 struct ContextArgs {
     /// Workflow YAML file. When omitted, exactly one workflow must be discoverable.
@@ -312,8 +262,6 @@ fn execute(cli: Cli) -> Result<u8, CliError> {
         Command::CompareCapsule(args) => compare_capsule(&workspace, args),
         Command::Bisim(args) => bisim(&workspace, args),
         Command::Doctor(args) => doctor(&workspace, args),
-        #[cfg(feature = "github-actions")]
-        Command::Import(args) => import_workflow(&workspace, args),
         Command::Submit(args) => remote::execute(&workspace, args),
         Command::Seal(args) => approve::execute(&workspace, args),
         Command::Secrets(args) => {

@@ -12,6 +12,39 @@ case "$host" in
     ;;
 esac
 
+upstream=${RUNTRUE_EDGE_UPSTREAM:-http://server:8080}
+case "$upstream" in
+  http://*) ;;
+  *) echo 'traefik: RUNTRUE_EDGE_UPSTREAM must be an internal HTTP service origin' >&2; exit 1 ;;
+esac
+upstream_authority=${upstream#http://}
+upstream_host=${upstream_authority%:*}
+upstream_port=${upstream_authority##*:}
+case "$upstream_host" in
+  ''|.*|*.|*[!a-z0-9.-]*)
+    echo 'traefik: RUNTRUE_EDGE_UPSTREAM has an invalid service name' >&2
+    exit 1
+    ;;
+esac
+case "$upstream_port" in
+  ''|*[!0-9]*)
+    echo 'traefik: RUNTRUE_EDGE_UPSTREAM has an invalid port' >&2
+    exit 1
+    ;;
+esac
+
+health_path=${RUNTRUE_EDGE_HEALTH_PATH:-/healthz}
+case "$health_path" in
+  /*) ;;
+  *) echo 'traefik: RUNTRUE_EDGE_HEALTH_PATH must be an absolute path' >&2; exit 1 ;;
+esac
+case "$health_path" in
+  *[!A-Za-z0-9._~/-]*)
+    echo 'traefik: RUNTRUE_EDGE_HEALTH_PATH contains an unsafe character' >&2
+    exit 1
+    ;;
+esac
+
 cat > /run/runtrue-traefik/dynamic.yml <<EOF
 http:
   routers:
@@ -31,9 +64,9 @@ http:
     runtrue:
       loadBalancer:
         servers:
-          - url: http://frontend:3000
+          - url: $upstream
         healthCheck:
-          path: /frontend-healthz
+          path: $health_path
           interval: 10s
           timeout: 3s
   middlewares:

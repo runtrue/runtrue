@@ -1,20 +1,18 @@
+mod atomic_output;
 mod bisim;
 mod capsule;
 mod compare;
 mod doctor;
-mod import;
 mod init;
 mod replay;
 mod run;
 mod validate;
 
+pub(super) use atomic_output::write_atomic_output;
 pub(super) use bisim::bisim;
 pub(super) use capsule::capsule;
 pub(super) use compare::compare_capsule;
 pub(super) use doctor::doctor;
-#[cfg(feature = "github-actions")]
-pub(super) use import::import_workflow;
-pub(super) use import::write_atomic_output;
 pub(super) use init::init;
 pub(super) use replay::replay;
 pub(super) use run::{run, validate_local_capsule};

@@ -3056,7 +3056,6 @@ dependencies = [
  "runtrue-compiler",
  "runtrue-engine",
  "runtrue-expression",
- "runtrue-gha-import",
  "runtrue-lock",
  "runtrue-model",
  "runtrue-replay",

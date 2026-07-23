@@ -1,11 +1,4 @@
 use super::super::CliError;
-#[cfg(feature = "github-actions")]
-use super::super::{
-    absolute, display_path, print_json, read_bounded_file, GithubImportArgs, ImportArgs,
-    ImportSource, EXIT_OK, EXIT_VALIDATION,
-};
-#[cfg(feature = "github-actions")]
-use runtrue_gha_import::{import_github_actions, ImportResult, MAX_GITHUB_WORKFLOW_BYTES};
 use rustix::{
     fd::OwnedFd,
     fs::{
@@ -20,129 +13,6 @@ use std::{
     io::{self, Write as _},
     path::{Component, Path, PathBuf},
 };
-
-#[cfg(feature = "github-actions")]
-pub(crate) fn import_workflow(workspace: &Path, args: ImportArgs) -> Result<u8, CliError> {
-    match args.source {
-        ImportSource::Github(args) => import_github(workspace, args),
-    }
-}
-
-#[cfg(feature = "github-actions")]
-fn import_github(workspace: &Path, args: GithubImportArgs) -> Result<u8, CliError> {
-    let input = absolute(workspace, args.workflow.clone());
-    let bytes = read_bounded_file(
-        &input,
-        u64::try_from(MAX_GITHUB_WORKFLOW_BYTES).expect("GitHub workflow limit fits u64"),
-        "GitHub Actions workflow",
-    )?;
-    let source = String::from_utf8(bytes).map_err(|source| CliError::Utf8 {
-        path: input.clone(),
-        source,
-    })?;
-    let result = import_github_actions(&source, display_path(workspace, &input))?;
-
-    let report_output = args
-        .report_output
-        .as_ref()
-        .map(|path| absolute(workspace, path.clone()));
-    let native_output = args.output.as_ref().and_then(|path| {
-        result
-            .native_yaml
-            .as_ref()
-            .map(|_| absolute(workspace, path.clone()))
-    });
-    let lock_output = args.lock_output.as_ref().and_then(|path| {
-        result
-            .lockfile_toml
-            .as_ref()
-            .map(|_| absolute(workspace, path.clone()))
-    });
-    let destinations = [
-        report_output.as_deref(),
-        native_output.as_deref(),
-        lock_output.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    ensure_distinct_output_paths(&destinations)?;
-
-    let report_bytes = if report_output.is_some() {
-        let mut report = serde_json::to_vec_pretty(&result.report)?;
-        report.push(b'\n');
-        Some(report)
-    } else {
-        None
-    };
-
-    // Prepare every requested file before publishing any of them. The native
-    // workflow is committed last, so any staging/publication failure leaves no
-    // newly imported workflow that is missing its exact lock requirements.
-    let prepared_report = report_output
-        .as_deref()
-        .zip(report_bytes.as_deref())
-        .map(|(path, bytes)| prepare_atomic_output(path, bytes))
-        .transpose()?;
-    let prepared_lock = lock_output
-        .as_deref()
-        .zip(result.lockfile_toml.as_deref())
-        .map(|(path, lockfile)| prepare_atomic_output(path, lockfile.as_bytes()))
-        .transpose()?;
-    let prepared_native = native_output
-        .as_deref()
-        .zip(result.native_yaml.as_deref())
-        .map(|(path, yaml)| prepare_atomic_output(path, yaml.as_bytes()))
-        .transpose()?;
-
-    if let Some(prepared) = prepared_lock {
-        prepared.commit()?;
-    }
-    if let Some(prepared) = prepared_report {
-        prepared.commit()?;
-    }
-    if let Some(prepared) = prepared_native {
-        prepared.commit()?;
-    }
-
-    if args.json {
-        print_json(&result)?;
-    } else {
-        print_human_import(workspace, &args, &result);
-    }
-    Ok(if result.report.compatible {
-        EXIT_OK
-    } else {
-        EXIT_VALIDATION
-    })
-}
-
-#[cfg(feature = "github-actions")]
-fn print_human_import(workspace: &Path, args: &GithubImportArgs, result: &ImportResult) {
-    print!("{}", result.report.render_human());
-    let Some(yaml) = &result.native_yaml else {
-        println!("\nNo native workflow was emitted because blocking findings remain.");
-        return;
-    };
-    if let Some(output) = &args.output {
-        println!(
-            "\nNative workflow: {}",
-            display_path(workspace, &absolute(workspace, output.clone()))
-        );
-    } else {
-        println!("\nNative workflow YAML:\n{yaml}");
-    }
-    if let Some(lockfile) = &result.lockfile_toml {
-        if let Some(lock_output) = &args.lock_output {
-            println!(
-                "Lock requirements: {}",
-                display_path(workspace, &absolute(workspace, lock_output.clone()))
-            );
-        } else {
-            println!("Exact lock requirements:\n{lockfile}");
-        }
-    }
-}
 
 struct PreparedAtomicOutput {
     path: PathBuf,
@@ -188,22 +58,6 @@ impl Drop for PreparedAtomicOutput {
             );
         }
     }
-}
-
-#[cfg(feature = "github-actions")]
-fn ensure_distinct_output_paths(paths: &[&Path]) -> Result<(), CliError> {
-    let mut normalized = Vec::with_capacity(paths.len());
-    for path in paths {
-        let identity = normalized_absolute_output(path)?;
-        if normalized.contains(&identity) {
-            return Err(CliError::UnsafeOutputPath {
-                path: (*path).to_path_buf(),
-                reason: "import output destinations must be distinct",
-            });
-        }
-        normalized.push(identity);
-    }
-    Ok(())
 }
 
 fn prepare_atomic_output(path: &Path, bytes: &[u8]) -> Result<PreparedAtomicOutput, CliError> {

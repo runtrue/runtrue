@@ -42,9 +42,6 @@ pub(super) enum CliError {
     },
     #[error(transparent)]
     Compile(#[from] runtrue_compiler::CompileError),
-    #[cfg(feature = "github-actions")]
-    #[error(transparent)]
-    Import(#[from] runtrue_gha_import::ImportError),
     #[error(transparent)]
     Submit(#[from] remote::SubmitError),
     #[error("invalid .runtrue.lock: {0}")]
@@ -88,8 +85,6 @@ impl CliError {
             Self::AmbiguousWorkflows(_) => "ambiguous_workflows",
             Self::EventJson { .. } => "invalid_event_json",
             Self::Compile(_) => "workflow_invalid",
-            #[cfg(feature = "github-actions")]
-            Self::Import(_) => "github_import_invalid",
             Self::Submit(error) => error.code(),
             Self::Lock(_) => "invalid_lockfile",
             Self::ReusableHydration(_) => "reusable_workflow_source_invalid",
@@ -107,8 +102,6 @@ impl CliError {
 
     pub(super) const fn exit_code(&self) -> u8 {
         match self {
-            #[cfg(feature = "github-actions")]
-            Self::Import(_) => EXIT_VALIDATION,
             Self::Compile(_)
             | Self::Submit(_)
             | Self::Lock(_)

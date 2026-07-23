@@ -28,12 +28,6 @@ pub(crate) fn example_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/workflows/secure-ci.yaml")
 }
 
-pub(crate) fn github_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/github-actions")
-        .join(name)
-}
-
 #[derive(Debug)]
 pub(crate) struct CapturedHttpRequest {
     pub(crate) path: String,
