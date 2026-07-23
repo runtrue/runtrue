@@ -10,7 +10,8 @@ services:
     image: docker.io/library/traefik:v3.7.1@sha256:6b9cbca6fac42ab0075f5437d8dc1685cfd188626d8d515839ea94f8b6271c42
     user: "${RUNTRUE_RUNTIME_UID:?run deploy/bootstrap.sh first}:${RUNTRUE_RUNTIME_GID:?run deploy/bootstrap.sh first}"
     entrypoint:
-      - /usr/local/bin/runtrue-traefik-entrypoint
+      - /bin/sh
+      - /var/lib/traefik/entrypoint.sh
     command:
       - --api.dashboard=false
       - --global.checknewversion=false
@@ -35,10 +36,6 @@ services:
       - "80:8080"
       - "443:8443"
     volumes:
-      - type: bind
-        source: ./traefik-entrypoint.sh
-        target: /usr/local/bin/runtrue-traefik-entrypoint
-        read_only: true
       - type: bind
         source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/traefik"
         target: /var/lib/traefik

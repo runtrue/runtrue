@@ -9,6 +9,7 @@ readonly RUNNER_COMPOSE_FILE="${SCRIPT_DIR}/compose.runner-tls.yml"
 readonly GITHUB_COMPOSE_FILE="${SCRIPT_DIR}/compose.github-app.yml"
 readonly TRAEFIK_COMPOSE_FILE="${SCRIPT_DIR}/compose.traefik.yml"
 readonly AUTOSCALER_COMPOSE_FILE="${SCRIPT_DIR}/compose.autoscaler.yml"
+readonly TRAEFIK_ENTRYPOINT_SOURCE="${SCRIPT_DIR}/traefik-entrypoint.sh"
 
 STATE_DIR="${SCRIPT_DIR}/state"
 WITH_RUNNER_TLS=false
@@ -93,7 +94,7 @@ if "$WITH_AUTOSCALER" && ! "$WITH_RUNNER_TLS"; then
   die '--with-autoscaler requires --with-runner-tls'
 fi
 
-for command in docker openssl realpath stat find install mktemp ln cmp; do
+for command in docker openssl realpath stat find install mktemp ln cmp mv; do
   command -v "$command" >/dev/null 2>&1 || die "required command not found: ${command}"
 done
 
@@ -235,6 +236,27 @@ create_empty_file() {
   TEMP_PATHS+=("$temporary")
   : >"$temporary"
   publish_new_file "$temporary" "$destination"
+}
+
+sync_private_file() {
+  local source=$1 destination=$2 temporary
+  reject_symlink_components "$source"
+  [[ -f "$source" && ! -L "$source" ]] || die "managed source file is missing or unsafe: ${source}"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    validate_private_file "$destination"
+    cmp -s -- "$source" "$destination" && return
+  fi
+  temporary=$(new_temporary_file "$(dirname -- "$destination")" "$(basename -- "$destination")")
+  TEMP_PATHS+=("$temporary")
+  install -m 0600 -- "$source" "$temporary"
+  if ((EUID == 0)); then
+    chown "${RUNTIME_UID}:${RUNTIME_GID}" -- "$temporary"
+  fi
+  if [[ -e "$destination" ]]; then
+    mv -fT -- "$temporary" "$destination"
+  else
+    publish_new_file "$temporary" "$destination"
+  fi
 }
 
 create_autoscaler_template() {
@@ -513,6 +535,7 @@ else
   fi
   if "$WITH_TRAEFIK"; then
     create_empty_file "${STATE_DIR}/traefik/acme.json"
+    sync_private_file "$TRAEFIK_ENTRYPOINT_SOURCE" "${STATE_DIR}/traefik/entrypoint.sh"
   fi
   write_compose_environment
   if "$WITH_RUNNER_TLS"; then
@@ -531,6 +554,9 @@ if "$WITH_GITHUB_APP"; then
 fi
 if "$WITH_TRAEFIK"; then
   validate_private_file "${STATE_DIR}/traefik/acme.json"
+  validate_private_file "${STATE_DIR}/traefik/entrypoint.sh"
+  cmp -s -- "$TRAEFIK_ENTRYPOINT_SOURCE" "${STATE_DIR}/traefik/entrypoint.sh" ||
+    die 'managed Traefik entrypoint is stale; rerun bootstrap without --check-only'
 fi
 if "$WITH_RUNNER_TLS"; then
   validate_tls_material

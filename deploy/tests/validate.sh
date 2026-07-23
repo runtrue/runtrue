@@ -121,6 +121,8 @@ if "frontend" in services:
     raise SystemExit("Runtrue core must not define a product frontend service")
 if "control" not in services["traefik"].get("networks", {}):
     raise SystemExit("Traefik must reach the control server over the internal network")
+if services["traefik"].get("entrypoint") != ["/bin/sh", "/var/lib/traefik/entrypoint.sh"]:
+    raise SystemExit("Traefik must execute its managed state entrypoint through /bin/sh")
 published = {port["published"] for port in services["traefik"].get("ports", [])}
 if published != {"80", "443"}:
     raise SystemExit(f"unexpected public ports: {published!r}")

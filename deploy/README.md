@@ -23,14 +23,7 @@ docker compose \
   up -d --build --wait
 ```
 
-The API listens on `127.0.0.1:8080` and the frontend on
-`127.0.0.1:3000`.
-
-The frontend image is owned and released by
-[`runtrue/github-actions-frontend`](https://github.com/runtrue/github-actions-frontend).
-Runtrue core does not contain or build its source. Set
-`RUNTRUE_GITHUB_ACTIONS_UI_IMAGE` to an exact tag or digest to override the
-default image.
+The control API listens on `127.0.0.1:8080`.
 
 Check the deployment:
 
@@ -41,7 +34,6 @@ docker compose \
   ps
 
 curl --fail http://127.0.0.1:8080/healthz
-curl --fail http://127.0.0.1:3000/frontend-healthz
 ```
 
 ## Optional Compose files
