@@ -126,10 +126,12 @@ Data, delivery, and operations:
   out-of-band roots, signed metadata, SBOM/provenance evidence, and exact target
   verification. Automated publication remains disabled until it runs on
   Runtrue. See the [release runbook](docs/operations/releases.md).
-- Pinned Rust 1.94, Go 1.24, and Node.js 22.17 verification gates for formatting,
-  all targets, workspace and component tests, Clippy, schema/API/migration
-  conformance, deployment validation, dependency auditing, and every shipped
-  image build.
+- Pinned Rust 1.94 and Go 1.24 verification gates for formatting, all targets,
+  workspace and component tests, Clippy, schema/API/migration conformance,
+  deployment validation, dependency auditing, and every core image build.
+- The GitHub Actions workflow adapter and browser UI are independently owned by
+  [`runtrue/github-actions-frontend`](https://github.com/runtrue/github-actions-frontend).
+  Core consumes their versioned package and OCI image without owning UI source.
 
 ## Build and verify
 
@@ -145,8 +147,6 @@ python3 tests/conformance/check_schema.py
 python3 tests/conformance/check_openapi_routes.py
 python3 tests/conformance/check_migrations.py
 deploy/tests/validate.sh
-
-npm --prefix web test
 
 (cd components/github-signer && go test ./...)
 ```

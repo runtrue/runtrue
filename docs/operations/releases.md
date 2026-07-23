@@ -13,8 +13,8 @@ is manual unless the release decision explicitly authorizes that process.
 ## Source and verification gates
 
 Start from a clean checkout of the exact proposed commit. Use Rust 1.94.0, Go
-1.24 or newer, Node.js 22.17.0, the locked dependency graph, and a controlled
-builder with no ambient publication credentials.
+1.24 or newer, the locked dependency graph, and a controlled builder with no
+ambient publication credentials.
 
 ```bash
 cargo +1.94.0 fetch --locked
@@ -28,22 +28,21 @@ python3 tests/conformance/check_schema.py
 python3 tests/conformance/check_openapi_routes.py
 python3 tests/conformance/check_migrations.py
 deploy/tests/validate.sh
-npm --prefix web test
 (cd components/github-signer && go test ./...)
 cargo +1.94.0 audit
 ```
 
-The exact GitHub Actions frontend commit selected by `Cargo.toml` must also
-pass that repository's locked formatting, test, and strict Clippy gates in a
-clean checkout. Retain those results with the release evidence; the core gate
-verifies the exact revision and integrated compositions but does not execute
-the external dependency's test suite.
+The exact GitHub Actions frontend commit selected by `Cargo.toml` and the exact
+UI image selected by the deployment must also pass that repository's locked
+formatting, Rust and browser tests, strict Clippy gates, and image build in a
+clean checkout. Retain those results with the release evidence; core gates
+verify the selected artifacts and integration but do not execute the external
+repository's test suite.
 
 Also build every shipped container definition from its pinned base and rerun
 the update trust and rollback acceptance suite:
 
 ```bash
-docker build --file web/Containerfile --tag runtrue/web:verify web
 docker build --tag runtrue/runner-node:verify images/runner-node
 cargo +1.94.0 test --locked -p runtrue-update -p runtrue-update-cli
 ```
@@ -66,9 +65,9 @@ Build the six Rust binaries for `x86_64-unknown-linux-gnu` and
 Package deterministic per-binary archives with normalized timestamps,
 ownership, ordering, and gzip headers. Generate a dependency-complete
 CycloneDX SBOM and canonical provenance statement for every archive. Build the
-web and runner-node multi-architecture OCI layouts with embedded SBOM and
-provenance attestations. Create `COMPONENTS.json` that binds every independently
-versioned component to the exact source commit and proposed tag.
+runner-node multi-architecture OCI layout with embedded SBOM and provenance
+attestations. Record the independently released GitHub Actions UI image digest
+in `COMPONENTS.json` alongside every core component's exact source and tag.
 
 The expected evidence set contains 40 build files before `SHA256SUMS` and 41
 after it. Recompute checksums from the exact collected bytes under `LC_ALL=C`.

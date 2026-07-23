@@ -24,7 +24,9 @@ The GitHub Actions frontend owns:
 - translation to native Runtrue workflow YAML;
 - generated lockfile material and compatibility reports;
 - `.github/workflows` discovery metadata; and
-- adapter fixtures, security tests, and release notes.
+- adapter fixtures, security tests, and release notes;
+- the GitHub Actions browser UI and its same-origin backend proxy; and
+- the independently versioned browser UI OCI image.
 
 The trusted planner depends only on `runtrue-workflow-frontend`. It receives a
 validated registry from the server composition root. The runtime engine,
@@ -35,9 +37,10 @@ The server and CLI enable the optional `github-actions` feature by default.
 Both must continue to compile with `--no-default-features`, which is the
 native-only composition and the proof that the adapter is replaceable.
 
-Moving this frontend does not move the GitHub SCM provider or the standalone
-browser application. Those are separate integration and presentation
-boundaries.
+Moving this frontend does not move the GitHub SCM provider, browser-facing API,
+authentication, webhook handling, or persistence out of core. The external
+repository owns presentation and protocol adaptation; core remains the trusted
+system of record and execution boundary.
 
 ## Compatibility and approval identity
 

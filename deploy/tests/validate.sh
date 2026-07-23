@@ -117,6 +117,15 @@ if "/var/run/docker.sock" not in json.dumps(services["autoscaler"]):
     raise SystemExit("autoscaler is missing the Docker socket")
 if services["server"].get("ports") or services["frontend"].get("ports"):
     raise SystemExit("Traefik overlay retained direct application ports")
+if services["frontend"].get("build"):
+    raise SystemExit("Runtrue core must not build the GitHub Actions UI")
+frontend_image = services["frontend"].get("image", "")
+frontend_repository = "ghcr.io/runtrue/github-actions-frontend-ui"
+if not (
+    frontend_image.startswith(f"{frontend_repository}:")
+    or frontend_image.startswith(f"{frontend_repository}@sha256:")
+):
+    raise SystemExit(f"unexpected GitHub Actions UI image: {frontend_image!r}")
 published = {port["published"] for port in services["traefik"].get("ports", [])}
 if published != {"80", "443"}:
     raise SystemExit(f"unexpected public ports: {published!r}")

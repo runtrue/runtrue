@@ -184,7 +184,8 @@ The UI and CLI must explain:
 - PostgreSQL and S3-compatible storage options.
 - High-speed local and distributed cache architecture.
 - Artifact provenance and signature verification.
-- Server-rendered web UI, REST API, runner gRPC API, CLI, and audit log.
+- Independently versioned browser UI, REST API, runner gRPC API, CLI, and audit
+  log.
 
 ### 4.2 Planned follow-on scope
 

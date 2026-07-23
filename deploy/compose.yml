@@ -74,13 +74,9 @@ services:
 
   frontend:
     <<: *runtrue-security
-    image: "${RUNTRUE_IMAGE_REPOSITORY:-local/runtrue}-frontend:${RUNTRUE_IMAGE_TAG:-0.1.0}"
-    build:
-      context: ../web
-      dockerfile: Containerfile
-      args:
-        RUNTRUE_VERSION: "${RUNTRUE_IMAGE_TAG:-0.1.0}"
-        RUNTRUE_REVISION: "${RUNTRUE_IMAGE_REVISION:-unknown}"
+    # The GitHub Actions UI is independently versioned and owned by
+    # runtrue/github-actions-frontend. Core never builds UI source.
+    image: "${RUNTRUE_GITHUB_ACTIONS_UI_IMAGE:-ghcr.io/runtrue/github-actions-frontend-ui@sha256:477eb289f97ca6535761f75b41f9ae57278edb3f1aa94e2ff47ac33869c13241}"
     environment:
       BACKEND_ORIGIN: http://server:8080
       PORT: "3000"
