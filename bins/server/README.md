@@ -8,6 +8,27 @@ public; workload-token minting is available only through the runner mTLS
 broker, which validates the exact active execution lease, job, step, capsule,
 audience, and fencing values.
 
+## Product-owned single-process distributions
+
+The `runtrue-server` library exposes `ServerComposition` and
+`startup::run_with_composition`. A product repository can use those neutral
+assembly points to build one executable containing this backend and its
+in-process SCM, GitHub lifecycle, scheduler-maintenance, runner-control, and
+optional autoscaler workers. The product may statically supply:
+
+- a validated `WorkflowFrontendComposition`; and
+- a same-origin Axum router decorator for product-owned assets or routes.
+
+Core's `runtrue-server` binary always uses `ServerComposition::core()`, whose
+external workflow-frontend registry is empty and whose HTTP decorator is the
+identity function. Concrete workflow adapters and browser assets therefore
+remain owned, versioned, and built by their external product repository.
+
+Execution runners remain separate by design because they execute untrusted
+workloads. A low-environment deployment may run one local runner beside the
+single-process control plane without placing that workload inside the trusted
+server process.
+
 Implemented routes:
 
 - `GET /healthz` and `GET /readyz`
@@ -53,9 +74,9 @@ and other planner inputs through bounded Git object reads at the full commit IDs
 already present in the authenticated event. Mirror refresh is an independent
 operator responsibility.
 
-With the `github-actions` feature, workflows may reference a root action as
-`owner/repository@<40-character lowercase commit>`. The worker accepts only a
-Docker action whose exact commit contains one strict `action.yml` or
+An externally composed workflow frontend may request a root repository action
+as `owner/repository@<40-character lowercase commit>`. The worker accepts only
+a Docker action whose exact commit contains one strict `action.yml` or
 `action.yaml`; tags, branches, subdirectory actions, JavaScript actions, and
 composite actions remain rejected. Authorization comes from the tenant's live
 GitHub App installation catalog, so the action repository does not need to be

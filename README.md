@@ -129,9 +129,8 @@ Data, delivery, and operations:
 - Pinned Rust 1.94 and Go 1.24 verification gates for formatting, all targets,
   workspace and component tests, Clippy, schema/API/migration conformance,
   deployment validation, dependency auditing, and every core image build.
-- The GitHub Actions workflow adapter and browser UI are independently owned by
-  [`runtrue/github-actions-frontend`](https://github.com/runtrue/github-actions-frontend).
-  Core consumes their versioned package and OCI image without owning UI source.
+- Concrete workflow adapters and browser applications are independently
+  deployed. Core neither selects nor links a frontend package or UI image.
 
 ## Build and verify
 
@@ -184,73 +183,20 @@ cannot enforce filesystem or network denial against them. `--allow-native` is
 an explicit acknowledgement, not an isolation mechanism; use only reviewed
 workflows on a trusted or disposable host.
 
-## GitHub Actions import
+## Provider workflow frontends
 
-The released server and CLI composition enables the `github-actions` frontend
-feature by default. A native-only composition can omit the adapter with
-`--no-default-features`; both compositions are required to compile.
-The adapter is selected from
-[`runtrue/github-actions-frontend`](https://github.com/runtrue/github-actions-frontend)
-at the exact revision recorded in `Cargo.toml`; its own repository runs the
-adapter's locked formatting, test, and strict Clippy gates.
+Core does not select or link a GitHub Actions workflow adapter. Provider
+distributions translate their source format into Runtrue's neutral workflow
+contract and inject the validated frontend registry through the server
+composition API. Import commands, compatibility policy, adapter fixtures, and
+browser assets are owned and versioned by that distribution.
 
-Analyze a workflow and emit native YAML only if no blocking compatibility
-finding remains:
-
-```bash
-cargo run -p runtrue-cli -- import github path/to/github-workflow.yml \
-  --output .runtrue/workflows/ci.yaml \
-  --report-output runtrue-compatibility.json \
-  --lock-output .runtrue.lock
-```
-
-Unsafe interpolation, `pull_request_target` trust conflicts, mutable action or
-service references, raw secret transfer, host mounts, and unsupported GitHub
-runtime behavior are reported rather than silently approximated.
-
-The importer supports the common checkout-and-run shape. `actions/checkout`
-materializes the exact authenticated event commit as a verified source snapshot
-before any step runs; it does not persist provider credentials or trust a
-pull-request-controlled remote. Static Linux `run` steps execute with `bash` or
-`sh`. A digest-pinned Node container action can request a short-lived provider
-credential and publish a commit status, check run, or pull-request review using
-only the permissions declared by the workflow:
-
-```yaml
-on: pull_request
-
-permissions:
-  contents: read
-  pull-requests: write
-  checks: write
-  statuses: write
-
-jobs:
-  review:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - run: ./scripts/build.sh
-        shell: bash
-      - uses: docker://registry.example/runtrue/review@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-        with:
-          github-token: ${{ github.token }}
-```
-
-The credential is delivered through a private step-scoped file and the SCM
-egress broker, never through the environment. Shell steps do not receive it.
-
-Runner checkout materialization keeps verified source manifests and blobs in a
-bounded, persistent local CAS. Runners advertise only complete source snapshots,
-and scheduling treats the signed Capsule's source-tree digest as a soft locality
-preference. Every run still obtains a short-lived, lease-bound source ticket;
-local hits avoid object transfer but never bypass authorization. Workspaces are
-created independently from immutable cached bytes, so jobs never share a
-writable checkout.
-
-Requested report, lock, and workflow files must use distinct non-symlink
-paths. They are fully staged before publication, with the native workflow
-published last so a failed lock/report write cannot leave a partial import.
+The runner still delivers any approved provider credential through a private
+step-scoped file and the SCM egress broker, never through the environment.
+Shell steps do not receive it. Checkout materialization keeps verified source
+manifests and blobs in a bounded persistent local CAS; every run still obtains
+a short-lived, lease-bound source ticket, and jobs never share a writable
+checkout.
 
 ## Remote submission with exact parity
 

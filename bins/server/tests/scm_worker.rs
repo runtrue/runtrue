@@ -3,55 +3,52 @@ use runtrue_control_plane::{
     ScmCheckPublishTask, ScmInstallationRecord, ScmRepositoryLinkRecord, ScmSourceFetchState,
     SCM_EVENT_RECOVERY_WINDOW_MS,
 };
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 use runtrue_control_plane::{
     GitHubAccountKind as ControlPlaneGitHubAccountKind, GitHubInstallationRecord,
     GitHubRepositorySelection as ControlPlaneGitHubRepositorySelection,
     ReconcileGitHubInstallation, TenantIdentityRecord,
 };
-#[cfg(feature = "github-actions")]
-use runtrue_gha_import::GithubActionsFrontend;
 use runtrue_git::{GitLimits, GitRepository};
 use runtrue_model::ContentDigest;
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 use runtrue_policy::{ApprovalDecision, ApprovalKind, ApprovalStatus, Decision};
 use runtrue_scm::{
     ActorIdentity, CheckRunRequest, EventEnvelope, EventType, GitRevision, ProviderKind,
     PullRequestAction, PullRequestEvent, RepositoryIdentity,
 };
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 use runtrue_scm::{
     GitHubAccount, GitHubAccountKind, GitHubError, GitHubInstallationProvider,
     GitHubInstallationRepository, GitHubInstallationSnapshot, GitHubPermission,
     GitHubPermissionLevel, GitHubProviderEndpoints, GitHubRepositorySelection,
     GitHubRepositoryVisibility,
 };
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 use runtrue_scm::{IssueCommentAction, IssueCommentEvent};
 use runtrue_server::{
     AppState, FetchedScmRepository, GitHubCheckPublisher, PublishedScmCheck, ScmCheckPublishError,
     ScmSourceFetchError, ScmSourceFetchRequest, ScmSourceFetcher, ScmWorkerConfig, ScmWorkerTick,
 };
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 use runtrue_server::{
     GitHubRepositoryActionResolver, PreparedRepositoryAction, RepositoryActionBuildRequest,
     RepositoryActionBuilder, RepositoryActionResolveError, RepositoryActionResolver,
 };
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 use runtrue_workflow_frontend::{
     ResolvedProgram, ResolvedProgramRef, ResolvedSourceAction, SourceActionResolutionRequest,
     WorkflowSourceFrontend,
 };
 use runtrue_workflow_ir::{ExecutionCapsule, Isolation};
+#[cfg(any())]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::VecDeque,
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tempfile::TempDir;
@@ -79,14 +76,14 @@ struct FixtureSourceFetcher {
 struct UnavailableSourceFetcher;
 
 #[derive(Debug)]
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 struct FixtureRepositoryActionResolver {
     requests: Mutex<Vec<(String, String, String)>>,
     image: String,
     available: AtomicBool,
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 #[derive(Debug)]
 struct RecoveringRepositoryActionResolver {
     available: AtomicBool,
@@ -94,7 +91,7 @@ struct RecoveringRepositoryActionResolver {
     image: String,
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RecordedRepositoryActionBuild {
     tenant_id: String,
@@ -106,20 +103,20 @@ struct RecordedRepositoryActionBuild {
     dockerfile_bytes: Vec<u8>,
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 #[derive(Debug)]
 struct FixtureRepositoryActionBuilder {
     requests: Mutex<Vec<RecordedRepositoryActionBuild>>,
     image: String,
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 #[derive(Debug)]
 struct FixtureGitHubInstallationProvider {
     snapshots: Vec<GitHubInstallationSnapshot>,
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 impl GitHubInstallationProvider for FixtureGitHubInstallationProvider {
     fn inspect_installation(
         &self,
@@ -134,7 +131,7 @@ impl GitHubInstallationProvider for FixtureGitHubInstallationProvider {
     }
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 impl RepositoryActionBuilder for FixtureRepositoryActionBuilder {
     fn build(
         &self,
@@ -160,7 +157,7 @@ impl RepositoryActionBuilder for FixtureRepositoryActionBuilder {
     }
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 impl RepositoryActionResolver for FixtureRepositoryActionResolver {
     fn resolve(
         &self,
@@ -188,7 +185,7 @@ impl RepositoryActionResolver for FixtureRepositoryActionResolver {
     }
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 impl RepositoryActionResolver for RecoveringRepositoryActionResolver {
     fn resolve(
         &self,
@@ -358,7 +355,7 @@ impl MirrorFixture {
         }
     }
 
-    #[cfg(feature = "github-actions")]
+    #[cfg(any())]
     fn github_actions_pull_request() -> Self {
         let root = tempfile::tempdir().expect("mirror root");
         secure_mode(root.path());
@@ -397,15 +394,17 @@ impl MirrorFixture {
         }
     }
 
-    #[cfg(feature = "github-actions")]
+    #[cfg(any())]
     fn repository_action_pull_request(reference: &str) -> Self {
         Self::repository_action_pull_request_with_access(reference, "read")
     }
 
+    #[cfg(any())]
     fn privileged_repository_action_pull_request(reference: &str) -> Self {
         Self::repository_action_pull_request_with_access(reference, "write")
     }
 
+    #[cfg(any())]
     fn repository_action_pull_request_with_access(reference: &str, contents: &str) -> Self {
         let root = tempfile::tempdir().expect("mirror root");
         secure_mode(root.path());
@@ -480,7 +479,7 @@ impl MirrorFixture {
         }
     }
 
-    #[cfg(feature = "github-actions")]
+    #[cfg(any())]
     fn interaction() -> (Self, String) {
         let root = tempfile::tempdir().expect("mirror root");
         secure_mode(root.path());
@@ -850,7 +849,7 @@ fn authenticated_github_fetch_builds_and_atomically_binds_exact_source_snapshot(
     );
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 #[test]
 fn issue_comment_gate_reuses_the_trusted_default_revision_through_continuation() {
     let (fixture, workflow_path) = MirrorFixture::interaction();
@@ -1282,7 +1281,7 @@ fn pull_request_executes_base_workflow_while_testing_proposed_code() {
     assert_eq!(capsule.jobs[0].runner.isolation, Isolation::Microvm);
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 #[test]
 fn standard_github_actions_workflow_is_discovered_planned_and_replanned_after_approval() {
     let fixture = MirrorFixture::github_actions_pull_request();
@@ -1352,7 +1351,7 @@ fn standard_github_actions_workflow_is_discovered_planned_and_replanned_after_ap
     );
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 #[test]
 fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic() {
     let root = tempfile::tempdir().expect("repository action root");
@@ -1723,7 +1722,7 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
     assert_eq!(fetch_requests.lock().unwrap().len(), 4);
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 #[test]
 fn trusted_full_commit_repository_action_is_prepared_and_locked_generically() {
     let reference = format!("ci/backport@{}", "a".repeat(40));
@@ -1774,7 +1773,7 @@ fn trusted_full_commit_repository_action_is_prepared_and_locked_generically() {
     }));
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 #[test]
 fn merged_pull_request_recovers_after_repository_action_service_outage() {
     let reference = format!("ci/backport@{}", "a".repeat(40));
@@ -1836,7 +1835,7 @@ fn merged_pull_request_recovers_after_repository_action_service_outage() {
 }
 
 #[test]
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 fn approved_repository_action_reuses_immutable_preparation_when_resolver_is_unavailable() {
     let reference = format!("ci/backport@{}", "a".repeat(40));
     let image = format!(

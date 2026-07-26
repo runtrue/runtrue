@@ -452,7 +452,7 @@ validate_compose() {
       RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE=provider://github-app/production \
       RUNTRUE_GITHUB_OAUTH_CLIENT_ID=Iv1.test \
       RUNTRUE_GITHUB_OAUTH_ADMIN_USER_IDS=123456 \
-      RUNTRUE_GITHUB_SIGNER_SOCKET=/run/runtrue/github-app-signer.sock \
+      RUNTRUE_GITHUB_APP_PRIVATE_KEY_FILE=/run/runtrue/github-app-private-key.pem \
       RUNTRUE_ACME_EMAIL=operator@example.com \
       docker compose --env-file "${STATE_DIR}/compose.env" \
         "${compose_files[@]}" "${compose_profiles[@]}" config >"$rendered"
@@ -509,7 +509,7 @@ declare -a STATE_DIRECTORIES=(
 )
 
 if "$WITH_GITHUB_APP"; then
-  STATE_DIRECTORIES+=("${STATE_DIR}/server/git-mirrors")
+  STATE_DIRECTORIES+=("${STATE_DIR}/server/git-mirrors" "${STATE_DIR}/github-signer")
 fi
 if "$WITH_TRAEFIK"; then
   STATE_DIRECTORIES+=("${STATE_DIR}/traefik")

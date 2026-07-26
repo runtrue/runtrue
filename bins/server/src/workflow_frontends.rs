@@ -1,29 +1,67 @@
 //! Workflow source frontend composition for the server binary.
 //!
-//! The SCM worker consumes only the neutral registry. Feature-selected adapter
-//! implementations are assembled here so discovery and planning share one
-//! validated composition root.
+//! The SCM worker consumes only the neutral registry. Core does not select or
+//! link a concrete external workflow frontend.
 
-#[cfg(feature = "github-actions")]
-use runtrue_gha_import::{GithubActionsFrontend, DEFAULT_JOB_CONTAINER_IMAGE_OPTION};
+#[cfg(test)]
+use runtrue_workflow_frontend::WorkflowFrontendOptionsError;
 use runtrue_workflow_frontend::{
-    WorkflowFrontendOptions, WorkflowFrontendOptionsError, WorkflowFrontendRegistry,
-    WorkflowSourceFrontend,
+    WorkflowFrontendOptions, WorkflowFrontendRegistry, WorkflowSourceFrontend,
 };
 use std::sync::OnceLock;
 
-#[cfg(feature = "github-actions")]
-static GITHUB_ACTIONS_FRONTEND: GithubActionsFrontend = GithubActionsFrontend;
+/// Provider-neutral workflow frontend composition supplied by an assembled
+/// server distribution.
+///
+/// Core's default remains empty. Product-owned binaries may statically link
+/// adapters and pass their validated registry and bounded options through this
+/// value without making `runtrue-server` depend on those adapters.
+#[derive(Clone)]
+pub struct WorkflowFrontendComposition {
+    registry: &'static WorkflowFrontendRegistry<'static>,
+    options: WorkflowFrontendOptions,
+}
 
-#[cfg(feature = "github-actions")]
-static REGISTERED_WORKFLOW_FRONTENDS: [&'static dyn WorkflowSourceFrontend; 1] =
-    [&GITHUB_ACTIONS_FRONTEND];
+impl std::fmt::Debug for WorkflowFrontendComposition {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkflowFrontendComposition")
+            .field("discovery_roots", &self.registry.discovery_roots())
+            .field("options", &self.options)
+            .finish()
+    }
+}
 
-#[cfg(not(feature = "github-actions"))]
+impl WorkflowFrontendComposition {
+    /// Build a product composition from a statically owned validated registry.
+    #[must_use]
+    pub fn new(
+        registry: &'static WorkflowFrontendRegistry<'static>,
+        options: WorkflowFrontendOptions,
+    ) -> Self {
+        Self { registry, options }
+    }
+
+    /// Core's provider-neutral composition.
+    #[must_use]
+    pub fn core() -> Self {
+        Self::new(registry(), WorkflowFrontendOptions::default())
+    }
+
+    #[must_use]
+    pub(crate) const fn registry(&self) -> &'static WorkflowFrontendRegistry<'static> {
+        self.registry
+    }
+
+    #[must_use]
+    pub(crate) fn options(&self) -> WorkflowFrontendOptions {
+        self.options.clone()
+    }
+}
+
 static REGISTERED_WORKFLOW_FRONTENDS: [&'static dyn WorkflowSourceFrontend; 0] = [];
 
-/// Return the validated, feature-selected frontend registry used by every
-/// server workflow discovery and planning path.
+/// Return the empty external-frontend registry used by core.
 pub(crate) fn registry() -> &'static WorkflowFrontendRegistry<'static> {
     static REGISTRY: OnceLock<WorkflowFrontendRegistry<'static>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
@@ -33,18 +71,11 @@ pub(crate) fn registry() -> &'static WorkflowFrontendRegistry<'static> {
 }
 
 /// Build the bounded adapter option set selected by the server composition.
-/// Adapter-specific keys remain here rather than leaking into the planner.
+#[cfg(test)]
 pub(crate) fn options(
     default_job_container_image: Option<&str>,
 ) -> Result<WorkflowFrontendOptions, WorkflowFrontendOptionsError> {
     let options = WorkflowFrontendOptions::default();
-    #[cfg(feature = "github-actions")]
-    let mut options = options;
-    #[cfg(feature = "github-actions")]
-    if let Some(image) = default_job_container_image {
-        options.set(DEFAULT_JOB_CONTAINER_IMAGE_OPTION, image)?;
-    }
-    #[cfg(not(feature = "github-actions"))]
     let _ = default_job_container_image;
     Ok(options)
 }
@@ -53,32 +84,8 @@ pub(crate) fn options(
 mod tests {
     use super::*;
 
-    #[cfg(feature = "github-actions")]
     #[test]
-    fn default_composition_registers_github_actions() {
-        let registry = registry();
-
-        assert_eq!(registry.discovery_roots(), &[".github/workflows"]);
-        assert!(registry
-            .frontend_for(".github/workflows/ci.yml")
-            .unwrap()
-            .is_some());
-    }
-
-    #[cfg(feature = "github-actions")]
-    #[test]
-    fn default_composition_binds_github_actions_options() {
-        let options = options(Some("registry.example/runtrue/job@sha256:abc")).unwrap();
-
-        assert_eq!(
-            options.value(DEFAULT_JOB_CONTAINER_IMAGE_OPTION),
-            Some("registry.example/runtrue/job@sha256:abc")
-        );
-    }
-
-    #[cfg(not(feature = "github-actions"))]
-    #[test]
-    fn native_only_composition_has_no_external_frontends() {
+    fn core_composition_has_no_external_frontends() {
         let registry = registry();
 
         assert!(registry.discovery_roots().is_empty());
@@ -88,9 +95,8 @@ mod tests {
             .is_none());
     }
 
-    #[cfg(not(feature = "github-actions"))]
     #[test]
-    fn native_only_composition_ignores_external_adapter_options() {
+    fn core_composition_ignores_external_adapter_options() {
         assert_eq!(
             options(Some("registry.example/runtrue/job@sha256:abc")).unwrap(),
             WorkflowFrontendOptions::default()

@@ -522,7 +522,9 @@ impl ScmCredentialObserver {
     }
 
     fn release(&self, observation: &StepStateObservation, grant: &Grant) -> Result<(), String> {
-        if grant.name != "runtrue-scm-provider-token" {
+        if grant.name != "runtrue-scm-provider-token"
+            && std::env::var_os("RUNTRUE_RUNNER_SECRET_DIRECTORY").is_some()
+        {
             return self.release_local_secret(observation, grant);
         }
         let mut scalar = Zeroizing::new([0_u8; 32]);

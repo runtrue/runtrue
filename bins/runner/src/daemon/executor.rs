@@ -206,7 +206,10 @@ pub(super) fn execution_from_engine(
         .ok_or_else(|| RunnerError::OfferedJobMissing(lease.job_id.clone()))?;
     let (final_state, error_code) = match job.state {
         JobState::Succeeded => ("succeeded", ""),
-        JobState::Skipped => ("skipped", ""),
+        // The runner v2 completion protocol has no distinct skipped terminal
+        // state. A condition-false job executes no steps and is therefore a
+        // successful no-op from the worker's perspective.
+        JobState::Skipped => ("succeeded", ""),
         JobState::Canceled => ("canceled", "canceled"),
         JobState::TimedOut => ("timed_out", "timed_out"),
         _ => ("failed", "execution_failed"),

@@ -42,6 +42,7 @@ curl --fail http://127.0.0.1:8080/healthz
 - `compose.traefik.yml` adds the public HTTPS edge.
 - `compose.runner-tls.yml` enables runner enrollment and control TLS.
 - `compose.runner-wasm.yml` configures the local WASM runner profile.
+- `compose.runner-oci.yml` adds a Docker-managed rootless Podman OCI runner.
 - `compose.autoscaler.yml` enables capacity-aware Docker autoscaling.
 
 Initialize the state needed by the optional services:
@@ -72,9 +73,39 @@ docker compose \
   up -d --build --wait
 ```
 
-The GitHub App signer must already be running at the socket configured by
-`RUNTRUE_GITHUB_SIGNER_SOCKET`. The private key is never mounted into the
-Runtrue server container.
+The network-disabled GitHub App signer runs in Compose. The private key is
+mounted read-only only into that signer; the Runtrue server receives only its
+private Unix socket.
+
+## Docker-managed OCI runner
+
+The OCI runner uses a prehydrated, signed Podman image store. Set
+`RUNTRUE_OCI_STATE_DIR` to its private absolute state directory and include the
+OCI overlay after `compose.runner-tls.yml`:
+
+```sh
+export RUNTRUE_OCI_STATE_DIR=/var/lib/runtrue-oci
+
+docker compose \
+  --env-file deploy/state/compose.env \
+  -f deploy/compose.yml \
+  -f deploy/compose.runner-tls.yml \
+  -f deploy/compose.runner-oci.yml \
+  up -d --build --wait runner-oci
+```
+
+The directory must be owned by `RUNTRUE_RUNTIME_UID:RUNTRUE_RUNTIME_GID` with
+mode `0700`. It contains the enrolled identity, runner CA, capsule and image
+verification keys, default-deny seccomp policy, runtime environment, signed
+manifests, and the preloaded Podman graph store described in the runner README.
+The one-shot `runner-oci-enroll` profile uses `enrollment.token` in that same
+directory.
+
+Only the OCI runner service is privileged because it launches nested rootless
+containers. Both the runner and Podman execute as the configured non-root uid.
+Docker enforces the aggregate 6 GiB memory, 2 CPU, and 768 PID defaults for the
+single-concurrency service. Nested Podman cgroups are disabled, avoiding a
+systemd user-manager dependency while retaining the outer Docker limits.
 
 ## Autoscaling
 

@@ -3251,23 +3251,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtrue-gha-import"
-version = "0.1.0"
-source = "git+https://github.com/runtrue/github-actions-frontend?rev=1064f9efe2e5b3a4229a4aee2454b2b07e3294e6#1064f9efe2e5b3a4229a4aee2454b2b07e3294e6"
-dependencies = [
- "runtrue-compiler",
- "runtrue-lock",
- "runtrue-model",
- "runtrue-workflow-ast",
- "runtrue-workflow-frontend",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 1.0.61",
- "toml 0.8.23",
-]
-
-[[package]]
 name = "runtrue-git"
 version = "0.1.0"
 dependencies = [
@@ -3657,7 +3640,6 @@ dependencies = [
  "runtrue-cache",
  "runtrue-compiler",
  "runtrue-control-plane",
- "runtrue-gha-import",
  "runtrue-git",
  "runtrue-lifecycle",
  "runtrue-lock",

@@ -1,8 +1,8 @@
-use crate::{workflow_frontends, AppState};
+use crate::{AppState, WorkflowFrontendComposition};
 use base64ct::{Base64, Encoding as _};
 use runtrue_attest::CapsuleSigningKey;
 use runtrue_compiler::Compilation;
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 use runtrue_control_plane::GitHubInstallationRecord;
 use runtrue_control_plane::{
     CapsuleApiMetadata, ControlPlaneError, ControlPlaneStore, CreateRunRequest, DurableTask,
@@ -32,7 +32,7 @@ use runtrue_scm::{
     GitRevision, InstallationTokenRequest, ProviderKind, WorkflowDefinitionApprovalEvidence,
     WorkflowDefinitionApprovalVerifier, WorkflowSourceError, WorkflowSourceInputs,
 };
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 use runtrue_scm::{
     GitHubInstallationRepository, GitHubInstallationSnapshot, SharedGitHubInstallationProvider,
 };
@@ -44,9 +44,10 @@ use runtrue_trusted_planner::{
 };
 use runtrue_workflow_frontend::{
     ResolvedActionInput, ResolvedProgram, ResolvedProgramRef, ResolvedSourceAction,
-    SourceActionResolutionRequest, WorkflowFrontendOptions, WorkflowSourceFrontend,
+    SourceActionResolutionRequest, WorkflowFrontendOptions, WorkflowFrontendRegistry,
+    WorkflowSourceFrontend,
 };
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 use runtrue_workflow_frontend::{SourceActionDescriptors, SourceActionProgramDeclaration};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -79,7 +80,7 @@ const MAX_DEFINITION_DIFF_LINES_PER_SIDE: usize = 80;
 const MAX_DEFINITION_DIFF_BYTES: usize = 16 * 1024;
 const APPROVAL_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
 const CAPABILITY_GRANT_LIFETIME_MS: u64 = 90 * 24 * 60 * 60 * 1000;
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 const GITHUB_INSTALLATION_PAGE_SIZE: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -937,14 +938,14 @@ pub enum RepositoryActionResolveError {
     Unavailable,
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepositoryActionSourceSelectionError {
     Missing,
     Ambiguous,
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 fn eligible_repository_action_installation(
     installation: &GitHubInstallationRecord,
     tenant_id: &str,
@@ -959,7 +960,7 @@ fn eligible_repository_action_installation(
         && installation.revoked_unix_ms.is_none()
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 fn select_repository_action_source(
     tenant_id: &str,
     endpoints: &GitHubProviderEndpoints,
@@ -1112,7 +1113,7 @@ impl SecretMetadataResolver for StoreSecretResolver<'_> {
     }
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 pub struct GitHubRepositoryActionResolver {
     control_plane: Arc<dyn ControlPlaneStore>,
     store_executor: StoreExecutor,
@@ -1122,7 +1123,7 @@ pub struct GitHubRepositoryActionResolver {
     builder: Option<Arc<dyn RepositoryActionBuilder>>,
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 impl std::fmt::Debug for GitHubRepositoryActionResolver {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -1135,7 +1136,7 @@ impl std::fmt::Debug for GitHubRepositoryActionResolver {
     }
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 impl GitHubRepositoryActionResolver {
     #[must_use]
     pub fn new<S>(
@@ -1198,7 +1199,7 @@ impl GitHubRepositoryActionResolver {
     }
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 impl RepositoryActionResolver for GitHubRepositoryActionResolver {
     fn resolve(
         &self,
@@ -1428,7 +1429,7 @@ impl RepositoryActionResolver for GitHubRepositoryActionResolver {
     }
 }
 
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 fn action_source_path(subpath: &str, path: &str) -> Result<String, RepositoryActionResolveError> {
     let joined = if subpath.is_empty() {
         path.to_owned()
@@ -1443,7 +1444,7 @@ fn action_source_path(subpath: &str, path: &str) -> Result<String, RepositoryAct
     Ok(normalized)
 }
 
-#[cfg(any(feature = "github-actions", test))]
+#[cfg(test)]
 fn classify_repository_action_inspection_error(
     error: &GitHubError,
 ) -> RepositoryActionResolveError {
@@ -1771,6 +1772,7 @@ pub struct ScmTaskWorker {
     check_publisher: Option<Arc<dyn GitHubCheckPublisher>>,
     approval_authorizer: Option<Arc<dyn GitHubInstallationTokenProvider>>,
     source_cas: Option<FsCas>,
+    workflow_frontends: WorkflowFrontendComposition,
     config: ScmWorkerConfig,
     metrics: Arc<ScmWorkerMetrics>,
 }
@@ -1803,6 +1805,7 @@ impl std::fmt::Debug for ScmTaskWorker {
                 "approval_authorizer",
                 &self.approval_authorizer.as_ref().map(|_| "configured"),
             )
+            .field("workflow_frontends", &self.workflow_frontends)
             .field("config", &self.config)
             .field("signing_key", &"[REDACTED]")
             .field("metrics", &self.metrics.snapshot())
@@ -1864,7 +1867,7 @@ impl AppState {
         Ok(worker)
     }
 
-    #[cfg(feature = "github-actions")]
+    #[cfg(any())]
     pub fn scm_task_worker_with_github_repository_actions<P>(
         &self,
         config: ScmWorkerConfig,
@@ -1953,6 +1956,7 @@ impl ScmTaskWorker {
             check_publisher: None,
             approval_authorizer: None,
             source_cas,
+            workflow_frontends: WorkflowFrontendComposition::core(),
             config,
             metrics: Arc::new(ScmWorkerMetrics::default()),
         })
@@ -1965,6 +1969,15 @@ impl ScmTaskWorker {
         resolver: Arc<dyn RepositoryActionResolver>,
     ) -> Self {
         self.repository_action_resolver = Some(resolver);
+        self
+    }
+
+    /// Select the statically linked workflow frontends owned by the assembled
+    /// product binary. Core workers use the empty composition unless an
+    /// external distribution explicitly supplies one.
+    #[must_use]
+    pub fn with_workflow_frontends(mut self, composition: WorkflowFrontendComposition) -> Self {
+        self.workflow_frontends = composition;
         self
     }
 
@@ -2348,7 +2361,9 @@ impl ScmTaskWorker {
         installation_id: &str,
         mut options: WorkflowFrontendOptions,
     ) -> Result<WorkflowFrontendOptions, ProcessError> {
-        let Some(frontend) = workflow_frontends::registry()
+        let Some(frontend) = self
+            .workflow_frontends
+            .registry()
             .frontend_for(workflow_path)
             .map_err(|_| TaskFailure::terminal("workflow frontend selection is invalid"))?
         else {
@@ -2886,10 +2901,13 @@ impl ScmTaskWorker {
             )
             .map_err(TaskFailure::control)?
             .unwrap_or_else(|| self.config.workflow_directory.clone());
-        if requested_workflow_path
-            .as_deref()
-            .is_some_and(|path| !workflow_path_allowed(&configured_workflow_directory, path))
-        {
+        if requested_workflow_path.as_deref().is_some_and(|path| {
+            !workflow_path_allowed(
+                self.workflow_frontends.registry(),
+                &configured_workflow_directory,
+                path,
+            )
+        }) {
             return Err(TaskFailure::terminal("SCM workflow task path is not allowed").into());
         }
 
@@ -2965,6 +2983,7 @@ impl ScmTaskWorker {
             let paths = discover_workflow_paths(
                 prepared_source.repository.repository(),
                 discovery_commit,
+                self.workflow_frontends.registry(),
                 &configured_workflow_directory,
             )?;
             if paths.len() > 1 {
@@ -3033,9 +3052,7 @@ impl ScmTaskWorker {
         } else {
             execution_revision.commit.as_str()
         };
-        let frontend_options =
-            workflow_frontends::options(self.config.default_job_container_image.as_deref())
-                .map_err(|_| TaskFailure::terminal("workflow frontend configuration is invalid"))?;
+        let frontend_options = self.workflow_frontends.options();
         let frontend_options = self.resolve_repository_actions(
             prepared_source.repository.repository(),
             action_revision,
@@ -3058,7 +3075,7 @@ impl ScmTaskWorker {
             &repository,
         );
         let mut planner = TrustedPlanner::new(prepared_source.repository.repository())
-            .with_source_frontends(workflow_frontends::registry())
+            .with_source_frontends(self.workflow_frontends.registry())
             .with_source_frontend_options(frontend_options)
             .with_reusable_source_provider(&reusable_source_provider)
             .with_secret_metadata_resolver(&secret_resolver)
@@ -3570,6 +3587,7 @@ impl ScmTaskWorker {
             .unwrap_or_else(|| self.config.workflow_directory.clone());
         if pending.context.source_identity.policy_version_ids != self.config.policy_version_ids
             || !workflow_path_allowed(
+                self.workflow_frontends.registry(),
                 &configured_workflow_directory,
                 &pending.context.source_identity.workflow_path,
             )
@@ -3695,9 +3713,7 @@ impl ScmTaskWorker {
             current_name: &repository.name,
             endpoints: &self.config.github_provider_endpoints,
         };
-        let frontend_options =
-            workflow_frontends::options(self.config.default_job_container_image.as_deref())
-                .map_err(|_| TaskFailure::terminal("workflow frontend configuration is invalid"))?;
+        let frontend_options = self.workflow_frontends.options();
         let frontend_options = restore_resolved_actions(
             frontend_options,
             pending.context.resolved_repository_actions.clone(),
@@ -3708,7 +3724,7 @@ impl ScmTaskWorker {
             &repository,
         );
         let mut planner = TrustedPlanner::new(continuation_repository.repository())
-            .with_source_frontends(workflow_frontends::registry())
+            .with_source_frontends(self.workflow_frontends.registry())
             .with_source_frontend_options(frontend_options.clone())
             .with_reusable_source_provider(&reusable_source_provider)
             .with_secret_metadata_resolver(&secret_resolver)
@@ -3771,7 +3787,7 @@ impl ScmTaskWorker {
                 approval: workflow_approval,
             };
             let mut planner = TrustedPlanner::new(continuation_repository.repository())
-                .with_source_frontends(workflow_frontends::registry())
+                .with_source_frontends(self.workflow_frontends.registry())
                 .with_source_frontend_options(frontend_options)
                 .with_reusable_source_provider(&reusable_source_provider)
                 .with_secret_metadata_resolver(&secret_resolver)
@@ -4871,7 +4887,11 @@ impl<'a> StableIdentity<'a> {
     }
 }
 
-fn workflow_path_allowed(configured_workflow_directory: &str, path: &str) -> bool {
+fn workflow_path_allowed(
+    registry: &WorkflowFrontendRegistry<'_>,
+    configured_workflow_directory: &str,
+    path: &str,
+) -> bool {
     if normalize_relative_path(path).ok().as_deref() != Some(path) {
         return false;
     }
@@ -4881,7 +4901,7 @@ fn workflow_path_allowed(configured_workflow_directory: &str, path: &str) -> boo
     if !in_configured_directory || !(path.ends_with(".yml") || path.ends_with(".yaml")) {
         return false;
     }
-    workflow_frontends::registry().frontend_for(path).is_ok()
+    registry.frontend_for(path).is_ok()
 }
 
 fn workflow_identity_suffix(path: &str) -> &[u8] {
@@ -4902,6 +4922,7 @@ fn proposed_identity_suffix(workflow_suffix: &[u8]) -> Vec<u8> {
 fn discover_workflow_paths(
     repository: &GitRepository,
     trusted_commit: &str,
+    registry: &WorkflowFrontendRegistry<'_>,
     configured_workflow_directory: &str,
 ) -> Result<Vec<String>, TaskFailure> {
     let paths = repository
@@ -4912,7 +4933,7 @@ fn discover_workflow_paths(
         )
         .map_err(TaskFailure::from_git_snapshot)?
         .into_iter()
-        .filter(|path| workflow_path_allowed(configured_workflow_directory, path))
+        .filter(|path| workflow_path_allowed(registry, configured_workflow_directory, path))
         .collect::<BTreeSet<_>>();
     if paths.is_empty() {
         return Err(TaskFailure::terminal(
@@ -5221,12 +5242,18 @@ mod tests {
         let config = ScmWorkerConfig::new(directory.path().join("mirrors"), "worker-1");
 
         assert_eq!(
-            discover_workflow_paths(&repository, &commit, &config.workflow_directory).unwrap(),
+            discover_workflow_paths(
+                &repository,
+                &commit,
+                WorkflowFrontendComposition::core().registry(),
+                &config.workflow_directory,
+            )
+            .unwrap(),
             vec![format!("{DEFAULT_SCM_WORKFLOW_DIRECTORY}/ci.yaml")]
         );
     }
 
-    #[cfg(feature = "github-actions")]
+    #[cfg(any())]
     #[test]
     fn registered_frontend_drives_workflow_discovery() {
         let directory = tempfile::tempdir().unwrap();
@@ -5254,7 +5281,13 @@ mod tests {
         config.workflow_directory = ".github/workflows".to_owned();
 
         assert_eq!(
-            discover_workflow_paths(&repository, &commit, &config.workflow_directory).unwrap(),
+            discover_workflow_paths(
+                &repository,
+                &commit,
+                WorkflowFrontendComposition::core().registry(),
+                &config.workflow_directory,
+            )
+            .unwrap(),
             vec![".github/workflows/ci.yml"]
         );
     }
@@ -5309,7 +5342,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "github-actions")]
+    #[cfg(any())]
     fn action_installation(
         id: &str,
         external_id: u64,
@@ -5350,7 +5383,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "github-actions")]
+    #[cfg(any())]
     fn action_repository(id: u64, owner: &str, name: &str) -> GitHubInstallationRepository {
         GitHubInstallationRepository {
             id,
@@ -5368,7 +5401,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "github-actions")]
+    #[cfg(any())]
     fn action_snapshot(
         installation_id: u64,
         repositories: Vec<GitHubInstallationRepository>,
@@ -5394,7 +5427,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "github-actions")]
+    #[cfg(any())]
     #[test]
     fn repository_action_source_can_use_another_installation_in_the_tenant() {
         let endpoints = GitHubProviderEndpoints::new(
@@ -5435,7 +5468,7 @@ mod tests {
         assert_eq!(repository.full_name, "ci/backport");
     }
 
-    #[cfg(feature = "github-actions")]
+    #[cfg(any())]
     #[test]
     fn repository_action_source_is_tenant_and_origin_scoped() {
         let endpoints = GitHubProviderEndpoints::new(
@@ -5490,7 +5523,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "github-actions")]
+    #[cfg(any())]
     #[test]
     fn repository_action_source_rejects_ambiguous_installations() {
         let endpoints = GitHubProviderEndpoints::github_dot_com();
@@ -5589,7 +5622,13 @@ mod tests {
         let commit = git(&repository_path, &["rev-parse", "HEAD"]);
         let repository = GitRepository::open(&repository_path, GitLimits::default()).unwrap();
         assert_eq!(
-            discover_workflow_paths(&repository, &commit, ".github/workflows").unwrap(),
+            discover_workflow_paths(
+                &repository,
+                &commit,
+                WorkflowFrontendComposition::core().registry(),
+                ".github/workflows",
+            )
+            .unwrap(),
             vec![
                 ".github/workflows/ci.yml",
                 ".github/workflows/review.runtrue.yaml",
@@ -5623,7 +5662,13 @@ mod tests {
         let repository = GitRepository::open(&repository_path, GitLimits::default()).unwrap();
 
         assert_eq!(
-            discover_workflow_paths(&repository, &commit, "automation/workflows").unwrap(),
+            discover_workflow_paths(
+                &repository,
+                &commit,
+                WorkflowFrontendComposition::core().registry(),
+                "automation/workflows",
+            )
+            .unwrap(),
             vec![
                 "automation/workflows/nested/build.yaml",
                 "automation/workflows/nested/review.github.yml",

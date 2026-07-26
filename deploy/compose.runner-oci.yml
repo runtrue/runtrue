@@ -1,0 +1,87 @@
+# Opt-in, single-concurrency rootless OCI runner. The outer Docker service owns
+# aggregate resource limits; nested Podman cgroups are disabled so this profile
+# does not require systemd on the host or in the container.
+
+x-runner-oci-environment: &runner-oci-environment
+  HOME: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/home"
+  XDG_RUNTIME_DIR: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/runtime"
+  TMPDIR: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/tmp"
+  RUNTRUE_RUNNER_CA_CERTIFICATE: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/runner-ca.pem"
+  RUNTRUE_RUNNER_CREDENTIAL_DIRECTORY: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/${RUNTRUE_OCI_CREDENTIALS_SUBDIRECTORY:-credentials}"
+  RUNTRUE_RUNNER_STATE_DIRECTORY: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/${RUNTRUE_OCI_RUNNER_STATE_SUBDIRECTORY:-state}"
+  RUNTRUE_RUNNER_WORKSPACE_DIRECTORY: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/${RUNTRUE_OCI_WORKSPACES_SUBDIRECTORY:-workspaces}"
+  RUNTRUE_RUNNER_CAPSULE_KEYRING: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/capsule-keys"
+  RUNTRUE_RUNNER_OCI_STATE_DIRECTORY: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/${RUNTRUE_OCI_RUNTIME_STATE_SUBDIRECTORY:-oci-state}"
+  RUNTRUE_RUNNER_OCI_PODMAN: /usr/bin/podman
+  RUNTRUE_RUNNER_OCI_SECCOMP_PROFILE: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/seccomp.json"
+  RUNTRUE_RUNNER_OCI_IMAGE_STORE: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/image-store"
+  RUNTRUE_RUNNER_OCI_RUNTIME_ENVIRONMENT: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/runtime-environment.json"
+  RUNTRUE_RUNNER_OCI_MANIFEST_DIRECTORY: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/manifests"
+  RUNTRUE_RUNNER_OCI_IMAGE_KEYRING: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/image-keys"
+  RUNTRUE_RUNNER_REGION: "${RUNTRUE_RUNNER_REGION:-single-node-evaluation}"
+
+x-runner-oci-service: &runner-oci-service
+  image: "${RUNTRUE_IMAGE_REPOSITORY:-local/runtrue}-runner-oci:${RUNTRUE_IMAGE_TAG:-0.1.0}"
+  build:
+    context: ..
+    dockerfile: deploy/Containerfile.runner-oci
+    args:
+      RUNTRUE_VERSION: "${RUNTRUE_IMAGE_TAG:-0.1.0}"
+      RUNTRUE_REVISION: "${RUNTRUE_IMAGE_REVISION:-unknown}"
+      RUNTRUE_RUNTIME_UID: "${RUNTRUE_RUNTIME_UID:?run deploy/bootstrap.sh first}"
+      RUNTRUE_RUNTIME_GID: "${RUNTRUE_RUNTIME_GID:?run deploy/bootstrap.sh first}"
+  user: "${RUNTRUE_RUNTIME_UID:?run deploy/bootstrap.sh first}:${RUNTRUE_RUNTIME_GID:?run deploy/bootstrap.sh first}"
+  hostname: runtrue-oci-runner
+  working_dir: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}"
+  init: true
+  privileged: true
+  devices:
+    - /dev/fuse:/dev/fuse
+  environment:
+    <<: *runner-oci-environment
+  volumes:
+    - type: bind
+      source: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}"
+      target: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}"
+      bind:
+        create_host_path: false
+  depends_on:
+    server:
+      condition: service_healthy
+  networks:
+    - control
+    - scm-egress
+  restart: "no"
+  stop_grace_period: 30s
+  pids_limit: "${RUNTRUE_RUNNER_OCI_PIDS_LIMIT:-768}"
+  mem_limit: "${RUNTRUE_RUNNER_OCI_MEMORY_LIMIT:-6g}"
+  cpus: "${RUNTRUE_RUNNER_OCI_CPUS:-2.0}"
+
+services:
+  runner-oci-enroll:
+    <<: *runner-oci-service
+    profiles:
+      - runner-oci-enroll
+    environment:
+      <<: *runner-oci-environment
+      RUNTRUE_RUNNER_ENROLLMENT_ENDPOINT: https://server:8444
+      RUNTRUE_RUNNER_ENROLLMENT_TOKEN_FILE: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/${RUNTRUE_OCI_ENROLLMENT_TOKEN_FILE:-enrollment.token}"
+    command: ["enroll"]
+
+  runner-oci:
+    <<: *runner-oci-service
+    environment:
+      <<: *runner-oci-environment
+      RUNTRUE_RUNNER_ENDPOINT: https://server:8443
+    command: ["daemon"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x runtrue-runner >/dev/null"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+networks:
+  scm-egress:
+    driver: bridge

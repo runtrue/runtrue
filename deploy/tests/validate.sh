@@ -23,10 +23,13 @@ required=(
   compose.github-app.yml
   compose.runner-tls.yml
   compose.runner-wasm.yml
+  compose.runner-oci.yml
   compose.autoscaler.yml
   compose.traefik.yml
   Containerfile.server
+  Containerfile.github-signer
   Containerfile.runner
+  Containerfile.runner-oci
   Containerfile.autoscaler
   Containerfile.backup
   bootstrap.sh
@@ -53,12 +56,14 @@ docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required'
 
 TEMPORARY_ROOT=$(mktemp -d)
 chmod 0700 "$TEMPORARY_ROOT"
-for directory in server secrets keys backups restores recovery-config runner workspaces tls runner-trust runner-secrets traefik autoscaler; do
+for directory in server secrets keys backups restores recovery-config runner workspaces tls runner-trust runner-secrets runner-oci traefik autoscaler github-signer; do
   install -d -m 0700 "${TEMPORARY_ROOT}/${directory}"
 done
 install -d -m 0700 "${TEMPORARY_ROOT}/autoscaler/claims"
-touch "${TEMPORARY_ROOT}/traefik/acme.json" "${TEMPORARY_ROOT}/runner-secrets/autoscaler.token"
-chmod 0600 "${TEMPORARY_ROOT}/traefik/acme.json" "${TEMPORARY_ROOT}/runner-secrets/autoscaler.token"
+touch "${TEMPORARY_ROOT}/traefik/acme.json" "${TEMPORARY_ROOT}/runner-secrets/autoscaler.token" \
+  "${TEMPORARY_ROOT}/github-app-private-key.pem"
+chmod 0600 "${TEMPORARY_ROOT}/traefik/acme.json" "${TEMPORARY_ROOT}/runner-secrets/autoscaler.token" \
+  "${TEMPORARY_ROOT}/github-app-private-key.pem"
 
 cat >"${TEMPORARY_ROOT}/compose.env" <<EOF
 RUNTRUE_RUNTIME_UID=10001
@@ -71,6 +76,7 @@ RUNTRUE_INSTALLATION_ID=deployment-validation
 RUNTRUE_IMAGE_REPOSITORY=local/runtrue
 RUNTRUE_IMAGE_TAG=0.1.0
 RUNTRUE_IMAGE_REVISION=validation
+RUNTRUE_OCI_STATE_DIR=${TEMPORARY_ROOT}/runner-oci
 EOF
 chmod 0600 "${TEMPORARY_ROOT}/compose.env"
 
@@ -78,10 +84,11 @@ common=(docker compose --env-file "${TEMPORARY_ROOT}/compose.env" -f "${DEPLOY_D
 "${common[@]}" config --quiet
 "${common[@]}" -f "${DEPLOY_DIR}/compose.runner-tls.yml" \
   -f "${DEPLOY_DIR}/compose.runner-wasm.yml" --profile runner-wasm-eval config --quiet
+"${common[@]}" -f "${DEPLOY_DIR}/compose.runner-tls.yml" \
+  -f "${DEPLOY_DIR}/compose.runner-oci.yml" config --quiet
 
 rendered="${TEMPORARY_ROOT}/full.json"
 env \
-  GITHUB_TOKEN=deployment-validation-token \
   RUNTRUE_PUBLIC_ORIGIN=https://runtrue.example.com \
   RUNTRUE_ACME_EMAIL=operator@example.com \
   RUNTRUE_GITHUB_APP_ID=123 \
@@ -89,7 +96,7 @@ env \
   RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE=provider://github-app/production \
   RUNTRUE_GITHUB_OAUTH_CLIENT_ID=Iv1.validation \
   RUNTRUE_GITHUB_OAUTH_ADMIN_USER_IDS=123456 \
-  RUNTRUE_GITHUB_SIGNER_SOCKET="${TEMPORARY_ROOT}/github-app-signer.sock" \
+  RUNTRUE_GITHUB_APP_PRIVATE_KEY_FILE="${TEMPORARY_ROOT}/github-app-private-key.pem" \
   "${common[@]}" \
     -f "${DEPLOY_DIR}/compose.github-app.yml" \
     -f "${DEPLOY_DIR}/compose.runner-tls.yml" \
@@ -105,7 +112,7 @@ import sys
 
 model = json.loads(pathlib.Path(sys.argv[1]).read_text())
 services = model["services"]
-required = {"server", "traefik", "autoscaler"}
+required = {"server", "github-signer", "traefik", "autoscaler"}
 if set(services) != required:
     raise SystemExit(f"unexpected default services: {set(services)!r}")
 for name, service in services.items():
@@ -113,6 +120,10 @@ for name, service in services.items():
         raise SystemExit(f"{name} has unsafe host privileges")
     if name != "autoscaler" and "docker.sock" in json.dumps(service).lower():
         raise SystemExit(f"{name} received the Docker socket")
+if services["github-signer"].get("network_mode") != "none":
+    raise SystemExit("GitHub signer must have networking disabled")
+if "github-app-private-key.pem" in json.dumps(services["server"]):
+    raise SystemExit("Runtrue server received the GitHub App private key")
 if "/var/run/docker.sock" not in json.dumps(services["autoscaler"]):
     raise SystemExit("autoscaler is missing the Docker socket")
 if services["server"].get("ports"):
@@ -126,6 +137,36 @@ if services["traefik"].get("entrypoint") != ["/bin/sh", "/var/lib/traefik/entryp
 published = {port["published"] for port in services["traefik"].get("ports", [])}
 if published != {"80", "443"}:
     raise SystemExit(f"unexpected public ports: {published!r}")
+PY
+
+oci_rendered="${TEMPORARY_ROOT}/oci.json"
+"${common[@]}" \
+  -f "${DEPLOY_DIR}/compose.runner-tls.yml" \
+  -f "${DEPLOY_DIR}/compose.runner-oci.yml" \
+  config --format json >"$oci_rendered"
+
+python3 - "$oci_rendered" <<'PY'
+import json
+import pathlib
+import sys
+
+model = json.loads(pathlib.Path(sys.argv[1]).read_text())
+services = model["services"]
+runner = services["runner-oci"]
+if runner.get("privileged") is not True:
+    raise SystemExit("OCI runner must be privileged for nested rootless Podman")
+if runner.get("user") != "10001:10001":
+    raise SystemExit("OCI runner must execute as the configured non-root identity")
+if runner.get("restart") != "unless-stopped":
+    raise SystemExit("OCI runner must restart with the Compose stack")
+if int(runner.get("mem_limit", 0)) != 6 * 1024 * 1024 * 1024:
+    raise SystemExit("OCI runner aggregate memory limit changed")
+if runner.get("pids_limit") != 768:
+    raise SystemExit("OCI runner aggregate PID limit changed")
+if "/dev/fuse" not in json.dumps(runner.get("devices", [])):
+    raise SystemExit("OCI runner is missing /dev/fuse")
+if "systemd" in json.dumps(runner).lower():
+    raise SystemExit("OCI runner configuration must not depend on systemd")
 PY
 
 grep -q 'RUNTRUE_RUNNER_WASM_MAX_CONCURRENT_JOBS: "${RUNTRUE_RUNNER_WASM_MAX_CONCURRENT_JOBS:-1}"' \

@@ -1,5 +1,7 @@
 //! Authenticated HTTP façade for the durable Runtrue control plane.
 
+extern crate self as runtrue_server;
+
 mod app;
 mod database_runtime;
 mod database_url_file;
@@ -11,7 +13,11 @@ mod runner_certificates;
 mod runner_service;
 mod scm_worker;
 mod secret_resolution;
+#[doc(hidden)]
+pub mod startup;
 mod workflow_frontends;
+
+use axum::Router;
 
 pub use app::{
     router, AppState, BootstrapAuth, GitHubInstallationMetricsSnapshot, GitHubLifecycleWorkerError,
@@ -43,7 +49,115 @@ pub use runner_service::{
     RunnerControlConfig, RunnerControlService, RunnerEnrollmentService,
     RunnerProtocolMetricsSnapshot, RunnerServiceError,
 };
-#[cfg(feature = "github-actions")]
+pub use workflow_frontends::WorkflowFrontendComposition;
+
+/// Provider-neutral assembly points for a product-owned server executable.
+///
+/// The normal `runtrue-server` uses [`ServerComposition::core`]. An external
+/// distribution can statically register workflow frontends and add same-origin
+/// HTTP routes while reusing the exact core backend and worker lifecycle.
+#[derive(Clone)]
+pub struct ServerComposition {
+    workflow_frontends: WorkflowFrontendComposition,
+    decorate_http_router: fn(Router) -> Router,
+}
+
+impl std::fmt::Debug for ServerComposition {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerComposition")
+            .field("workflow_frontends", &self.workflow_frontends)
+            .field("decorate_http_router", &"[STATIC ROUTER DECORATOR]")
+            .finish()
+    }
+}
+
+impl ServerComposition {
+    /// The dependency-free core server composition.
+    #[must_use]
+    pub fn core() -> Self {
+        Self {
+            workflow_frontends: WorkflowFrontendComposition::core(),
+            decorate_http_router: std::convert::identity,
+        }
+    }
+
+    /// Select the product-owned workflow frontend registry and bounded options.
+    #[must_use]
+    pub fn with_workflow_frontends(
+        mut self,
+        workflow_frontends: WorkflowFrontendComposition,
+    ) -> Self {
+        self.workflow_frontends = workflow_frontends;
+        self
+    }
+
+    /// Add product-owned same-origin routes around the core router.
+    #[must_use]
+    pub fn with_http_router_decorator(mut self, decorator: fn(Router) -> Router) -> Self {
+        self.decorate_http_router = decorator;
+        self
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn workflow_frontends(&self) -> WorkflowFrontendComposition {
+        self.workflow_frontends.clone()
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn decorate_http_router(&self, router: Router) -> Router {
+        (self.decorate_http_router)(router)
+    }
+}
+
+#[cfg(test)]
+mod composition_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use tower::ServiceExt as _;
+
+    fn product_routes(router: Router) -> Router {
+        router.route("/product-healthz", get(|| async { StatusCode::NO_CONTENT }))
+    }
+
+    #[tokio::test]
+    async fn external_composition_can_add_routes_without_changing_core() {
+        let core = ServerComposition::core();
+        let product = ServerComposition::core().with_http_router_decorator(product_routes);
+
+        let core_response = core
+            .decorate_http_router(Router::new())
+            .oneshot(
+                Request::get("/product-healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let product_response = product
+            .decorate_http_router(Router::new())
+            .oneshot(
+                Request::get("/product-healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(core_response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(product_response.status(), StatusCode::NO_CONTENT);
+        assert!(core
+            .workflow_frontends()
+            .registry()
+            .discovery_roots()
+            .is_empty());
+    }
+}
+#[cfg(any())]
 pub use scm_worker::GitHubRepositoryActionResolver;
 pub use scm_worker::{
     FetchedScmRepository, GitHubAppInstallationTokenProvider, GitHubCheckPublisher,

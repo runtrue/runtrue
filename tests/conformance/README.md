@@ -16,14 +16,12 @@ logical migration IDs, backend payloads, and the history digest bound by the
 cutover baseline. Corrections to a shipped history or logical migration must
 use a new forward migration rather than rewriting accepted files.
 
-`verify_workflow_frontend.sh` is the mandatory fail-fast gate for the
-external workflow-frontend boundary. It verifies the exact external repository
-revision, lockfile source, local core-package patches, and dependency direction;
-runs the focused generic-contract and trusted-planner tests; then checks both
-the default GitHub-enabled server/CLI composition and the native-only
-`--no-default-features` composition against `Cargo.lock`. The external
-`runtrue/github-actions-frontend` repository owns its own locked formatting,
-test, and strict Clippy gates; dependency tests are not run from this workspace.
+`verify_workflow_frontend.sh` is the mandatory fail-fast gate for the neutral
+workflow-frontend boundary. It verifies that core has no concrete frontend
+dependency or lockfile source, runs the focused generic-contract and
+trusted-planner tests, and checks the server/CLI compositions against
+`Cargo.lock`. Concrete adapter repositories own their own formatting, tests,
+and strict Clippy gates.
 
 Run it from any directory with:
 

@@ -120,7 +120,9 @@ impl PersistedCompletion {
         let digest = v1::Digest::try_from(digest)
             .map_err(|_| StateError::InvalidCompletion("invalid stored result digest"))?;
         let final_state = match self.final_state.as_str() {
-            "succeeded" => v2::LeaseFinalState::Succeeded,
+            // Accept the legacy runner value so a condition-false completion
+            // persisted by an older binary can be replayed after upgrade.
+            "succeeded" | "skipped" => v2::LeaseFinalState::Succeeded,
             "failed" => v2::LeaseFinalState::Failed,
             "canceled" => v2::LeaseFinalState::Canceled,
             "timed_out" => v2::LeaseFinalState::TimedOut,

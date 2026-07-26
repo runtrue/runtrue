@@ -30,4 +30,4 @@ src/analyzer/{mod,workflow,jobs,steps,actions,expressions,security}.rs
    and fixture output. Split tests by supported, unsupported, security, and
    lockfile cases.
 
-Run standard checks for `runtrue-gha-import` plus every fixture-based test.
+Run the adapter repository's standard checks plus every fixture-based test.

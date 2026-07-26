@@ -1,10 +1,15 @@
 # Workflow frontend extraction boundary
 
-GitHub Actions is Runtrue's first workflow source frontend, but it is not part
-of the execution kernel. The adapter now lives in the private
-[`runtrue/github-actions-frontend`](https://github.com/runtrue/github-actions-frontend)
-repository. Runtrue selects one exact reviewed frontend revision while the
-contract, server composition, and integration gates remain owned by core.
+GitHub Actions is a workflow source frontend, but it is not part of the
+execution kernel. Core owns the neutral contract and integration gates without
+selecting, linking, or naming a concrete frontend repository.
+
+For low-environment distributions, `runtrue-server` exposes the neutral
+`ServerComposition` and `startup::run_with_composition` assembly API. An
+external product binary can statically inject its validated frontend registry
+and decorate the same-origin HTTP router while reusing the core backend and
+worker lifecycle. The default core binary selects the empty composition; the
+assembly API does not name or depend on any concrete frontend.
 
 ## Repository boundary
 
@@ -31,11 +36,12 @@ The GitHub Actions frontend owns:
 The trusted planner depends only on `runtrue-workflow-frontend`. It receives a
 validated registry from the server composition root. The runtime engine,
 executors, runner, guest, protocol, storage, and control plane never depend on
-`runtrue-gha-import` or on the frontend contract.
+any concrete adapter package or on the frontend contract.
 
-The server and CLI enable the optional `github-actions` feature by default.
-Both must continue to compile with `--no-default-features`, which is the
-native-only composition and the proof that the adapter is replaceable.
+The core server and CLI have no concrete workflow-adapter feature. Product
+distributions compose adapters through the neutral server assembly API, while
+core's release gates verify that its default and reduced-feature builds remain
+free of concrete frontend dependencies.
 
 Moving this frontend does not move the GitHub SCM provider, browser-facing API,
 authentication, webhook handling, or persistence out of core. The external
@@ -101,10 +107,9 @@ interface before trusted SCM constructs the resolved component program.
 
 Across the repository boundary:
 
-- only `runtrue-server` and `runtrue-cli` may depend on the GitHub adapter
-  package;
-- the trusted planner depends on `runtrue-workflow-frontend`, never on the
-  GitHub adapter;
+- no package in the core workspace may depend on a concrete adapter package;
+- the server and trusted planner depend on `runtrue-workflow-frontend`, never
+  on a concrete adapter;
 - the generic frontend contract depends only on `runtrue-model`; and
 - the adapter may use compiler and workflow-model packages but no runtime,
   executor, runner, control-plane, protocol, or storage package.
@@ -123,11 +128,9 @@ cargo check -p runtrue-server -p runtrue-cli --no-default-features --all-targets
 cargo check -p runtrue-server -p runtrue-cli --all-targets
 ```
 
-The selected external frontend revision must independently pass its locked
-format, test, and clippy gates before the core dependency revision advances.
-
-The default-feature integration suite must also prove discovery, planning,
-approval, re-planning, and execution of a workflow under `.github/workflows/`.
+Each product distribution must pin its external frontend revision and
+independently pass the adapter's locked format, test, Clippy, discovery,
+planning, approval, re-planning, and execution gates.
 
 ## Extraction readiness
 
@@ -137,9 +140,10 @@ The repository was extracted only after all of the following became true:
    inputs that affect translation are covered by its configuration digest.
 2. Frontend provenance is present in every Capsule, approval, Evidence, and
    replay path that consumes translated input.
-3. The native-only server and CLI compositions are release gates.
+3. The core server and CLI remain concrete-frontend-free release gates.
 4. Adapter security and integration tests do not require private kernel APIs.
-5. Advancing an adapter revision is an explicit, auditable dependency update.
+5. Advancing an adapter revision in a product distribution is an explicit,
+   auditable dependency update.
 
 ## Extracted revisions and Cargo identity
 
@@ -162,31 +166,26 @@ core contract anchor `73a08bb9338503118baac57181ab2cb576b5489b`. The adapter emi
 only bounded resolution requests and non-executable declarations; trusted SCM
 constructs the immutable resolved program included in the configuration digest.
 
-Until packages are published with a stable compatibility promise, the adapter
-repository must consume all Runtrue packages from one full reviewed 40-character
-Git revision. Branches, floating tags, and mixed Runtrue revisions are
-forbidden. The Runtrue workspace must likewise select one exact reviewed
-frontend revision.
+Until packages are published with a stable compatibility promise, an adapter
+or product distribution must consume all Runtrue packages from one full
+reviewed 40-character Git revision. Branches, floating tags, and mixed Runtrue
+revisions are forbidden. The core Runtrue workspace does not select a frontend
+revision.
 
 An immutable frontend commit cannot name the hash of a core commit that already
 names that frontend commit: each Git commit hash covers the manifest containing
 the other hash, so mutual exact pins would require an infeasible hash fixed
-point. Extraction therefore follows an explicit three-revision sequence:
+point. The original extraction therefore followed an explicit three-revision
+sequence:
 
 1. Review and publish the core anchor `C0`.
 2. Create frontend revision `F`, with every Runtrue dependency pinned to `C0`.
 3. Create core integration revision `C1`, pinned to `F`.
 
-For the integrated `C1` build, the root manifest patches the five Runtrue
-packages named directly by `F` back to the reviewed local core paths. Cargo's
-top-level transitive patching gives the adapter and server one Rust package and
-trait identity while the frontend's standalone build remains reproducibly
-pinned to `C0`. The integration gate must verify that no duplicate Runtrue
-packages remain in the resolved graph.
-
-External adapter tests run at `F` against `C0`; native-only and integrated
-default-feature builds run at `C1`, with the integrated build selecting `F`.
-Deployment Evidence records `C0`, `F`, and `C1` before repository workflow
-execution is enabled. Removing the former monorepo copy is therefore a
-dependency-source change, not a redesign of the trusted planner or runtime
+That sequence is historical. Current core builds stop at the neutral contract;
+a product distribution selects `F` against its reviewed core anchor and must
+verify that no duplicate Runtrue packages remain in its resolved graph.
+Deployment Evidence records the core and frontend revisions before repository
+workflow execution is enabled. Removing the former monorepo copy was therefore
+a dependency-source change, not a redesign of the trusted planner or runtime
 engine.

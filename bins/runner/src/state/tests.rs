@@ -363,3 +363,37 @@ fn typed_completion_claims_survive_restart_and_legacy_records_stay_v1() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn typed_legacy_skipped_completion_replays_as_a_successful_no_op() {
+    let directory = tempfile::tempdir().unwrap();
+    let completion = v1::CompleteLeaseRequest {
+        lease_id: "lease-skipped".to_owned(),
+        fencing_generation: 1,
+        installation_fencing_epoch: 1,
+        final_state: "skipped".to_owned(),
+        exit_code: None,
+        error_code: String::new(),
+        result_digest: Some(v1::Digest::try_from(ContentDigest::sha256(b"skipped")).unwrap()),
+        artifact_ids: Vec::new(),
+        cache_entry_ids: Vec::new(),
+        completed_at: Some(timestamp(321_000)),
+        final_job_attempt: 0,
+        expected_log_frames: 0,
+    };
+    let mut store = RunnerStateStore::open(directory.path().join("state")).unwrap();
+    store
+        .set_pending_completion_with_objects(
+            &completion,
+            Vec::new(),
+            runtrue_engine::CredentialTaint::CredentialReleased,
+        )
+        .unwrap();
+    let typed = store
+        .pending_completion_record()
+        .unwrap()
+        .to_wire_v2()
+        .unwrap()
+        .unwrap();
+    assert_eq!(typed.final_state, v2::LeaseFinalState::Succeeded as i32);
+}

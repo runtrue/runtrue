@@ -18,9 +18,9 @@ use runtrue_server::{
     GitHubInstallationTokenProvider, GitHubOauthQuickstartConfig, HardenedGitHubOauthClient,
     HardenedHumanOidcClient, HumanOidcLimits, RunnerCertificateAuthority, RunnerControlConfig,
     RunnerControlService, RunnerEnrollmentService, ScmTaskWorker, ScmWorkerConfig,
-    DEFAULT_RUNNER_CERTIFICATE_LIFETIME, DEFAULT_SCM_WORKFLOW_DIRECTORY,
+    ServerComposition, DEFAULT_RUNNER_CERTIFICATE_LIFETIME, DEFAULT_SCM_WORKFLOW_DIRECTORY,
 };
-#[cfg(feature = "github-actions")]
+#[cfg(any())]
 use runtrue_server::{RepositoryActionBuilder, UnixRepositoryActionBuilder};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -956,13 +956,17 @@ fn load_github_installation_provider(
 
 #[tokio::main]
 async fn main() {
-    if let Err(error) = run().await {
+    if let Err(error) = run_with_composition(ServerComposition::core()).await {
         eprintln!("runtrue-server: {error}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
+/// Run the backend and its configured in-process workers using a statically
+/// assembled product composition.
+pub async fn run_with_composition(
+    composition: ServerComposition,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let config = Config::load(Args::parse())?;
     let scm_workflow_directory = env::var("RUNTRUE_SCM_WORKFLOW_DIRECTORY")
         .unwrap_or_else(|_| DEFAULT_SCM_WORKFLOW_DIRECTORY.to_owned());
@@ -1121,7 +1125,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                     github.credential_reference.clone(),
                     github.endpoints.clone(),
                 )?);
-                #[cfg(feature = "github-actions")]
+                #[cfg(any())]
                 {
                     let action_builder = match (
                         env::var_os("RUNTRUE_REPOSITORY_ACTION_BUILDER_SOCKET"),
@@ -1146,7 +1150,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                         action_builder,
                     )?)
                 }
-                #[cfg(not(feature = "github-actions"))]
+                #[cfg(not(any()))]
                 {
                     if env::var_os("RUNTRUE_REPOSITORY_ACTION_BUILDER_SOCKET").is_some()
                         || env::var_os("RUNTRUE_REPOSITORY_ACTION_CONTEXT_ROOT").is_some()
@@ -1160,7 +1164,8 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             }
         }
         None => None,
-    };
+    }
+    .map(|worker| worker.with_workflow_frontends(composition.workflow_frontends()));
     // The verifier state has its own protected representation; do not retain
     // raw environment/file secret bytes for the lifetime of the server.
     drop(security_seed);
@@ -1182,6 +1187,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         runner_grpc,
         embedded_autoscaler,
         Arc::clone(&stop_worker),
+        composition,
     )
     .await;
     if let Some(worker_thread) = worker_thread {
@@ -1260,6 +1266,7 @@ async fn serve_servers(
     runner_grpc: Option<RunnerGrpcRuntime>,
     embedded_autoscaler: Option<runtrue_autoscaler::AutoscalerRuntime>,
     stop_worker: Arc<AtomicBool>,
+    composition: ServerComposition,
 ) -> ServerTaskResult {
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let maintenance_control_plane = Arc::clone(&state.store);
@@ -1267,7 +1274,12 @@ async fn serve_servers(
         state.clone(),
         shutdown_receiver.clone(),
     ));
-    let mut http_task = tokio::spawn(serve_http(http_listen, state, shutdown_receiver.clone()));
+    let mut http_task = tokio::spawn(serve_http(
+        http_listen,
+        state,
+        shutdown_receiver.clone(),
+        composition,
+    ));
     let mut grpc_task = runner_grpc
         .map(|runtime| tokio::spawn(serve_runner_grpc(runtime, shutdown_receiver.clone())));
     let mut maintenance_task = tokio::spawn(scheduler_maintenance_loop(
@@ -1339,9 +1351,11 @@ async fn serve_http(
     listen: SocketAddr,
     state: AppState,
     shutdown: watch::Receiver<bool>,
+    composition: ServerComposition,
 ) -> ServerTaskResult {
+    let router = composition.decorate_http_router(router(state));
     axum::Server::bind(&listen)
-        .serve(router(state).into_make_service())
+        .serve(router.into_make_service())
         .with_graceful_shutdown(wait_for_shutdown(shutdown))
         .await?;
     Ok(())

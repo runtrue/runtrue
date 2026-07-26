@@ -1,13 +1,53 @@
 # Opt-in GitHub.com / GitHub Enterprise Server integration overlay.
 #
-# The App private key stays outside the server container. A separately managed
-# signer must create the exact mode-0600 Unix socket named by
-# RUNTRUE_GITHUB_SIGNER_SOCKET before this overlay starts.
+# The App private key is mounted only into the network-disabled signer. The
+# server receives only the signer's private Unix socket.
 services:
-  server:
+  github-signer:
+    image: "${RUNTRUE_IMAGE_REPOSITORY:-local/runtrue}-github-signer:${RUNTRUE_IMAGE_TAG:-0.1.0}"
     build:
-      secrets:
-        - github_token
+      context: ..
+      dockerfile: deploy/Containerfile.github-signer
+      args:
+        RUNTRUE_VERSION: "${RUNTRUE_IMAGE_TAG:-0.1.0}"
+        RUNTRUE_REVISION: "${RUNTRUE_IMAGE_REVISION:-unknown}"
+    user: "${RUNTRUE_RUNTIME_UID:?run deploy/bootstrap.sh first}:${RUNTRUE_RUNTIME_GID:?run deploy/bootstrap.sh first}"
+    environment:
+      RUNTRUE_GITHUB_SIGNER_SOCKET: /run/runtrue-github-signer/signer.sock
+      RUNTRUE_GITHUB_APP_PRIVATE_KEY_FILE: /run/runtrue-private/github-app-private-key.pem
+      RUNTRUE_GITHUB_APP_ID: "${RUNTRUE_GITHUB_APP_ID:?set the numeric GitHub App id}"
+      RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE: "${RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE:-provider://github-app/production}"
+    volumes:
+      - type: bind
+        source: "${RUNTRUE_GITHUB_APP_PRIVATE_KEY_FILE:?set the absolute host App private-key path}"
+        target: /run/runtrue-private/github-app-private-key.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/github-signer"
+        target: /run/runtrue-github-signer
+        bind:
+          create_host_path: false
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.25
+    network_mode: none
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/runtrue-github-signer", "--check-socket", "/run/runtrue-github-signer/signer.sock"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  server:
     environment:
       RUNTRUE_PUBLIC_ORIGIN: "${RUNTRUE_PUBLIC_ORIGIN:?set the external Runtrue HTTPS origin}"
       RUNTRUE_BROWSER_COOKIE_SEALING_KEY_FILE: /run/runtrue-secrets/browser-cookie.key
@@ -17,35 +57,29 @@ services:
       RUNTRUE_GITHUB_WEB_ORIGIN: "${RUNTRUE_GITHUB_WEB_ORIGIN:-https://github.com}"
       RUNTRUE_GITHUB_API_ORIGIN: "${RUNTRUE_GITHUB_API_ORIGIN:-https://api.github.com}"
       RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE: "${RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE:-provider://github-app/production}"
-      RUNTRUE_GITHUB_APP_JWT_PROVIDER_SOCKET: /run/runtrue-github-signer.sock
+      RUNTRUE_GITHUB_APP_JWT_PROVIDER_SOCKET: /run/runtrue-github-signer/signer.sock
       RUNTRUE_GITHUB_WEBHOOK_SECRET_FILE: /run/runtrue-secrets/github-webhook.secret
       RUNTRUE_GITHUB_OAUTH_CLIENT_ID: "${RUNTRUE_GITHUB_OAUTH_CLIENT_ID:?set the GitHub App OAuth client id}"
       RUNTRUE_GITHUB_OAUTH_CLIENT_SECRET_FILE: /run/runtrue-secrets/github-oauth-client.secret
       RUNTRUE_GITHUB_OAUTH_ADMIN_USER_IDS: "${RUNTRUE_GITHUB_OAUTH_ADMIN_USER_IDS:?set at least one numeric GitHub administrator id}"
       RUNTRUE_GITHUB_OAUTH_OPERATOR_USER_IDS: "${RUNTRUE_GITHUB_OAUTH_OPERATOR_USER_IDS:-}"
-      # The GitHub Actions frontend discovers workflow files under this root.
-      # Repositories can still override it from their Runtrue settings.
-      RUNTRUE_SCM_WORKFLOW_DIRECTORY: .github/workflows
+      # Core discovers only native Runtrue workflows. External frontends
+      # translate their source format outside this deployment.
+      RUNTRUE_SCM_WORKFLOW_DIRECTORY: .runtrue/workflows
     volumes:
       - type: bind
-        source: "${RUNTRUE_GITHUB_SIGNER_SOCKET:?set the absolute host signer socket path}"
-        target: /run/runtrue-github-signer.sock
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/github-signer"
+        target: /run/runtrue-github-signer
         read_only: true
         bind:
           create_host_path: false
+    depends_on:
+      github-signer:
+        condition: service_healthy
     networks:
       - control
       - scm-egress
 
-  backup:
-    build:
-      secrets:
-        - github_token
-
 networks:
   scm-egress:
     driver: bridge
-
-secrets:
-  github_token:
-    environment: GITHUB_TOKEN
