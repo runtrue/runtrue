@@ -21,6 +21,7 @@ fail() {
 required=(
   compose.yml
   compose.github-app.yml
+  compose.github-app-provider.yml
   compose.runner-tls.yml
   compose.runner-wasm.yml
   compose.runner-oci.yml
@@ -33,6 +34,7 @@ required=(
   Containerfile.backup
   bootstrap.sh
   healthcheck.sh
+  github-app-provider-probe.py
   traefik-entrypoint.sh
 )
 for file in "${required[@]}"; do
@@ -45,6 +47,7 @@ done
 bash -n "${DEPLOY_DIR}/bootstrap.sh"
 bash -n "${DEPLOY_DIR}/healthcheck.sh"
 sh -n "${DEPLOY_DIR}/traefik-entrypoint.sh"
+PYTHONDONTWRITEBYTECODE=1 python3 "${DEPLOY_DIR}/tests/test-github-app-provider-probe.py"
 
 validate_tracked_executable() {
   local path=$1 mode
@@ -56,6 +59,7 @@ validate_tracked_executable() {
 validate_tracked_executable "${DEPLOY_DIR}/bootstrap.sh"
 validate_tracked_executable "${DEPLOY_DIR}/healthcheck.sh"
 validate_tracked_executable "${DEPLOY_DIR}/traefik-entrypoint.sh"
+validate_tracked_executable "${DEPLOY_DIR}/github-app-provider-probe.py"
 
 command -v docker >/dev/null 2>&1 || fail 'Docker is required'
 docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required'
@@ -67,7 +71,9 @@ for directory in server secrets keys backups restores recovery-config runner wor
 done
 install -d -m 0700 "${TEMPORARY_ROOT}/autoscaler/claims"
 touch "${TEMPORARY_ROOT}/traefik/acme.json" "${TEMPORARY_ROOT}/runner-secrets/autoscaler.token"
-chmod 0600 "${TEMPORARY_ROOT}/traefik/acme.json" "${TEMPORARY_ROOT}/runner-secrets/autoscaler.token"
+touch "${TEMPORARY_ROOT}/github-app-private-key.pem"
+chmod 0600 "${TEMPORARY_ROOT}/traefik/acme.json" "${TEMPORARY_ROOT}/runner-secrets/autoscaler.token" \
+  "${TEMPORARY_ROOT}/github-app-private-key.pem"
 
 cat >"${TEMPORARY_ROOT}/compose.env" <<EOF
 RUNTRUE_RUNTIME_UID=10001
@@ -98,10 +104,13 @@ env \
   RUNTRUE_GITHUB_APP_ID=123 \
   RUNTRUE_GITHUB_APP_SLUG=runtrue \
   RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE=provider://github-app/production \
+  RUNTRUE_GITHUB_APP_JWT_PROVIDER_IMAGE=registry.example.com/github-app-jwt-provider@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  RUNTRUE_GITHUB_APP_PRIVATE_KEY_FILE="${TEMPORARY_ROOT}/github-app-private-key.pem" \
   RUNTRUE_GITHUB_OAUTH_CLIENT_ID=Iv1.validation \
   RUNTRUE_GITHUB_OAUTH_ADMIN_USER_IDS=123456 \
   "${common[@]}" \
     -f "${DEPLOY_DIR}/compose.github-app.yml" \
+    -f "${DEPLOY_DIR}/compose.github-app-provider.yml" \
     -f "${DEPLOY_DIR}/compose.runner-tls.yml" \
     -f "${DEPLOY_DIR}/compose.runner-wasm.yml" \
     -f "${DEPLOY_DIR}/compose.autoscaler.yml" \
@@ -115,7 +124,7 @@ import sys
 
 model = json.loads(pathlib.Path(sys.argv[1]).read_text())
 services = model["services"]
-required = {"server", "traefik", "autoscaler"}
+required = {"server", "traefik", "autoscaler", "github-app-jwt-provider"}
 if set(services) != required:
     raise SystemExit(f"unexpected default services: {set(services)!r}")
 for name, service in services.items():
@@ -135,6 +144,31 @@ provider_mounts = [
 ]
 if len(provider_mounts) != 1 or provider_mounts[0].get("read_only") is not True:
     raise SystemExit("external JWT provider socket directory must be mounted read-only")
+provider = services["github-app-jwt-provider"]
+if provider.get("image") != "registry.example.com/github-app-jwt-provider@sha256:" + "0123456789abcdef" * 4:
+    raise SystemExit("external JWT provider image must retain its immutable digest")
+if provider.get("network_mode") != "none":
+    raise SystemExit("external JWT provider must have networking disabled")
+if provider.get("read_only") is not True:
+    raise SystemExit("external JWT provider root filesystem must be read-only")
+if provider.get("cap_drop") != ["ALL"]:
+    raise SystemExit("external JWT provider must drop every capability")
+if "no-new-privileges:true" not in provider.get("security_opt", []):
+    raise SystemExit("external JWT provider must enable no-new-privileges")
+if provider.get("user") != "10001:10001":
+    raise SystemExit("external JWT provider must use the deployment uid and gid")
+if provider.get("restart") != "unless-stopped":
+    raise SystemExit("external JWT provider must restart with the Compose stack")
+if provider.get("pids_limit") != 64:
+    raise SystemExit("external JWT provider PID limit changed")
+provider_mounts = {mount["target"]: mount for mount in provider.get("volumes", [])}
+if provider_mounts["/run/runtrue-github-app-private-key/private-key.pem"].get("read_only") is not True:
+    raise SystemExit("external JWT provider private key must be mounted read-only")
+if provider_mounts["/run/runtrue-github-app-provider"].get("read_only") is True:
+    raise SystemExit("external JWT provider socket directory must be writable")
+dependency = server.get("depends_on", {}).get("github-app-jwt-provider", {})
+if dependency.get("condition") != "service_healthy":
+    raise SystemExit("server must wait for a healthy external JWT provider")
 if "/var/run/docker.sock" not in json.dumps(services["autoscaler"]):
     raise SystemExit("autoscaler is missing the Docker socket")
 if services["server"].get("ports"):

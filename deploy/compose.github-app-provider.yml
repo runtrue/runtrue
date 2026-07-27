@@ -1,0 +1,45 @@
+# Docker-only lifecycle for an independently built GitHub App JWT provider.
+#
+# The image is intentionally not built by this repository. It must satisfy the
+# OCI and Unix-socket contracts in docs/operations/github-app.md and carry a
+# HEALTHCHECK that exercises a complete mint request. Pin the image by digest.
+services:
+  server:
+    depends_on:
+      github-app-jwt-provider:
+        condition: service_healthy
+        restart: true
+
+  github-app-jwt-provider:
+    image: "${RUNTRUE_GITHUB_APP_JWT_PROVIDER_IMAGE:?set a digest-pinned external provider image}"
+    user: "${RUNTRUE_RUNTIME_UID:?run deploy/bootstrap.sh first}:${RUNTRUE_RUNTIME_GID:?run deploy/bootstrap.sh first}"
+    environment:
+      RUNTRUE_GITHUB_APP_ID: "${RUNTRUE_GITHUB_APP_ID:?set the numeric GitHub App id}"
+      RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE: "${RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE:-provider://github-app/production}"
+      RUNTRUE_GITHUB_APP_PRIVATE_KEY_FILE: /run/runtrue-github-app-private-key/private-key.pem
+      RUNTRUE_GITHUB_APP_JWT_PROVIDER_SOCKET: /run/runtrue-github-app-provider/provider.sock
+    volumes:
+      - type: bind
+        source: "${RUNTRUE_GITHUB_APP_PRIVATE_KEY_FILE:?set the absolute host path to the App private key}"
+        target: /run/runtrue-github-app-private-key/private-key.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${RUNTRUE_STATE_DIR:?run deploy/bootstrap.sh first}/github-app-provider"
+        target: /run/runtrue-github-app-provider
+        bind:
+          create_host_path: false
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=${RUNTRUE_RUNTIME_UID},gid=${RUNTRUE_RUNTIME_GID}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.50
+    pids_limit: 64

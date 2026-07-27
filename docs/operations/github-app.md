@@ -217,6 +217,35 @@ minutes, and never return or persist the private key. Runtrue independently
 validates the returned JWT before exchanging it for a repository-scoped
 installation token.
 
+### External provider OCI contract
+
+`deploy/compose.github-app-provider.yml` can give an external provider image a
+Docker-only lifecycle without making that implementation part of Runtrue.
+Operators must independently review the image and pin
+`RUNTRUE_GITHUB_APP_JWT_PROVIDER_IMAGE` with an immutable `@sha256:` digest.
+The image contract is:
+
+- its entrypoint starts the provider as the arbitrary non-root uid/gid supplied
+  by Compose;
+- it reads `RUNTRUE_GITHUB_APP_ID`,
+  `RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE`,
+  `RUNTRUE_GITHUB_APP_PRIVATE_KEY_FILE`, and
+  `RUNTRUE_GITHUB_APP_JWT_PROVIDER_SOCKET`;
+- it reads the key only from the configured file, creates the socket with exact
+  mode 0600, replaces only a socket it owns, and handles graceful termination;
+- it needs no network, Linux capabilities, writable root filesystem, Docker
+  socket, or host namespace;
+- it includes an OCI `HEALTHCHECK` that fails until a complete bounded mint
+  round trip succeeds and that never logs a JWT or key material.
+
+Compose mounts only the key file read-only and the socket directory read/write,
+drops every capability, disables networking, and starts the Runtrue server only
+after that health check passes. An image without the required health check
+fails closed at startup. `deploy/github-app-provider-probe.py` provides a
+provider-independent protocol probe for deployment acceptance; it validates
+the socket ownership/mode, framing, strict response shape, and public JWT
+claims without reading or verifying the private key.
+
 ## Network and resource posture
 
 GitHub API calls are HTTPS-only with environment proxies and redirects

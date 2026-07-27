@@ -29,6 +29,8 @@ may change APIs, but migrations and compatibility requirements remain explicit.
 - Core no longer ships a GitHub App private-key implementation or signer image.
   GitHub App deployments provide an independently reviewed, network-disabled
   JWT provider through the existing bounded Unix-socket protocol.
+- Add an opt-in, hardened Compose lifecycle and provider-independent protocol
+  probe for a separately built, digest-pinned GitHub App JWT provider image.
 ### Security
 
 - Runner and SCM operations continue to require current installation, lease,

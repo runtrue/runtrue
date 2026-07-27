@@ -39,6 +39,8 @@ curl --fail http://127.0.0.1:8080/healthz
 ## Optional Compose files
 
 - `compose.github-app.yml` enables GitHub App integration.
+- `compose.github-app-provider.yml` gives a separately built, digest-pinned JWT
+  provider image a Docker-only lifecycle.
 - `compose.traefik.yml` adds the public HTTPS edge.
 - `compose.runner-tls.yml` enables runner enrollment and control TLS.
 - `compose.runner-wasm.yml` configures the local WASM runner profile.
@@ -62,16 +64,12 @@ Edit `deploy/state/github-app.env`, then start the public stack:
 ```sh
 export GITHUB_TOKEN="$(gh auth token)"
 
-# Start an independently operated, network-disabled GitHub App JWT provider
-# first. It must run as RUNTRUE_RUNTIME_UID:RUNTRUE_RUNTIME_GID and create a
-# mode-0600 socket at:
-#   deploy/state/github-app-provider/provider.sock
-
 docker compose \
   --env-file deploy/state/compose.env \
   --env-file deploy/state/github-app.env \
   -f deploy/compose.yml \
   -f deploy/compose.github-app.yml \
+  -f deploy/compose.github-app-provider.yml \
   -f deploy/compose.runner-tls.yml \
   -f deploy/compose.runner-wasm.yml \
   -f deploy/compose.traefik.yml \
@@ -84,6 +82,18 @@ provider that implements the bounded protocol in
 that provider access to the App private key and no network access. The Runtrue
 server mounts the provider directory read-only and receives only its private
 Unix socket.
+The optional provider overlay enforces those container boundaries and waits
+for the image's mandatory health check before starting the server. It does not
+select, build, or trust an image for the operator.
+
+After the provider becomes healthy, independently exercise its public contract:
+
+```sh
+deploy/github-app-provider-probe.py \
+  --socket deploy/state/github-app-provider/provider.sock \
+  --app-id "$RUNTRUE_GITHUB_APP_ID" \
+  --credential-reference "$RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE"
+```
 
 ## Docker-managed OCI runner
 
