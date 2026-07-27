@@ -124,8 +124,8 @@ Data, delivery, and operations:
   registry checksums, plus canonical release provenance.
 - A release toolchain and manual promotion runbook for amd64/arm64 archives,
   out-of-band roots, signed metadata, SBOM/provenance evidence, and exact target
-  verification. Automated publication remains disabled until it runs on
-  Runtrue. See the [release runbook](docs/operations/releases.md).
+  verification. Automated publication remains disabled. See the
+  [release runbook](docs/operations/releases.md).
 - Pinned Rust 1.94 verification gates for formatting, all targets, workspace
   tests, Clippy, schema/API/migration conformance, deployment validation,
   dependency auditing, and every core image build.
@@ -205,7 +205,7 @@ the local Capsule, and creates a run only after an exact match:
 
 ```bash
 cargo run -p runtrue-cli -- submit build \
-  --workflow .runtrue/workflows/ci.yaml \
+  --workflow examples/workflows/secure-ci.yaml \
   --server https://runtrue.example \
   --repository-id repo-ci \
   --token-file .runtrue/api.token

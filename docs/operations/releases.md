@@ -1,10 +1,9 @@
 # Release and promotion runbook
 
-Runtrue does not currently ship a GitHub Actions CI or release workflow. That
-is intentional. The staged native `.runtrue/workflows/ci.yaml` workflow is
-designed to validate trusted pushes to `main` on Runtrue itself, while release
-automation remains disabled. Do not add a temporary GitHub Actions publisher
-as a shortcut.
+Runtrue uses GitHub Actions to verify pull requests and pushes to `main`.
+Release automation remains disabled: CI validates source, dependencies,
+conformance, deployment configuration, and the runner image, but it does not
+publish tags, packages, images, archives, or releases.
 
 This document remains a manual, fail-closed operator checklist. Keep all
 generated release artifacts private. Do not publish a tag, package, image,
@@ -96,27 +95,18 @@ bytes and therefore requires new checksums, metadata, signatures, and approval.
 Never edit an archive, SBOM, provenance statement, checksum list, or bundle
 after signing.
 
-## Native automation requirement
+## Automation requirement
 
-The future Runtrue release workflow must preserve the same separation:
+Any future Runtrue release workflow must preserve the same separation:
 credential-free build jobs, immutable evidence transfer, exact-plan approval,
 independent signing, and a distinct promotion job. Publication credentials may
 exist only in that final approved boundary. Bisim must cover the local and
 remote release plan before automated publication is enabled.
 
-The source-verification workflow is deliberately not a pull-request check.
-Rootless OCI is an explicitly trusted shared-kernel profile and must not execute
-arbitrary public contribution code. Keep the `pull_request` trigger absent
-until Firecracker can hydrate the authenticated source snapshot and a matching
-profile and capacity are configured and validated end to end.
-
-The staged workflow remains deployment-agnostic. Operators must connect the
-intended SCM provider and supply a signed, prehydrated assignment for the locked
-Rust OCI image. Instance names, domains, and provider routing are deployment
-configuration and must not be encoded in this repository. Until a deployment
-validates those requirements, the workflow is fail-closed future configuration
-rather than live post-merge evidence, and it cannot be selected as a required
-public-PR check.
+The checked-in GitHub Actions workflow is deployment-agnostic, runs without
+repository secrets, and has read-only source permission. It is the current
+source-verification path for both pull requests and `main`; it does not replace
+Runtrue's runtime isolation or release trust boundaries.
 
 ## Consumer verification
 
