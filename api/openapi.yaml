@@ -1817,6 +1817,22 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/ui/runs/{run_id}/retry:
+    post:
+      operationId: retryBrowserRun
+      security:
+        - browserAccess: []
+          browserCsrf: []
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+      requestBody: {$ref: '#/components/requestBodies/BrowserFormMutation'}
+      responses:
+        '202': {description: Durable retry event accepted}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /api/v1/ui/approvals/{approval_id}/decisions:
     post:
       operationId: decideBrowserWorkflowApproval

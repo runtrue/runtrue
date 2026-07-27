@@ -670,28 +670,26 @@ async fn browser_identity_view(
             member_ids,
         });
     }
-    let users = records
-        .into_iter()
-        .map(|record| {
-            Ok(BrowserUserView {
-                team_ids: user_teams.remove(&record.id).unwrap_or_default(),
-                id: record.id,
-                display_name: record.display_name,
-                primary_email: record.primary_email,
-                status: record.status,
-                created_at: timestamp(record.created_unix_ms)
-                    .map_err(|()| internal_problem(request_id))?,
-                updated_at: timestamp(record.updated_unix_ms)
-                    .map_err(|()| internal_problem(request_id))?,
-                last_seen_at: record
-                    .last_seen_unix_ms
-                    .map(timestamp)
-                    .transpose()
-                    .map_err(|()| internal_problem(request_id))?,
-                version: record.version,
-            })
-        })
-        .collect::<Result<Vec<_>, Response>>()?;
+    let mut users = Vec::with_capacity(records.len());
+    for record in records {
+        users.push(BrowserUserView {
+            team_ids: user_teams.remove(&record.id).unwrap_or_default(),
+            id: record.id,
+            display_name: record.display_name,
+            primary_email: record.primary_email,
+            status: record.status,
+            created_at: timestamp(record.created_unix_ms)
+                .map_err(|()| internal_problem(request_id))?,
+            updated_at: timestamp(record.updated_unix_ms)
+                .map_err(|()| internal_problem(request_id))?,
+            last_seen_at: record
+                .last_seen_unix_ms
+                .map(timestamp)
+                .transpose()
+                .map_err(|()| internal_problem(request_id))?,
+            version: record.version,
+        });
+    }
     Ok(BrowserIdentityView { users, teams })
 }
 
@@ -715,22 +713,31 @@ async fn browser_identity_session(
     Ok(context)
 }
 
-fn browser_form_value(request_id: &RequestId, body: &[u8], name: &str) -> Result<String, Response> {
+fn browser_form_value(
+    request_id: &RequestId,
+    body: &[u8],
+    name: &str,
+) -> Result<String, Box<Response>> {
     match form_value(body, name) {
         Ok(Some(value)) if !value.trim().is_empty() => Ok(value),
-        _ => Err(problem_response(
+        _ => Err(Box::new(problem_response(
             request_id,
             StatusCode::BAD_REQUEST,
             "Invalid object",
             format!("{name} is required"),
-        )),
+        ))),
     }
 }
 
-fn browser_form_version(request_id: &RequestId, body: &[u8]) -> Result<u64, Response> {
+fn browser_form_version(request_id: &RequestId, body: &[u8]) -> Result<u64, Box<Response>> {
     browser_form_value(request_id, body, "expected_version")?
         .parse()
-        .map_err(|_| invalid_object_problem(request_id, "expected_version is invalid"))
+        .map_err(|_| {
+            Box::new(invalid_object_problem(
+                request_id,
+                "expected_version is invalid",
+            ))
+        })
 }
 
 async fn browser_mutation_session(
@@ -793,11 +800,11 @@ pub(in crate::app) async fn browser_create_user(
         id,
         display_name: match browser_form_value(&request_id, &body, "display_name") {
             Ok(value) => value,
-            Err(response) => return response,
+            Err(response) => return *response,
         },
         primary_email: match browser_form_value(&request_id, &body, "primary_email") {
             Ok(value) => value,
-            Err(response) => return response,
+            Err(response) => return *response,
         },
         status: "active".to_owned(),
         created_unix_ms: now,
@@ -846,7 +853,7 @@ pub(in crate::app) async fn browser_create_team(
         tenant_id: context.tenant_id.clone(),
         name: match browser_form_value(&request_id, &body, "name") {
             Ok(value) => value,
-            Err(response) => return response,
+            Err(response) => return *response,
         },
         description: match form_value(&body, "description") {
             Ok(value) => value.unwrap_or_default(),
@@ -880,7 +887,7 @@ pub(in crate::app) async fn browser_update_team(
     };
     let expected_version = match browser_form_version(&request_id, &body) {
         Ok(version) => version,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let mut record = match state.store.team(&context.tenant_id, &team_id).await {
         Ok(record) => record,
@@ -896,7 +903,7 @@ pub(in crate::app) async fn browser_update_team(
     }
     record.name = match browser_form_value(&request_id, &body, "name") {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     record.description = match form_value(&body, "description") {
         Ok(value) => value.unwrap_or_default(),
@@ -904,7 +911,7 @@ pub(in crate::app) async fn browser_update_team(
     };
     record.status = match browser_form_value(&request_id, &body, "status") {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     record.updated_unix_ms = match now_unix_ms(&request_id) {
         Ok(now) => now.max(record.updated_unix_ms),
@@ -937,7 +944,7 @@ pub(in crate::app) async fn browser_update_user(
     };
     let expected_version = match browser_form_version(&request_id, &body) {
         Ok(version) => version,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let mut record = match state.store.human_user(&context.tenant_id, &user_id).await {
         Ok(record) => record,
@@ -953,15 +960,15 @@ pub(in crate::app) async fn browser_update_user(
     }
     record.display_name = match browser_form_value(&request_id, &body, "display_name") {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     record.primary_email = match browser_form_value(&request_id, &body, "primary_email") {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     record.status = match browser_form_value(&request_id, &body, "status") {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     record.updated_unix_ms = match now_unix_ms(&request_id) {
         Ok(now) => now.max(record.updated_unix_ms),
@@ -998,11 +1005,11 @@ pub(in crate::app) async fn browser_change_team_member(
     };
     let user_id = match browser_form_value(&request_id, &body, "user_id") {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let action = match browser_form_value(&request_id, &body, "action") {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let result = match action.as_str() {
         "add" => {

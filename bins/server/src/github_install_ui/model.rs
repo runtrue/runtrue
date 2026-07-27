@@ -316,7 +316,7 @@ impl GitHubUiAlert {
             ),
             Self::ConfigurationIncomplete => (
                 "Operator configuration required",
-                "The GitHub App identity, signer, webhook, and setup callback must all be ready before installation.",
+                "The GitHub App identity, JWT provider, webhook, and setup callback must all be ready before installation.",
                 StatusTone::Warn,
             ),
             Self::PermissionMismatch => (

@@ -26,6 +26,9 @@ may change APIs, but migrations and compatibility requirements remain explicit.
   an authorized user selects repositories during onboarding.
 - The CSRF cookie uses `SameSite=Lax` so the OAuth navigation can return to the
   browser flow; state-changing requests still require an independent CSRF token.
+- Core no longer ships a GitHub App private-key implementation or signer image.
+  GitHub App deployments provide an independently reviewed, network-disabled
+  JWT provider through the existing bounded Unix-socket protocol.
 ### Security
 
 - Runner and SCM operations continue to require current installation, lease,

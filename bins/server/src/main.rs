@@ -56,8 +56,8 @@ const DEFAULT_DATABASE: &str = ".runtrue/server/control-plane.sqlite";
 const DEFAULT_SECURITY_KEY: &str = ".runtrue/server/security.key";
 const MAX_SECRET_FILE_BYTES: u64 = 4096;
 const MAX_RUNNER_TLS_FILE_BYTES: u64 = 1024 * 1024;
-const MAX_GITHUB_SIGNER_FRAME_BYTES: usize = 16 * 1024;
-const GITHUB_SIGNER_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_GITHUB_JWT_PROVIDER_FRAME_BYTES: usize = 16 * 1024;
+const GITHUB_JWT_PROVIDER_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_DUE_SCHEDULES_PER_MAINTENANCE_TICK: usize = 100;
 
 #[derive(Debug, Parser)]
@@ -90,7 +90,7 @@ struct Args {
     #[arg(long)]
     github_webhook_secret_file: Option<PathBuf>,
 
-    /// Numeric GitHub App id used to validate non-exportable signer JWTs.
+    /// Numeric GitHub App id used to validate non-exportable provider JWTs.
     #[arg(long)]
     github_app_id: Option<u64>,
 
@@ -102,7 +102,7 @@ struct Args {
     #[arg(long)]
     github_app_credential_reference: Option<String>,
 
-    /// Local Unix socket for the non-exportable GitHub App JWT signer.
+    /// Local Unix socket for the non-exportable GitHub App JWT provider.
     #[arg(long)]
     github_app_jwt_provider_socket: Option<PathBuf>,
 
@@ -713,7 +713,7 @@ enum StartupError {
     #[error("repository-action building requires both RUNTRUE_REPOSITORY_ACTION_BUILDER_SOCKET and RUNTRUE_REPOSITORY_ACTION_CONTEXT_ROOT, plus a live secure builder socket")]
     InvalidRepositoryActionBuilder,
     #[error("GitHub App JWT provider socket `{0}` is not a secure local Unix socket")]
-    InvalidGitHubSignerSocket(PathBuf),
+    InvalidGitHubJwtProviderSocket(PathBuf),
     #[error("RUNTRUE_RUNNER_GRPC_LISTEN is not a valid socket address")]
     InvalidRunnerGrpcListen,
     #[error("RUNTRUE_RUNNER_ENROLLMENT_LISTEN is not a valid socket address")]
@@ -765,7 +765,7 @@ struct UnixSocketGitHubAppJwtProvider {
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
-struct GitHubSignerRequest<'a> {
+struct GitHubJwtProviderRequest<'a> {
     version: u32,
     operation: &'static str,
     app_id: u64,
@@ -775,7 +775,7 @@ struct GitHubSignerRequest<'a> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GitHubSignerResponse {
+struct GitHubJwtProviderResponse {
     version: u32,
     jwt: String,
 }
@@ -784,7 +784,7 @@ impl UnixSocketGitHubAppJwtProvider {
     fn open(config: &GitHubAppConfig) -> Result<Self, StartupError> {
         #[cfg(unix)]
         {
-            validate_github_signer_parent_path(&config.jwt_provider_socket)?;
+            validate_github_jwt_provider_parent_path(&config.jwt_provider_socket)?;
             reject_symlink_components(&config.jwt_provider_socket)?;
             let metadata = fs::symlink_metadata(&config.jwt_provider_socket)
                 .map_err(|source| io_error(&config.jwt_provider_socket, source))?;
@@ -793,14 +793,14 @@ impl UnixSocketGitHubAppJwtProvider {
                 || (metadata.uid() != 0 && metadata.uid() != effective_uid)
                 || metadata.permissions().mode() & 0o7777 != 0o600
             {
-                return Err(StartupError::InvalidGitHubSignerSocket(
+                return Err(StartupError::InvalidGitHubJwtProviderSocket(
                     config.jwt_provider_socket.clone(),
                 ));
             }
         }
         #[cfg(not(unix))]
         {
-            return Err(StartupError::InvalidGitHubSignerSocket(
+            return Err(StartupError::InvalidGitHubJwtProviderSocket(
                 config.jwt_provider_socket.clone(),
             ));
         }
@@ -813,13 +813,15 @@ impl UnixSocketGitHubAppJwtProvider {
 }
 
 #[cfg(unix)]
-fn validate_github_signer_parent_path(path: &Path) -> Result<(), StartupError> {
+fn validate_github_jwt_provider_parent_path(path: &Path) -> Result<(), StartupError> {
     if !path.is_absolute() {
-        return Err(StartupError::InvalidGitHubSignerSocket(path.to_owned()));
+        return Err(StartupError::InvalidGitHubJwtProviderSocket(
+            path.to_owned(),
+        ));
     }
     let parent = path
         .parent()
-        .ok_or_else(|| StartupError::InvalidGitHubSignerSocket(path.to_owned()))?;
+        .ok_or_else(|| StartupError::InvalidGitHubJwtProviderSocket(path.to_owned()))?;
     let effective_uid = nix::unistd::geteuid().as_raw();
     let mut checked = PathBuf::new();
     for component in parent.components() {
@@ -833,14 +835,16 @@ fn validate_github_signer_parent_path(path: &Path) -> Result<(), StartupError> {
             || (metadata.uid() != 0 && metadata.uid() != effective_uid)
             || (mode & 0o022 != 0 && !root_sticky)
         {
-            return Err(StartupError::InvalidGitHubSignerSocket(checked.clone()));
+            return Err(StartupError::InvalidGitHubJwtProviderSocket(
+                checked.clone(),
+            ));
         }
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn connect_github_signer(path: &Path) -> Result<UnixStream, GitHubError> {
+fn connect_github_jwt_provider(path: &Path) -> Result<UnixStream, GitHubError> {
     use nix::{
         errno::Errno,
         poll::{poll, PollFd, PollFlags},
@@ -864,7 +868,7 @@ fn connect_github_signer(path: &Path) -> Result<UnixStream, GitHubError> {
             let mut events = [PollFd::new(&descriptor, PollFlags::POLLOUT)];
             let ready = poll(
                 &mut events,
-                i32::try_from(GITHUB_SIGNER_IO_TIMEOUT.as_millis())
+                i32::try_from(GITHUB_JWT_PROVIDER_IO_TIMEOUT.as_millis())
                     .map_err(|_| GitHubError::JwtProvider)?,
             )
             .map_err(|_| GitHubError::JwtProvider)?;
@@ -890,7 +894,7 @@ impl GitHubAppJwtProvider for UnixSocketGitHubAppJwtProvider {
     fn mint(&mut self, now_unix_seconds: u64) -> Result<SensitiveToken, GitHubError> {
         #[cfg(unix)]
         {
-            let request = serde_json::to_vec(&GitHubSignerRequest {
+            let request = serde_json::to_vec(&GitHubJwtProviderRequest {
                 version: 1,
                 operation: "github.app-jwt.mint",
                 app_id: self.app_id,
@@ -898,13 +902,13 @@ impl GitHubAppJwtProvider for UnixSocketGitHubAppJwtProvider {
                 now_unix_seconds,
             })
             .map_err(|_| GitHubError::JwtProvider)?;
-            if request.is_empty() || request.len() > MAX_GITHUB_SIGNER_FRAME_BYTES {
+            if request.is_empty() || request.len() > MAX_GITHUB_JWT_PROVIDER_FRAME_BYTES {
                 return Err(GitHubError::JwtProvider);
             }
-            let mut stream = connect_github_signer(&self.socket_path)?;
+            let mut stream = connect_github_jwt_provider(&self.socket_path)?;
             stream
-                .set_read_timeout(Some(GITHUB_SIGNER_IO_TIMEOUT))
-                .and_then(|()| stream.set_write_timeout(Some(GITHUB_SIGNER_IO_TIMEOUT)))
+                .set_read_timeout(Some(GITHUB_JWT_PROVIDER_IO_TIMEOUT))
+                .and_then(|()| stream.set_write_timeout(Some(GITHUB_JWT_PROVIDER_IO_TIMEOUT)))
                 .map_err(|_| GitHubError::JwtProvider)?;
             let request_length = u32::try_from(request.len())
                 .map_err(|_| GitHubError::JwtProvider)?
@@ -920,14 +924,14 @@ impl GitHubAppJwtProvider for UnixSocketGitHubAppJwtProvider {
                 .map_err(|_| GitHubError::JwtProvider)?;
             let length = usize::try_from(u32::from_be_bytes(length))
                 .map_err(|_| GitHubError::JwtProvider)?;
-            if length == 0 || length > MAX_GITHUB_SIGNER_FRAME_BYTES {
+            if length == 0 || length > MAX_GITHUB_JWT_PROVIDER_FRAME_BYTES {
                 return Err(GitHubError::JwtProvider);
             }
             let mut response = Zeroizing::new(vec![0_u8; length]);
             stream
                 .read_exact(response.as_mut_slice())
                 .map_err(|_| GitHubError::JwtProvider)?;
-            let response: GitHubSignerResponse =
+            let response: GitHubJwtProviderResponse =
                 serde_json::from_slice(&response).map_err(|_| GitHubError::JwtProvider)?;
             if response.version != 1 {
                 return Err(GitHubError::JwtProvider);
@@ -2070,7 +2074,7 @@ mod tests {
                 Some(123),
                 Some("runtrue".to_owned()),
                 None,
-                Some(PathBuf::from("/run/runtrue/github-signer.sock")),
+                Some(PathBuf::from("/run/runtrue/github-jwt-provider.sock")),
                 None,
                 None,
             ),
@@ -2081,7 +2085,7 @@ mod tests {
                 Some(123),
                 Some("runtrue".to_owned()),
                 Some("file:///tmp/exported-key.pem".to_owned()),
-                Some(PathBuf::from("/run/runtrue/github-signer.sock")),
+                Some(PathBuf::from("/run/runtrue/github-jwt-provider.sock")),
                 None,
                 None,
             ),
@@ -2092,7 +2096,7 @@ mod tests {
                 Some(123),
                 Some("Project_Runtrue".to_owned()),
                 Some("provider://github-app/production".to_owned()),
-                Some(PathBuf::from("/run/runtrue/github-signer.sock")),
+                Some(PathBuf::from("/run/runtrue/github-jwt-provider.sock")),
                 None,
                 None,
             ),
@@ -2102,7 +2106,7 @@ mod tests {
             Some(123),
             Some("runtrue".to_owned()),
             Some("provider://github-app/production".to_owned()),
-            Some(PathBuf::from("/run/runtrue/github-signer.sock")),
+            Some(PathBuf::from("/run/runtrue/github-jwt-provider.sock")),
             None,
             None,
         )
@@ -2119,7 +2123,7 @@ mod tests {
             Some(123),
             None,
             Some("provider://github-app/production".to_owned()),
-            Some(PathBuf::from("/run/runtrue/github-signer.sock")),
+            Some(PathBuf::from("/run/runtrue/github-jwt-provider.sock")),
             Some("https://github.example".to_owned()),
             Some("https://github.example/api/v3".to_owned()),
         )
@@ -2130,7 +2134,7 @@ mod tests {
             Some(123),
             Some("runtrue".to_owned()),
             Some("provider://github-app/production".to_owned()),
-            Some(PathBuf::from("/run/runtrue/github-signer.sock")),
+            Some(PathBuf::from("/run/runtrue/github-jwt-provider.sock")),
             Some("https://github.example.com".to_owned()),
             Some("https://github.example.com/api/v3".to_owned()),
         )
@@ -2147,7 +2151,7 @@ mod tests {
             Some(123),
             Some("runtrue".to_owned()),
             Some("provider://github-app/production".to_owned()),
-            Some(PathBuf::from("/run/runtrue/github-signer.sock")),
+            Some(PathBuf::from("/run/runtrue/github-jwt-provider.sock")),
             Some("https://github.example.com:8443".to_owned()),
             None,
         )
@@ -2161,7 +2165,7 @@ mod tests {
             Some(123),
             Some("runtrue".to_owned()),
             Some("provider://github-app/production".to_owned()),
-            Some(PathBuf::from("/run/runtrue/github-signer.sock")),
+            Some(PathBuf::from("/run/runtrue/github-jwt-provider.sock")),
             None,
             Some("https://github.example.com/api/v3".to_owned()),
         )
@@ -2186,7 +2190,7 @@ mod tests {
                 Some(123),
                 Some("runtrue".to_owned()),
                 Some("provider://github-app/production".to_owned()),
-                Some(PathBuf::from("/run/runtrue/github-signer.sock")),
+                Some(PathBuf::from("/run/runtrue/github-jwt-provider.sock")),
                 Some("https://github.example.com".to_owned()),
                 Some("https://api.github.com".to_owned()),
             ),
@@ -2196,21 +2200,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn github_app_signer_socket_is_bounded_claim_checked_and_non_exportable() {
+    fn github_app_jwt_provider_socket_is_bounded_claim_checked_and_non_exportable() {
         use base64ct::{Base64UrlUnpadded, Encoding as _};
         use std::{os::unix::net::UnixListener, thread};
 
         const NOW_SECONDS: u64 = 1_783_728_000;
         let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("github-signer.sock");
+        let socket = directory.path().join("github-jwt-provider.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
-        let signer = thread::spawn(move || {
+        let jwt_provider = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut length = [0_u8; 4];
             stream.read_exact(&mut length).unwrap();
             let length = usize::try_from(u32::from_be_bytes(length)).unwrap();
-            assert!(length <= MAX_GITHUB_SIGNER_FRAME_BYTES);
+            assert!(length <= MAX_GITHUB_JWT_PROVIDER_FRAME_BYTES);
             let mut request = vec![0_u8; length];
             stream.read_exact(&mut request).unwrap();
             let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
@@ -2253,7 +2257,7 @@ mod tests {
         let mut provider = UnixSocketGitHubAppJwtProvider::open(&config).unwrap();
         let token = provider.mint(NOW_SECONDS).unwrap();
         assert!(!format!("{token:?}").contains("signature"));
-        signer.join().unwrap();
+        jwt_provider.join().unwrap();
 
         fs::set_permissions(
             &config.jwt_provider_socket,
@@ -2262,13 +2266,13 @@ mod tests {
         .unwrap();
         assert!(matches!(
             UnixSocketGitHubAppJwtProvider::open(&config),
-            Err(StartupError::InvalidGitHubSignerSocket(_))
+            Err(StartupError::InvalidGitHubJwtProviderSocket(_))
         ));
 
         let unsafe_parent = directory.path().join("world-writable");
         fs::create_dir(&unsafe_parent).unwrap();
         fs::set_permissions(&unsafe_parent, fs::Permissions::from_mode(0o777)).unwrap();
-        let unsafe_socket = unsafe_parent.join("signer.sock");
+        let unsafe_socket = unsafe_parent.join("provider.sock");
         let _unsafe_listener = UnixListener::bind(&unsafe_socket).unwrap();
         fs::set_permissions(&unsafe_socket, fs::Permissions::from_mode(0o600)).unwrap();
         let unsafe_config = GitHubAppConfig {
@@ -2277,7 +2281,7 @@ mod tests {
         };
         assert!(matches!(
             UnixSocketGitHubAppJwtProvider::open(&unsafe_config),
-            Err(StartupError::InvalidGitHubSignerSocket(_))
+            Err(StartupError::InvalidGitHubJwtProviderSocket(_))
         ));
     }
 

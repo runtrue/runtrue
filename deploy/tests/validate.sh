@@ -27,7 +27,6 @@ required=(
   compose.autoscaler.yml
   compose.traefik.yml
   Containerfile.server
-  Containerfile.github-signer
   Containerfile.runner
   Containerfile.runner-oci
   Containerfile.autoscaler
@@ -47,23 +46,28 @@ bash -n "${DEPLOY_DIR}/bootstrap.sh"
 bash -n "${DEPLOY_DIR}/healthcheck.sh"
 sh -n "${DEPLOY_DIR}/traefik-entrypoint.sh"
 
-[[ "$(stat -c '%a' "${DEPLOY_DIR}/bootstrap.sh")" == 700 ]] || fail 'bootstrap.sh must have mode 0700'
-[[ "$(stat -c '%a' "${DEPLOY_DIR}/healthcheck.sh")" == 555 ]] || fail 'healthcheck.sh must have mode 0555'
-[[ "$(stat -c '%a' "${DEPLOY_DIR}/traefik-entrypoint.sh")" == 555 ]] || fail 'traefik-entrypoint.sh must have mode 0555'
+validate_tracked_executable() {
+  local path=$1 mode
+  mode=$(stat -c '%a' "$path")
+  ((8#$mode & 0100)) || fail "${path##*/} must be executable by its owner"
+  ((! (8#$mode & 0022))) || fail "${path##*/} must not be writable by group or other"
+}
+
+validate_tracked_executable "${DEPLOY_DIR}/bootstrap.sh"
+validate_tracked_executable "${DEPLOY_DIR}/healthcheck.sh"
+validate_tracked_executable "${DEPLOY_DIR}/traefik-entrypoint.sh"
 
 command -v docker >/dev/null 2>&1 || fail 'Docker is required'
 docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required'
 
 TEMPORARY_ROOT=$(mktemp -d)
 chmod 0700 "$TEMPORARY_ROOT"
-for directory in server secrets keys backups restores recovery-config runner workspaces tls runner-trust runner-secrets runner-oci traefik autoscaler github-signer; do
+for directory in server secrets keys backups restores recovery-config runner workspaces tls runner-trust runner-secrets runner-oci traefik autoscaler github-app-provider; do
   install -d -m 0700 "${TEMPORARY_ROOT}/${directory}"
 done
 install -d -m 0700 "${TEMPORARY_ROOT}/autoscaler/claims"
-touch "${TEMPORARY_ROOT}/traefik/acme.json" "${TEMPORARY_ROOT}/runner-secrets/autoscaler.token" \
-  "${TEMPORARY_ROOT}/github-app-private-key.pem"
-chmod 0600 "${TEMPORARY_ROOT}/traefik/acme.json" "${TEMPORARY_ROOT}/runner-secrets/autoscaler.token" \
-  "${TEMPORARY_ROOT}/github-app-private-key.pem"
+touch "${TEMPORARY_ROOT}/traefik/acme.json" "${TEMPORARY_ROOT}/runner-secrets/autoscaler.token"
+chmod 0600 "${TEMPORARY_ROOT}/traefik/acme.json" "${TEMPORARY_ROOT}/runner-secrets/autoscaler.token"
 
 cat >"${TEMPORARY_ROOT}/compose.env" <<EOF
 RUNTRUE_RUNTIME_UID=10001
@@ -96,7 +100,6 @@ env \
   RUNTRUE_GITHUB_APP_CREDENTIAL_REFERENCE=provider://github-app/production \
   RUNTRUE_GITHUB_OAUTH_CLIENT_ID=Iv1.validation \
   RUNTRUE_GITHUB_OAUTH_ADMIN_USER_IDS=123456 \
-  RUNTRUE_GITHUB_APP_PRIVATE_KEY_FILE="${TEMPORARY_ROOT}/github-app-private-key.pem" \
   "${common[@]}" \
     -f "${DEPLOY_DIR}/compose.github-app.yml" \
     -f "${DEPLOY_DIR}/compose.runner-tls.yml" \
@@ -112,7 +115,7 @@ import sys
 
 model = json.loads(pathlib.Path(sys.argv[1]).read_text())
 services = model["services"]
-required = {"server", "github-signer", "traefik", "autoscaler"}
+required = {"server", "traefik", "autoscaler"}
 if set(services) != required:
     raise SystemExit(f"unexpected default services: {set(services)!r}")
 for name, service in services.items():
@@ -120,10 +123,18 @@ for name, service in services.items():
         raise SystemExit(f"{name} has unsafe host privileges")
     if name != "autoscaler" and "docker.sock" in json.dumps(service).lower():
         raise SystemExit(f"{name} received the Docker socket")
-if services["github-signer"].get("network_mode") != "none":
-    raise SystemExit("GitHub signer must have networking disabled")
-if "github-app-private-key.pem" in json.dumps(services["server"]):
+server = services["server"]
+server_json = json.dumps(server)
+if "github-app-private-key.pem" in server_json:
     raise SystemExit("Runtrue server received the GitHub App private key")
+if "/run/runtrue-github-app-provider/provider.sock" not in server_json:
+    raise SystemExit("Runtrue server is missing the external JWT provider socket")
+provider_mounts = [
+    mount for mount in server.get("volumes", [])
+    if mount.get("target") == "/run/runtrue-github-app-provider"
+]
+if len(provider_mounts) != 1 or provider_mounts[0].get("read_only") is not True:
+    raise SystemExit("external JWT provider socket directory must be mounted read-only")
 if "/var/run/docker.sock" not in json.dumps(services["autoscaler"]):
     raise SystemExit("autoscaler is missing the Docker socket")
 if services["server"].get("ports"):

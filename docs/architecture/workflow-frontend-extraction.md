@@ -147,7 +147,7 @@ The repository was extracted only after all of the following became true:
 
 ## Extracted revisions and Cargo identity
 
-The private frontend repository started with a new root history. Its reviewed
+The external frontend repository started with a new root history. Its reviewed
 root commit `95494b229d14dec027d092f4a65053bfb28d9bf4` contains the adapter
 implementation, fixtures, security tests, lockfile, and release notes. It pins
 all Runtrue packages to the one reviewed core anchor

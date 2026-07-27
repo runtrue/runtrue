@@ -75,8 +75,8 @@ Control plane and security:
   worker re-verifies normalized events and atomically commits the signed Capsule,
   remote run/jobs, idempotency record, and task completion, including across a
   database close/reopen.
-- A first-party, Linux-only Go GitHub App signer keeps the App private key out
-  of the server behind the bounded, language-neutral Unix-socket protocol.
+- A bounded, language-neutral Unix-socket contract lets an independently
+  operated GitHub App JWT provider keep the App private key out of the server.
 - Hashed-at-rest, one-time, scoped, expiring, revocable API tokens plus rotating
   browser-session primitives with CSRF and refresh-reuse revocation semantics.
 - Embedded schema-validated Cedar authorization, typed Runtrue resources/actions,
@@ -126,9 +126,9 @@ Data, delivery, and operations:
   out-of-band roots, signed metadata, SBOM/provenance evidence, and exact target
   verification. Automated publication remains disabled until it runs on
   Runtrue. See the [release runbook](docs/operations/releases.md).
-- Pinned Rust 1.94 and Go 1.24 verification gates for formatting, all targets,
-  workspace and component tests, Clippy, schema/API/migration conformance,
-  deployment validation, dependency auditing, and every core image build.
+- Pinned Rust 1.94 verification gates for formatting, all targets, workspace
+  tests, Clippy, schema/API/migration conformance, deployment validation,
+  dependency auditing, and every core image build.
 - Concrete workflow adapters and browser applications are independently
   deployed. Core neither selects nor links a frontend package or UI image.
 
@@ -146,8 +146,6 @@ python3 tests/conformance/check_schema.py
 python3 tests/conformance/check_openapi_routes.py
 python3 tests/conformance/check_migrations.py
 deploy/tests/validate.sh
-
-(cd components/github-signer && go test ./...)
 ```
 
 ## Local workflow path

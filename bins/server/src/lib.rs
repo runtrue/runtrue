@@ -106,11 +106,21 @@ impl ServerComposition {
     }
 
     #[doc(hidden)]
-    #[must_use]
     pub fn decorate_http_router(&self, router: Router) -> Router {
         (self.decorate_http_router)(router)
     }
 }
+#[cfg(any())]
+pub use scm_worker::GitHubRepositoryActionResolver;
+pub use scm_worker::{
+    FetchedScmRepository, GitHubAppInstallationTokenProvider, GitHubCheckPublisher,
+    GitHubInstallationTokenProvider, GitHubMirrorSourceFetcher, GitHubRepositoryAccessToken,
+    MirrorPathError, PreparedRepositoryAction, PublishedScmCheck, RepositoryActionBuildRequest,
+    RepositoryActionBuilder, RepositoryActionResolveError, RepositoryActionResolver,
+    ScmCheckPublishError, ScmSourceFetchError, ScmSourceFetchRequest, ScmSourceFetcher,
+    ScmTaskWorker, ScmWorkerBuildError, ScmWorkerConfig, ScmWorkerError, ScmWorkerMetricsSnapshot,
+    ScmWorkerTick, DEFAULT_SCM_WORKFLOW_DIRECTORY,
+};
 
 #[cfg(test)]
 mod composition_tests {
@@ -157,14 +167,3 @@ mod composition_tests {
             .is_empty());
     }
 }
-#[cfg(any())]
-pub use scm_worker::GitHubRepositoryActionResolver;
-pub use scm_worker::{
-    FetchedScmRepository, GitHubAppInstallationTokenProvider, GitHubCheckPublisher,
-    GitHubInstallationTokenProvider, GitHubMirrorSourceFetcher, GitHubRepositoryAccessToken,
-    MirrorPathError, PreparedRepositoryAction, PublishedScmCheck, RepositoryActionBuildRequest,
-    RepositoryActionBuilder, RepositoryActionResolveError, RepositoryActionResolver,
-    ScmCheckPublishError, ScmSourceFetchError, ScmSourceFetchRequest, ScmSourceFetcher,
-    ScmTaskWorker, ScmWorkerBuildError, ScmWorkerConfig, ScmWorkerError, ScmWorkerMetricsSnapshot,
-    ScmWorkerTick, DEFAULT_SCM_WORKFLOW_DIRECTORY,
-};

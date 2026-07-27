@@ -509,7 +509,7 @@ declare -a STATE_DIRECTORIES=(
 )
 
 if "$WITH_GITHUB_APP"; then
-  STATE_DIRECTORIES+=("${STATE_DIR}/server/git-mirrors" "${STATE_DIR}/github-signer")
+  STATE_DIRECTORIES+=("${STATE_DIR}/server/git-mirrors" "${STATE_DIR}/github-app-provider")
 fi
 if "$WITH_TRAEFIK"; then
   STATE_DIRECTORIES+=("${STATE_DIR}/traefik")

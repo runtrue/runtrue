@@ -8,7 +8,7 @@ operation.
 
 ## Configuration
 
-Set the mirror root, App id, credential reference, and signer socket together.
+Set the mirror root, App id, credential reference, and JWT provider socket together.
 Add the public App slug when tenant self-service installation is enabled:
 
 - `RUNTRUE_GIT_MIRROR_ROOT`: private mode-0700 mirror root;
@@ -30,16 +30,16 @@ Add the public App slug when tenant self-service installation is enabled:
   `https://github.example.com/api/v3`.
 
 Partial core configuration fails startup. An App configuration without a
-mirror root also fails startup. The server does not accept an App private-key file,
-environment private key, ambient Git credential helper, proxy, redirect, or
-plaintext API origin.
+mirror root also fails startup. The server does not accept an App private-key
+file, environment private key, ambient Git credential helper, proxy, redirect,
+or plaintext API origin.
 
 For Docker Compose, use `deploy/compose.github-app.yml` together with the base
 `deploy/compose.yml`. Run `deploy/bootstrap.sh --with-github-app`, copy and edit
 `deploy/github-app.env.example`, then follow the exact build/start commands in
-`deploy/README.md`. The overlay bind-mounts only a pre-existing mode-0600 signer
-socket; it does not put the App private key in the image, Compose environment,
-or server container.
+`deploy/README.md`. The overlay bind-mounts only a pre-existing mode-0600
+provider socket; it does not put the App private key in the image, Compose
+environment, or server container.
 
 GitHub.com and GitHub Enterprise Server use different installation paths.
 Runtrue constructs `https://github.com/apps/<slug>/installations/new` for
@@ -184,11 +184,12 @@ satisfy Runtrue's required exact `contents:read` posture; the installation is
 shown as needing permission correction instead of being hidden as a provider
 transport failure.
 
-## Non-exportable signer protocol
+## Non-exportable JWT provider protocol
 
-The first-party Go signer in `components/github-signer` owns the App private
-key. Runtrue sends one length-prefixed
-(big-endian u32), bounded JSON request:
+Runtrue does not ship a GitHub App private-key implementation. An independently
+reviewed provider owns the App private key and exposes only a private Unix
+socket. Runtrue sends one length-prefixed (big-endian u32), bounded JSON
+request:
 
 ```json
 {
@@ -208,12 +209,13 @@ repository-scoped installation token. The private key never enters Runtrue. The
 installation token is zeroized, never persisted, and is passed to Git only
 through the exact read-only child credential channel.
 
-Build the signer from the same reviewed Runtrue checkout with `go test ./...`
-and `CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid='`. It remains a
-separate process and may be replaced by any conforming implementation; choosing
-Go does not add Go to the Rust execution kernel. Run it with networking disabled
-and expose only its mode-0600 socket to the server. Exact environment, build,
-and readiness commands are in `components/github-signer/README.md`.
+The provider remains a separate process. Run it with networking disabled and
+expose only its mode-0600 socket to the server. It must bind the configured App
+id and credential reference, reject stale or future request times outside the
+documented skew, mint an RS256 GitHub App JWT with a lifetime no longer than ten
+minutes, and never return or persist the private key. Runtrue independently
+validates the returned JWT before exchanging it for a repository-scoped
+installation token.
 
 ## Network and resource posture
 

@@ -1406,7 +1406,7 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
     };
     control.create_repository(&repository).unwrap();
     let consumer_installation = ScmInstallationRecord {
-        id: "github-installation-agentops".to_owned(),
+        id: "github-installation-exampleorg".to_owned(),
         tenant_id: "tenant-1".to_owned(),
         provider: "github".to_owned(),
         external_id: "9001".to_owned(),
@@ -1433,7 +1433,7 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
         updated_unix_ms: NOW,
     };
     for (installation, account_login) in [
-        (consumer_installation.clone(), "AgentOps"),
+        (consumer_installation.clone(), "ExampleOrg"),
         (source_installation.clone(), "ci"),
     ] {
         control.create_scm_installation(&installation).unwrap();
@@ -1482,7 +1482,7 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
                 app_id: 7,
                 account: GitHubAccount {
                     id: 98,
-                    login: "AgentOps".to_owned(),
+                    login: "ExampleOrg".to_owned(),
                     kind: GitHubAccountKind::Organization,
                 },
                 target_id: 98,

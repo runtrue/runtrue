@@ -7,10 +7,9 @@ production data.
 
 ## Development setup
 
-Use the repository-pinned Rust 1.94 toolchain and Go 1.24 or newer. The Rust
-dependency graph is lockfile-bound, and the Go signer uses only the standard
-library. Do not update a lockfile or add a Go module dependency unless the
-change is intentional and described in the pull request.
+Use the repository-pinned Rust 1.94 toolchain. The dependency graph is
+lockfile-bound. Do not update a lockfile unless the change is intentional and
+described in the pull request.
 
 Run the relevant focused tests while developing. Before requesting review, run:
 
@@ -25,7 +24,6 @@ python3 tests/conformance/check_schema.py
 python3 tests/conformance/check_openapi_routes.py
 python3 tests/conformance/check_migrations.py
 deploy/tests/validate.sh
-(cd components/github-signer && go test ./...)
 ```
 
 An update to the GitHub Actions frontend revision or UI image must include the

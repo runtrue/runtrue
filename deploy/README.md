@@ -62,6 +62,11 @@ Edit `deploy/state/github-app.env`, then start the public stack:
 ```sh
 export GITHUB_TOKEN="$(gh auth token)"
 
+# Start an independently operated, network-disabled GitHub App JWT provider
+# first. It must run as RUNTRUE_RUNTIME_UID:RUNTRUE_RUNTIME_GID and create a
+# mode-0600 socket at:
+#   deploy/state/github-app-provider/provider.sock
+
 docker compose \
   --env-file deploy/state/compose.env \
   --env-file deploy/state/github-app.env \
@@ -73,9 +78,12 @@ docker compose \
   up -d --build --wait
 ```
 
-The network-disabled GitHub App signer runs in Compose. The private key is
-mounted read-only only into that signer; the Runtrue server receives only its
-private Unix socket.
+Runtrue does not ship or build the JWT provider. Use an independently reviewed
+provider that implements the bounded protocol in
+[`docs/operations/github-app.md`](../docs/operations/github-app.md). Give only
+that provider access to the App private key and no network access. The Runtrue
+server mounts the provider directory read-only and receives only its private
+Unix socket.
 
 ## Docker-managed OCI runner
 

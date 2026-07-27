@@ -1,5 +1,4 @@
 /target/
-/components/github-signer/runtrue-github-signer
 /.runtrue/runs/
 /.runtrue/cache/
 **/node_modules/

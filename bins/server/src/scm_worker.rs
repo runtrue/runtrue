@@ -5436,7 +5436,7 @@ mod tests {
         )
         .unwrap();
         let consumer = action_installation(
-            "installation-agentops",
+            "installation-exampleorg",
             42_417,
             "quickstart",
             endpoints.web_origin(),

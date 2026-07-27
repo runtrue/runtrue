@@ -31,7 +31,8 @@ pub use user_management::UserManagementStore;
 mod runner_authority;
 mod runs_approvals;
 pub use runner_authority::{
-    RunnerFleetEnrollmentStore, RunnerLeaseBrokerStore, RunnerPoolConfiguration,
+    AutoscaledReplacementPlan, PoolEnrollmentCompletion, RunnerFleetEnrollmentStore,
+    RunnerLeaseBrokerStore, RunnerPoolConfiguration,
 };
 pub use runs_approvals::{
     ApprovalStore, RunCoreStore, SourceSnapshotStore, WorkflowSemanticsStore,

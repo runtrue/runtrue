@@ -688,15 +688,15 @@ pub(in crate::app) async fn plan_runner_replacement(
     let owner = approval_actor_id(&principal);
     match state
         .store
-        .plan_autoscaled_replacement(
-            &pool_id,
-            &source,
-            &replacement_id,
-            &fleet_id,
-            &owner,
-            body.fencing_generation,
-            now,
-        )
+        .plan_autoscaled_replacement(runtrue_control_plane::AutoscaledReplacementPlan {
+            pool_id: &pool_id,
+            source_runner_id: &source,
+            replacement_id: &replacement_id,
+            fleet_request_id: &fleet_id,
+            owner_id: &owner,
+            fencing_generation: body.fencing_generation,
+            now_unix_ms: now,
+        })
         .await
     {
         Ok(value) => (StatusCode::CREATED, Json(value)).into_response(),

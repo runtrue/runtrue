@@ -15,13 +15,14 @@ mod types;
 pub use error::ControlPlaneError;
 pub use persistence::{
     postgres_boundary_inventory, postgres_transfer_ready, ApiTokenAuditStore, ApprovalStore,
-    ArtifactCatalogStore, ArtifactScanPromotionStore, ArtifactStorageStore, BrowserSessionStore,
-    CacheTrustStore, ConfigurationProjectStore, ControlPlaneStore, DatabaseBackendKind,
-    DatabaseReadiness, DeploymentProviderStore, DeploymentRequestStore, DeploymentResultStore,
-    DurableTaskStore, EnvironmentGateStore, EventStore, ExternalSecretReleaseStore,
-    HumanIdentityStore, InstallationStateStore, LifecycleGcStore, OidcGrantStore,
-    PolicyLifecycleStore, PolicyVersionStore, PostgresBoundaryInventory, PostgresBoundaryStatus,
-    RunCoreStore, RunnerFleetEnrollmentStore, RunnerLeaseBrokerStore, RunnerPoolConfiguration,
+    ArtifactCatalogStore, ArtifactScanPromotionStore, ArtifactStorageStore,
+    AutoscaledReplacementPlan, BrowserSessionStore, CacheTrustStore, ConfigurationProjectStore,
+    ControlPlaneStore, DatabaseBackendKind, DatabaseReadiness, DeploymentProviderStore,
+    DeploymentRequestStore, DeploymentResultStore, DurableTaskStore, EnvironmentGateStore,
+    EventStore, ExternalSecretReleaseStore, HumanIdentityStore, InstallationStateStore,
+    LifecycleGcStore, OidcGrantStore, PolicyLifecycleStore, PolicyVersionStore,
+    PoolEnrollmentCompletion, PostgresBoundaryInventory, PostgresBoundaryStatus, RunCoreStore,
+    RunnerFleetEnrollmentStore, RunnerLeaseBrokerStore, RunnerPoolConfiguration,
     ScmRepositoryStore, SecretConfigurationStore, SigningResultStore, SourceSnapshotStore,
     TenantIdentityStore, VariableConfigurationStore, WorkflowSemanticsStore,
 };

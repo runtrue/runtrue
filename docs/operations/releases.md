@@ -6,9 +6,10 @@ and validate this process on Runtrue itself. Do not add a temporary GitHub
 Actions publisher as a shortcut.
 
 Until the native workflow exists, this document is a manual, fail-closed
-operator checklist. Keep repositories and all generated artifacts private. Do
-not publish a tag, package, image, archive, or release while any required step
-is manual unless the release decision explicitly authorizes that process.
+operator checklist. Keep all generated release artifacts private. Do not
+publish a tag, package, image, archive, or release while any required step is
+manual unless the release decision explicitly authorizes that process. Public
+source visibility does not authorize a release.
 
 ## Source and verification gates
 
@@ -28,16 +29,14 @@ python3 tests/conformance/check_schema.py
 python3 tests/conformance/check_openapi_routes.py
 python3 tests/conformance/check_migrations.py
 deploy/tests/validate.sh
-(cd components/github-signer && go test ./...)
 cargo +1.94.0 audit
 ```
 
-The exact GitHub Actions frontend commit selected by `Cargo.toml` and the exact
-UI image selected by the deployment must also pass that repository's locked
-formatting, Rust and browser tests, strict Clippy gates, and image build in a
-clean checkout. Retain those results with the release evidence; core gates
-verify the selected artifacts and integration but do not execute the external
-repository's test suite.
+The exact GitHub Actions frontend commit and UI image selected by a product
+distribution must also pass that repository's locked formatting, Rust and
+browser tests, strict Clippy gates, and image build in a clean checkout. Retain
+those results with the release evidence; core gates verify only the neutral
+frontend contract and do not execute an external repository's test suite.
 
 Also build every shipped container definition from its pinned base and rerun
 the update trust and rollback acceptance suite:

@@ -58,6 +58,27 @@ pub struct RunnerPoolConfiguration {
     pub templates: Vec<RunnerPoolTemplateRecord>,
 }
 
+pub struct PoolEnrollmentCompletion<'a> {
+    pub token: &'a str,
+    pub request_digest: &'a ContentDigest,
+    pub runner: &'a RunnerRecord,
+    pub certificate: &'a RunnerCertificateRecord,
+    pub certificate_chain_pem: &'a [u8],
+    pub inventory_digest: &'a ContentDigest,
+    pub selected_protocol_version: u32,
+    pub now_unix_ms: u64,
+}
+
+pub struct AutoscaledReplacementPlan<'a> {
+    pub pool_id: &'a str,
+    pub source_runner_id: &'a str,
+    pub replacement_id: &'a str,
+    pub fleet_request_id: &'a str,
+    pub owner_id: &'a str,
+    pub fencing_generation: u64,
+    pub now_unix_ms: u64,
+}
+
 /// Execution lease and broker operations whose fences must be observed and
 /// mutated in one database transaction.
 pub trait RunnerLeaseBrokerStore: Send + Sync {
@@ -261,16 +282,9 @@ pub trait RunnerFleetEnrollmentStore: Send + Sync {
         &'a self,
         pool_id: &'a str,
     ) -> StoreFuture<'a, Vec<RunnerReplacementRecord>>;
-    #[allow(clippy::too_many_arguments)]
     fn plan_autoscaled_replacement<'a>(
         &'a self,
-        pool_id: &'a str,
-        source_runner_id: &'a str,
-        replacement_id: &'a str,
-        fleet_request_id: &'a str,
-        owner_id: &'a str,
-        fencing_generation: u64,
-        now_unix_ms: u64,
+        plan: AutoscaledReplacementPlan<'a>,
     ) -> StoreFuture<'a, PlannedRunnerReplacement>;
     fn activate_replacement<'a>(
         &'a self,
@@ -395,14 +409,7 @@ pub trait RunnerFleetEnrollmentStore: Send + Sync {
 
     fn complete_pool_enrollment<'a>(
         &'a self,
-        token: &'a str,
-        request_digest: &'a ContentDigest,
-        runner: &'a RunnerRecord,
-        certificate: &'a RunnerCertificateRecord,
-        certificate_chain_pem: &'a [u8],
-        inventory_digest: &'a ContentDigest,
-        selected_protocol_version: u32,
-        now_unix_ms: u64,
+        completion: PoolEnrollmentCompletion<'a>,
     ) -> StoreFuture<'a, RunnerEnrollmentReplay>;
 
     fn authenticate_pool_runner_certificate<'a>(
@@ -823,22 +830,16 @@ impl RunnerFleetEnrollmentStore for ControlPlane {
     }
     fn plan_autoscaled_replacement<'a>(
         &'a self,
-        pool_id: &'a str,
-        source_runner_id: &'a str,
-        replacement_id: &'a str,
-        fleet_request_id: &'a str,
-        owner_id: &'a str,
-        fencing_generation: u64,
-        now_unix_ms: u64,
+        plan: AutoscaledReplacementPlan<'a>,
     ) -> StoreFuture<'a, PlannedRunnerReplacement> {
         let result = self.plan_autoscaled_runner_replacement(
-            pool_id,
-            source_runner_id,
-            replacement_id,
-            fleet_request_id,
-            owner_id,
-            fencing_generation,
-            now_unix_ms,
+            plan.pool_id,
+            plan.source_runner_id,
+            plan.replacement_id,
+            plan.fleet_request_id,
+            plan.owner_id,
+            plan.fencing_generation,
+            plan.now_unix_ms,
         );
         Box::pin(async move { result })
     }
@@ -1072,24 +1073,17 @@ impl RunnerFleetEnrollmentStore for ControlPlane {
 
     fn complete_pool_enrollment<'a>(
         &'a self,
-        token: &'a str,
-        request_digest: &'a ContentDigest,
-        runner: &'a RunnerRecord,
-        certificate: &'a RunnerCertificateRecord,
-        certificate_chain_pem: &'a [u8],
-        inventory_digest: &'a ContentDigest,
-        selected_protocol_version: u32,
-        now_unix_ms: u64,
+        completion: PoolEnrollmentCompletion<'a>,
     ) -> StoreFuture<'a, RunnerEnrollmentReplay> {
         let result = self.complete_runner_enrollment_idempotent(
-            token,
-            request_digest,
-            runner,
-            certificate,
-            certificate_chain_pem,
-            inventory_digest,
-            selected_protocol_version,
-            now_unix_ms,
+            completion.token,
+            completion.request_digest,
+            completion.runner,
+            completion.certificate,
+            completion.certificate_chain_pem,
+            completion.inventory_digest,
+            completion.selected_protocol_version,
+            completion.now_unix_ms,
         );
         Box::pin(async move { result })
     }
@@ -5196,24 +5190,9 @@ impl RunnerFleetEnrollmentStore for PostgresInstallationStore {
     }
     fn plan_autoscaled_replacement<'a>(
         &'a self,
-        pool_id: &'a str,
-        source_runner_id: &'a str,
-        replacement_id: &'a str,
-        fleet_request_id: &'a str,
-        owner_id: &'a str,
-        fencing_generation: u64,
-        now_unix_ms: u64,
+        plan: AutoscaledReplacementPlan<'a>,
     ) -> StoreFuture<'a, PlannedRunnerReplacement> {
-        Box::pin(postgres_plan_replacement(
-            self,
-            pool_id,
-            source_runner_id,
-            replacement_id,
-            fleet_request_id,
-            owner_id,
-            fencing_generation,
-            now_unix_ms,
-        ))
+        Box::pin(postgres_plan_replacement(self, plan))
     }
     fn activate_replacement<'a>(
         &'a self,
@@ -6161,16 +6140,19 @@ impl RunnerFleetEnrollmentStore for PostgresInstallationStore {
 
     fn complete_pool_enrollment<'a>(
         &'a self,
-        token: &'a str,
-        request_digest: &'a ContentDigest,
-        runner: &'a RunnerRecord,
-        certificate: &'a RunnerCertificateRecord,
-        certificate_chain_pem: &'a [u8],
-        inventory_digest: &'a ContentDigest,
-        selected_protocol_version: u32,
-        now_unix_ms: u64,
+        completion: PoolEnrollmentCompletion<'a>,
     ) -> StoreFuture<'a, RunnerEnrollmentReplay> {
         Box::pin(async move {
+            let PoolEnrollmentCompletion {
+                token,
+                request_digest,
+                runner,
+                certificate,
+                certificate_chain_pem,
+                inventory_digest,
+                selected_protocol_version,
+                now_unix_ms,
+            } = completion;
             validate_token(token)?;
             validate_new_runner_and_certificate(runner, certificate, now_unix_ms)?;
             if certificate_chain_pem.is_empty() || certificate_chain_pem.len() > 256 * 1024 {
@@ -7629,14 +7611,17 @@ async fn postgres_create_fixed_claim(
 #[cfg(feature = "postgres")]
 async fn postgres_plan_replacement(
     store: &PostgresInstallationStore,
-    pool_id: &str,
-    source_runner_id: &str,
-    replacement_id: &str,
-    fleet_request_id: &str,
-    owner_id: &str,
-    fencing_generation: u64,
-    now_unix_ms: u64,
+    plan: AutoscaledReplacementPlan<'_>,
 ) -> Result<PlannedRunnerReplacement, ControlPlaneError> {
+    let AutoscaledReplacementPlan {
+        pool_id,
+        source_runner_id,
+        replacement_id,
+        fleet_request_id,
+        owner_id,
+        fencing_generation,
+        now_unix_ms,
+    } = plan;
     let mut tx = store.pool.begin().await?;
     require_postgres_autoscaler_lease(&mut tx, pool_id, owner_id, fencing_generation, now_unix_ms)
         .await?;

@@ -215,16 +215,16 @@ impl RunnerControlService {
         let completed = self
             .inner
             .control_plane
-            .complete_pool_enrollment(
-                &token,
-                &request_digest,
-                &runner,
-                &issued.record,
-                &issued.certificate_chain_pem,
-                &inventory_digest,
-                selected_protocol,
-                now,
-            )
+            .complete_pool_enrollment(runtrue_control_plane::PoolEnrollmentCompletion {
+                token: &token,
+                request_digest: &request_digest,
+                runner: &runner,
+                certificate: &issued.record,
+                certificate_chain_pem: &issued.certificate_chain_pem,
+                inventory_digest: &inventory_digest,
+                selected_protocol_version: selected_protocol,
+                now_unix_ms: now,
+            })
             .await
             .map_err(enrollment_status)?;
         self.inner

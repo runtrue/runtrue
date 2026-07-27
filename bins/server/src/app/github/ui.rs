@@ -3357,7 +3357,7 @@ mod user_catalog_tests {
             },
             installations: vec![GitHubInstallationView {
                 installation_id: 42_417,
-                account_login: "AgentOps".to_owned(),
+                account_login: "ExampleOrg".to_owned(),
                 account_kind: UiGitHubAccountKind::Organization,
                 state: UiGitHubInstallationState::Active,
                 repository_selection: RepositorySelection::All,
@@ -3367,8 +3367,8 @@ mod user_catalog_tests {
             repository_candidates: vec![GitHubRepositoryCandidateAction {
                 installation_id: "github-installation-42417".to_owned(),
                 external_repository_id: "2042673".to_owned(),
-                owner: "AgentOps".to_owned(),
-                name: "agentops-service".to_owned(),
+                owner: "ExampleOrg".to_owned(),
+                name: "exampleorg-service".to_owned(),
                 visibility: RepositoryVisibility::Private,
                 default_branch: "main".to_owned(),
                 csrf_token: "candidate-csrf".to_owned(),
@@ -3378,28 +3378,31 @@ mod user_catalog_tests {
             install_action: None,
         };
         let oauth_catalog = GitHubUserCatalog {
-            organizations: vec!["agentops".to_owned()],
+            organizations: vec!["exampleorg".to_owned()],
             repositories: Vec::new(),
         };
 
         let organizations = github_user_organization_catalog("ada", &oauth_catalog, &page);
         let organizations = organizations.as_array().unwrap();
-        let agentops = organizations
+        let exampleorg = organizations
             .iter()
             .filter(|organization| {
                 organization["name"]
                     .as_str()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("AgentOps"))
+                    .is_some_and(|name| name.eq_ignore_ascii_case("ExampleOrg"))
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(agentops.len(), 1);
-        assert_eq!(agentops[0]["name"], "AgentOps");
-        assert_eq!(agentops[0]["repositories"].as_array().unwrap().len(), 1);
-        assert_eq!(agentops[0]["repositories"][0]["name"], "agentops-service");
-        assert_eq!(agentops[0]["repositories"][0]["state"], "available");
+        assert_eq!(exampleorg.len(), 1);
+        assert_eq!(exampleorg[0]["name"], "ExampleOrg");
+        assert_eq!(exampleorg[0]["repositories"].as_array().unwrap().len(), 1);
         assert_eq!(
-            agentops[0]["repositories"][0]["installationId"],
+            exampleorg[0]["repositories"][0]["name"],
+            "exampleorg-service"
+        );
+        assert_eq!(exampleorg[0]["repositories"][0]["state"], "available");
+        assert_eq!(
+            exampleorg[0]["repositories"][0]["installationId"],
             "github-installation-42417"
         );
     }

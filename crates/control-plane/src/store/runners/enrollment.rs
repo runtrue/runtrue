@@ -1,5 +1,15 @@
 use super::*;
 
+struct RunnerEnrollmentBinding<'a> {
+    token: &'a str,
+    runner: &'a RunnerRecord,
+    certificate: &'a RunnerCertificateRecord,
+    inventory_digest: &'a ContentDigest,
+    posture_digest: &'a ContentDigest,
+    replay: Option<(&'a ContentDigest, &'a [u8], u32)>,
+    now_unix_ms: u64,
+}
+
 pub(in crate::store) fn validate_enrollment_token(token: &str) -> Result<(), ControlPlaneError> {
     if token.len() != ENROLLMENT_TOKEN_BYTES * 2
         || !token
@@ -310,15 +320,15 @@ impl ControlPlane {
         now_unix_ms: u64,
     ) -> Result<EnrollmentTokenRecord, ControlPlaneError> {
         let posture_digest = authoritative_runner_posture_digest(runner, inventory_digest)?;
-        self.complete_runner_enrollment_bound(
+        self.complete_runner_enrollment_bound(RunnerEnrollmentBinding {
             token,
             runner,
             certificate,
             inventory_digest,
-            &posture_digest,
-            None,
+            posture_digest: &posture_digest,
+            replay: None,
             now_unix_ms,
-        )
+        })
     }
 
     pub fn replay_runner_enrollment(
@@ -373,33 +383,36 @@ impl ControlPlane {
             ));
         }
         let posture_digest = authoritative_runner_posture_digest(runner, inventory_digest)?;
-        self.complete_runner_enrollment_bound(
+        self.complete_runner_enrollment_bound(RunnerEnrollmentBinding {
             token,
             runner,
             certificate,
             inventory_digest,
-            &posture_digest,
-            Some((
+            posture_digest: &posture_digest,
+            replay: Some((
                 request_digest,
                 certificate_chain_pem,
                 selected_protocol_version,
             )),
             now_unix_ms,
-        )?;
+        })?;
         self.replay_runner_enrollment(token, request_digest)?
             .ok_or_else(|| ControlPlaneError::CorruptState("enrollment replay is missing".into()))
     }
 
     fn complete_runner_enrollment_bound(
         &self,
-        token: &str,
-        runner: &RunnerRecord,
-        certificate: &RunnerCertificateRecord,
-        inventory_digest: &ContentDigest,
-        posture_digest: &ContentDigest,
-        replay: Option<(&ContentDigest, &[u8], u32)>,
-        now_unix_ms: u64,
+        binding: RunnerEnrollmentBinding<'_>,
     ) -> Result<EnrollmentTokenRecord, ControlPlaneError> {
+        let RunnerEnrollmentBinding {
+            token,
+            runner,
+            certificate,
+            inventory_digest,
+            posture_digest,
+            replay,
+            now_unix_ms,
+        } = binding;
         validate_enrollment_token(token)?;
         validate_runner_record(runner)?;
         validate_new_runner_certificate(certificate, now_unix_ms)?;

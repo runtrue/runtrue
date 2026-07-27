@@ -25,7 +25,7 @@ src/main.rs
    metrics, and errors.
 3. Split GitHub installation UI model/enums from rendering and HTML escaping;
    preserve exact CSS and cache-control exports.
-4. Move server arguments/config/environment parsing, GitHub signer/provider,
+4. Move server arguments/config/environment parsing, GitHub JWT provider,
    runner gRPC setup, HTTP/gRPC task supervision, background workers, shutdown,
    database path preparation, seed/secret reads, systemd credential handling,
    and startup errors under `startup/`.
