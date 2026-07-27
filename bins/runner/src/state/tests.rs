@@ -159,6 +159,8 @@ fn only_direct_systemd_credentials_accept_read_only_modes() {
     let directory = tempfile::tempdir().unwrap();
     let credentials_directory = directory.path().join("credentials");
     fs::create_dir(&credentials_directory).unwrap();
+    let credential = credentials_directory.join("token");
+    fs::write(&credential, b"credential").unwrap();
     fs::set_permissions(&credentials_directory, fs::Permissions::from_mode(0o500)).unwrap();
 
     let ordinary = directory.path().join("ordinary-token");
@@ -175,8 +177,6 @@ fn only_direct_systemd_credentials_accept_read_only_modes() {
         ));
     }
 
-    let credential = credentials_directory.join("token");
-    fs::write(&credential, b"credential").unwrap();
     for mode in [0o400, 0o440] {
         fs::set_permissions(&credential, fs::Permissions::from_mode(mode)).unwrap();
         assert_eq!(
