@@ -1,0 +1,45 @@
+name: Feature request
+description: Propose a capability or improvement for Runtrue.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Explain the problem first. Runtrue preserves fail-closed behavior, exact execution identity, and least authority even when that limits compatibility.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operator problem should Runtrue solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the externally observable behavior and a representative example.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds or narrower approaches.
+  - type: textarea
+    id: trust
+    attributes:
+      label: Trust and compatibility impact
+      description: Identify affected permissions, credentials, isolation, execution identity, protocols, or upgrade paths. Write "None known" when applicable.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and design documents for this request.
+          required: true
+        - label: This request does not contain a security vulnerability or sensitive data.
+          required: true

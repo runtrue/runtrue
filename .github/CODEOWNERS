@@ -4,9 +4,12 @@
 
 # Changes to these trust and release boundaries always request the owner.
 /.github/ @Doout
+/SECURITY.md @Doout
+/SUPPORT.md @Doout
 /Cargo.lock @Doout
 /proto/ @Doout
 /schemas/ @Doout
+/docs/operations/public-launch-checklist.md @Doout
 /crates/policy/ @Doout
 /crates/update/ @Doout
 /crates/executor-*/ @Doout

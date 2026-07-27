@@ -1,0 +1,82 @@
+name: Bug report
+description: Report a reproducible defect in Runtrue.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve Runtrue. Do not report security vulnerabilities here; use the private reporting link in the issue chooser.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of Runtrue is affected?
+      options:
+        - CLI or workflow compilation
+        - Server or control plane
+        - Runner or executor
+        - Deployment or upgrade
+        - API or protocol
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Provide the release tag or commit SHA.
+      placeholder: v0.x.y or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the operating system, architecture, runtime, database, and deployment profile that matter.
+      placeholder: Linux amd64, rootless Podman, SQLite, single-node deployment
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest deterministic sequence that reproduces the problem.
+      placeholder: |
+        1. Configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Add relevant logs, errors, or screenshots after removing credentials, tokens, tenant data, and private repository content.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I removed secrets and private data from this report.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
