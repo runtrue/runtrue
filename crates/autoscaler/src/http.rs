@@ -263,8 +263,8 @@ impl ControlPlaneClient for HttpControlPlane {
         #[derive(serde::Deserialize)]
         struct IssuedToken {
             token: String,
-            #[allow(dead_code)]
-            expires_unix_ms: u64,
+            #[serde(rename = "expires_unix_ms")]
+            _expires_unix_ms: u64,
         }
         let digest = launch_identity_proof_digest(identity)?;
         let issued: IssuedToken = self

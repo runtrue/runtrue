@@ -7,8 +7,6 @@ publish = false
 rust-version.workspace = true
 
 [dependencies]
-runtrue-model.workspace = true
-indexmap.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true

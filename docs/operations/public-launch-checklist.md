@@ -11,7 +11,7 @@ and deployment guarantees.
 
 ## Before changing visibility
 
-- [ ] Merge the community health files, native Runtrue CI workflow, and any
+- [ ] Merge the community health files, GitHub Actions CI workflow, and any
       security-boundary cleanup selected for launch.
 - [ ] Require the full pinned validation suite to pass at the launch commit.
 - [ ] Scan the complete Git history for credentials and private material, then
@@ -39,7 +39,7 @@ Apply and verify these controls on `main`:
 - [ ] Require pull requests, at least one approving review, and dismissal of
       stale approvals after new commits.
 - [ ] Require CODEOWNERS review for owned paths.
-- [ ] Require the native Runtrue CI checks and require branches to be current
+- [ ] Require the GitHub Actions CI check and require branches to be current
       before merge.
 - [ ] Restrict bypass permissions and audit every exception.
 - [ ] Enable dependency graph, Dependabot alerts, and security updates.

@@ -7,7 +7,6 @@ mod database_runtime;
 mod database_url_file;
 mod github_install_ui;
 mod human_oidc;
-mod repository_action_builder;
 mod runner_broker;
 mod runner_certificates;
 mod runner_service;
@@ -39,7 +38,6 @@ pub use human_oidc::{
     HardenedGitHubOauthClient, HardenedHumanOidcClient, HumanAuthMetricsSnapshot, HumanOidcAdapter,
     HumanOidcError, HumanOidcLimits, VerifiedGitHubIdentity, VerifiedHumanIdentity,
 };
-pub use repository_action_builder::UnixRepositoryActionBuilder;
 pub use runner_certificates::{
     IssuedRunnerCertificate, RunnerCertificateAuthority, RunnerCertificateError,
     DEFAULT_RUNNER_CERTIFICATE_LIFETIME, DEFAULT_RUNNER_CERTIFICATE_OVERLAP,
@@ -110,16 +108,13 @@ impl ServerComposition {
         (self.decorate_http_router)(router)
     }
 }
-#[cfg(any())]
-pub use scm_worker::GitHubRepositoryActionResolver;
 pub use scm_worker::{
     FetchedScmRepository, GitHubAppInstallationTokenProvider, GitHubCheckPublisher,
     GitHubInstallationTokenProvider, GitHubMirrorSourceFetcher, GitHubRepositoryAccessToken,
-    MirrorPathError, PreparedRepositoryAction, PublishedScmCheck, RepositoryActionBuildRequest,
-    RepositoryActionBuilder, RepositoryActionResolveError, RepositoryActionResolver,
-    ScmCheckPublishError, ScmSourceFetchError, ScmSourceFetchRequest, ScmSourceFetcher,
-    ScmTaskWorker, ScmWorkerBuildError, ScmWorkerConfig, ScmWorkerError, ScmWorkerMetricsSnapshot,
-    ScmWorkerTick, DEFAULT_SCM_WORKFLOW_DIRECTORY,
+    MirrorPathError, PreparedRepositoryAction, PublishedScmCheck, RepositoryActionResolveError,
+    RepositoryActionResolver, ScmCheckPublishError, ScmSourceFetchError, ScmSourceFetchRequest,
+    ScmSourceFetcher, ScmTaskWorker, ScmWorkerBuildError, ScmWorkerConfig, ScmWorkerError,
+    ScmWorkerMetricsSnapshot, ScmWorkerTick, DEFAULT_SCM_WORKFLOW_DIRECTORY,
 };
 
 #[cfg(test)]

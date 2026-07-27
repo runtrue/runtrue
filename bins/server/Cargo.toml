@@ -11,10 +11,6 @@ name = "runtrue-server"
 path = "src/main.rs"
 
 [[bin]]
-name = "runtrue-action-builder"
-path = "src/action_builder_main.rs"
-
-[[bin]]
 name = "runtrue-db-transfer"
 path = "src/db_transfer_main.rs"
 

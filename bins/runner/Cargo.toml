@@ -16,7 +16,6 @@ path = "src/lib.rs"
 
 [dependencies]
 runtrue-attest.workspace = true
-runtrue-artifacts.workspace = true
 runtrue-cache.workspace = true
 runtrue-engine.workspace = true
 runtrue-executor-dispatch.workspace = true

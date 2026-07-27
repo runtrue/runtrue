@@ -2,7 +2,6 @@
 /.runtrue/runs/
 /.runtrue/cache/
 **/node_modules/
-/ci-test/
 /images/**/*.provenance.json
 /images/**/*.spdx.json
 *.swp

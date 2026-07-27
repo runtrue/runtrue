@@ -97,7 +97,7 @@ digests, never object contents.
 ## Backup and restore
 
 `RUNTRUE_DATA_ROOT` is authoritative and must be passed as `--blobs-dir`. The
-Compose and systemd examples do this explicitly. Backup verification checks
+Docker Compose deployment does this explicitly. Backup verification checks
 that every database catalog root is present in the archived CAS namespace and
 then decodes each typed root under explicit bounds. Artifact records are
 signature/provenance verified; cache, artifact-directory, and Git-source

@@ -2907,7 +2907,6 @@ version = "0.1.0"
 dependencies = [
  "runtrue-bisim",
  "runtrue-execution",
- "runtrue-model",
  "runtrue-policy",
  "runtrue-provider-contract",
  "runtrue-replay",
@@ -2934,7 +2933,6 @@ dependencies = [
 name = "runtrue-attest"
 version = "0.1.0"
 dependencies = [
- "base64ct",
  "ed25519-dalek",
  "rand_core 0.6.4",
  "runtrue-model",
@@ -2986,7 +2984,6 @@ dependencies = [
  "runtrue-model",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 1.0.61",
  "tokio",
@@ -3097,8 +3094,6 @@ dependencies = [
  "runtrue-workflow-ir",
  "serde",
  "serde_json",
- "serde_yaml",
- "tempfile",
  "thiserror 1.0.61",
 ]
 
@@ -3130,34 +3125,6 @@ dependencies = [
  "thiserror 1.0.61",
  "tokio",
  "zeroize",
-]
-
-[[package]]
-name = "runtrue-debug-session"
-version = "0.1.0"
-dependencies = [
- "hex",
- "hmac",
- "rand_core 0.6.4",
- "runtrue-auth",
- "runtrue-model",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 1.0.61",
- "zeroize",
-]
-
-[[package]]
-name = "runtrue-deploy"
-version = "0.1.0"
-dependencies = [
- "runtrue-artifacts",
- "runtrue-model",
- "runtrue-policy",
- "serde",
- "serde_json",
- "thiserror 1.0.61",
 ]
 
 [[package]]
@@ -3295,7 +3262,6 @@ dependencies = [
  "runtrue-workflow-ir",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 1.0.61",
  "zeroize",
@@ -3351,25 +3317,8 @@ dependencies = [
  "runtrue-model",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 1.0.61",
  "toml 0.8.23",
-]
-
-[[package]]
-name = "runtrue-logs"
-version = "0.1.0"
-dependencies = [
- "base64ct",
- "hmac",
- "nix",
- "runtrue-model",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 1.0.61",
- "zeroize",
 ]
 
 [[package]]
@@ -3379,17 +3328,6 @@ dependencies = [
  "hex",
  "serde",
  "sha2",
- "thiserror 1.0.61",
-]
-
-[[package]]
-name = "runtrue-network"
-version = "0.1.0"
-dependencies = [
- "runtrue-model",
- "runtrue-workflow-ir",
- "serde",
- "serde_json",
  "thiserror 1.0.61",
 ]
 
@@ -3505,7 +3443,6 @@ dependencies = [
  "prost-types",
  "rand_core 0.6.4",
  "rcgen",
- "runtrue-artifacts",
  "runtrue-attest",
  "runtrue-cache",
  "runtrue-engine",
@@ -3693,20 +3630,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtrue-signing"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "runtrue-model",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.61",
- "zeroize",
-]
-
-[[package]]
 name = "runtrue-storage"
 version = "0.1.0"
 dependencies = [
@@ -3748,7 +3671,6 @@ dependencies = [
  "rustix 0.38.44",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 1.0.61",
  "zeroize",
@@ -3777,8 +3699,6 @@ dependencies = [
 name = "runtrue-workflow-ast"
 version = "0.1.0"
 dependencies = [
- "indexmap 2.14.0",
- "runtrue-model",
  "serde",
  "serde_yaml",
  "thiserror 1.0.61",

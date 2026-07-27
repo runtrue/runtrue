@@ -1,12 +1,8 @@
-#![allow(dead_code, unused_imports)]
+#![allow(dead_code)]
 
-use runtrue_compiler::{
-    CompileContext, Compiler, ReusableWorkflowSource, ReusableWorkflowSources,
-    MAX_REUSABLE_SOURCE_BYTES,
-};
+use runtrue_compiler::{CompileContext, Compiler, ReusableWorkflowSource, ReusableWorkflowSources};
 use runtrue_lock::LockFile;
 use runtrue_model::ContentDigest;
-use runtrue_workflow_ir::ExecutionCapsule;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,

@@ -1,8 +1,8 @@
 # Single-node evaluation deployment runbook
 
-The runnable deployment assets, bootstrap procedure, state layout, backup
-commands, opt-in runner enrollment profile, systemd examples, validation, and
-security boundaries are maintained in
+The runnable Docker Compose assets, bootstrap procedure, state layout, backup
+commands, opt-in runner enrollment profile, validation, and security boundaries
+are maintained in
 [`deploy/README.md`](../../deploy/README.md).
 
 Use that package only for a one-host evaluation, integration environment, or

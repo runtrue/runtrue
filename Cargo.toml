@@ -18,8 +18,6 @@ members = [
   "crates/compiler",
   "crates/bisim",
   "crates/control-plane",
-  "crates/debug-session",
-  "crates/deploy",
   "crates/engine",
   "crates/execution",
   "crates/executor-firecracker",
@@ -31,9 +29,7 @@ members = [
   "crates/guest-core",
   "crates/lifecycle",
   "crates/lock",
-  "crates/logs",
   "crates/model",
-  "crates/network",
   "crates/oidc",
   "crates/output-lifecycle",
   "crates/policy",
@@ -48,7 +44,6 @@ members = [
   "crates/scheduler",
   "crates/scm",
   "crates/secrets",
-  "crates/signing",
   "crates/storage",
   "crates/trusted-planner",
   "crates/update",
@@ -72,8 +67,6 @@ runtrue-attest = { path = "crates/attest" }
 runtrue-compiler = { path = "crates/compiler" }
 runtrue-bisim = { path = "crates/bisim" }
 runtrue-control-plane = { path = "crates/control-plane" }
-runtrue-debug-session = { path = "crates/debug-session" }
-runtrue-deploy = { path = "crates/deploy" }
 runtrue-audit = { path = "crates/audit" }
 runtrue-engine = { path = "crates/engine" }
 runtrue-execution = { path = "crates/execution" }
@@ -86,24 +79,19 @@ runtrue-git = { path = "crates/git" }
 runtrue-guest-core = { path = "crates/guest-core" }
 runtrue-lifecycle = { path = "crates/lifecycle" }
 runtrue-lock = { path = "crates/lock" }
-runtrue-logs = { path = "crates/logs" }
 runtrue-model = { path = "crates/model" }
-runtrue-network = { path = "crates/network" }
 runtrue-oidc = { path = "crates/oidc" }
 runtrue-output-lifecycle = { path = "crates/output-lifecycle" }
 runtrue-policy = { path = "crates/policy" }
 runtrue-protocol = { path = "crates/protocol" }
 runtrue-provider-contract = { path = "crates/provider-contract" }
 runtrue-replay = { path = "crates/replay" }
-runtrue-reports = { path = "crates/reports" }
-runtrue = { path = "crates/runtrue" }
 runtrue-runtime-local = { path = "crates/runtime-local" }
 runtrue-runtime-metrics = { path = "crates/runtime-metrics" }
 runtrue-runner-core = { path = "crates/runner-core" }
 runtrue-scheduler = { path = "crates/scheduler" }
 runtrue-scm = { path = "crates/scm" }
 runtrue-secrets = { path = "crates/secrets" }
-runtrue-signing = { path = "crates/signing" }
 runtrue-storage = { path = "crates/storage" }
 runtrue-trusted-planner = { path = "crates/trusted-planner" }
 runtrue-update = { path = "crates/update" }
@@ -162,13 +150,6 @@ wat = "=1.253.0"
 zeroize = "=1.7.0"
 x509-parser = { version = "=0.18.1", default-features = false, features = ["verify"] }
 x25519-dalek = { version = "=2.0.1", default-features = false, features = ["static_secrets", "zeroize"] }
-
-[patch."https://github.com/runtrue/runtrue"]
-runtrue-compiler = { path = "crates/compiler" }
-runtrue-lock = { path = "crates/lock" }
-runtrue-model = { path = "crates/model" }
-runtrue-workflow-ast = { path = "crates/workflow-ast" }
-runtrue-workflow-frontend = { path = "crates/workflow-frontend" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
