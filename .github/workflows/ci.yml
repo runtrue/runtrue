@@ -89,6 +89,10 @@ jobs:
         shell: bash
         run: cargo +1.94.0 clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: Reclaim build space for tests
+        shell: bash
+        run: cargo +1.94.0 clean
+
       - name: Run workspace tests
         shell: bash
         run: cargo +1.94.0 test --workspace --locked
