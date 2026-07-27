@@ -2391,6 +2391,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let credentials_directory = directory.path().join("credentials");
         fs::create_dir(&credentials_directory).unwrap();
+        let credential = credentials_directory.join("token");
+        fs::write(&credential, b"credential").unwrap();
         fs::set_permissions(&credentials_directory, fs::Permissions::from_mode(0o500)).unwrap();
 
         let ordinary = directory.path().join("ordinary-token");
@@ -2408,8 +2410,6 @@ mod tests {
             ));
         }
 
-        let credential = credentials_directory.join("token");
-        fs::write(&credential, b"credential").unwrap();
         for mode in [0o400, 0o440] {
             fs::set_permissions(&credential, fs::Permissions::from_mode(mode)).unwrap();
             assert_eq!(
