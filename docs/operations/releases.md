@@ -1,21 +1,22 @@
 # Release and promotion runbook
 
 Runtrue does not currently ship a GitHub Actions CI or release workflow. That
-is intentional: release automation remains disabled until the project can run
-and validate this process on Runtrue itself. Do not add a temporary GitHub
-Actions publisher as a shortcut.
+is intentional. The staged native `.runtrue/workflows/ci.yaml` workflow is
+designed to validate trusted pushes to `main` on Runtrue itself, while release
+automation remains disabled. Do not add a temporary GitHub Actions publisher
+as a shortcut.
 
-Until the native workflow exists, this document is a manual, fail-closed
-operator checklist. Keep all generated release artifacts private. Do not
-publish a tag, package, image, archive, or release while any required step is
-manual unless the release decision explicitly authorizes that process. Public
-source visibility does not authorize a release.
+This document remains a manual, fail-closed operator checklist. Keep all
+generated release artifacts private. Do not publish a tag, package, image,
+archive, or release while any required step is manual unless the release
+decision explicitly authorizes that process. Public source visibility does not
+authorize a release.
 
 ## Source and verification gates
 
-Start from a clean checkout of the exact proposed commit. Use Rust 1.94.0, Go
-1.24 or newer, the locked dependency graph, and a controlled builder with no
-ambient publication credentials.
+Start from a clean checkout of the exact proposed commit. Use Rust 1.94.0, the
+locked dependency graph, and a controlled builder with no ambient publication
+credentials.
 
 ```bash
 cargo +1.94.0 fetch --locked
@@ -102,6 +103,20 @@ credential-free build jobs, immutable evidence transfer, exact-plan approval,
 independent signing, and a distinct promotion job. Publication credentials may
 exist only in that final approved boundary. Bisim must cover the local and
 remote release plan before automated publication is enabled.
+
+The source-verification workflow is deliberately not a pull-request check.
+Rootless OCI is an explicitly trusted shared-kernel profile and must not execute
+arbitrary public contribution code. Keep the `pull_request` trigger absent
+until Firecracker can hydrate the authenticated source snapshot and a matching
+profile and capacity are configured and validated end to end.
+
+The staged workflow also requires a Runtrue control plane whose GitHub App is
+installed on `github.com/runtrue/runtrue`, plus a signed, prehydrated assignment
+for the locked Rust OCI image. The `enterprise-ci.example.test` deployment targets
+`github.example.test` and cannot receive this repository's events. Until those
+requirements exist, the workflow is fail-closed future configuration rather
+than live post-merge evidence, and it cannot be selected as a required
+public-PR check.
 
 ## Consumer verification
 
