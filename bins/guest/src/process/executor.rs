@@ -215,31 +215,17 @@ impl StepExecutor for DirectStepExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtrue_workflow_ir::{PlannedStep, StepAction, StepCapabilitySet};
-    use std::{
-        collections::BTreeMap, io::Write as _, os::unix::fs::PermissionsExt as _, path::Path,
+    use runtrue_workflow_ir::{
+        PlannedStep, ScalarValue, StepAction, StepCapabilitySet, ValueBinding,
     };
+    use std::{collections::BTreeMap, path::Path};
     use tempfile::TempDir;
 
-    fn executable(directory: &TempDir, body: &str) -> PathBuf {
-        let path = directory.path().join("step");
-        let staging = directory.path().join("step.staging");
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staging)
-            .unwrap();
-        file.write_all(format!("#!/bin/sh\n{body}\n").as_bytes())
-            .unwrap();
-        file.set_permissions(fs::Permissions::from_mode(0o700))
-            .unwrap();
-        file.sync_all().unwrap();
-        drop(file);
-        fs::rename(staging, &path).unwrap();
-        path
+    fn system_executable(path: &str) -> PathBuf {
+        fs::canonicalize(path).unwrap()
     }
 
-    fn authorized(program: &Path) -> AuthorizedStep {
+    fn authorized(program: &Path, arguments: &[&str]) -> AuthorizedStep {
         AuthorizedStep {
             job_id: "job".to_owned(),
             attempt: 1,
@@ -249,7 +235,12 @@ mod tests {
                 condition: None,
                 action: StepAction::Command {
                     program: program.display().to_string(),
-                    args: Vec::new(),
+                    args: arguments
+                        .iter()
+                        .map(|argument| {
+                            ValueBinding::Literal(ScalarValue::String((*argument).to_owned()))
+                        })
+                        .collect(),
                 },
                 inputs: BTreeMap::new(),
                 environment: BTreeMap::new(),
@@ -268,7 +259,6 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let workspace = directory.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let program = executable(&directory, "sleep 30 & wait");
         let executor = DirectStepExecutor::new(&workspace).unwrap();
         let cancellation = Arc::new(AtomicBool::new(false));
         let signal = Arc::clone(&cancellation);
@@ -277,7 +267,11 @@ mod tests {
             signal.store(true, Ordering::Release);
         });
         let result = executor
-            .execute(authorized(&program), Duration::from_secs(10), cancellation)
+            .execute(
+                authorized(&system_executable("/bin/sh"), &["-c", "sleep 30 & wait"]),
+                Duration::from_secs(10),
+                cancellation,
+            )
             .unwrap();
         assert!(result.canceled);
         assert!(result.process_group_clean);
@@ -288,16 +282,18 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let workspace = directory.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let program = executable(
-            &directory,
-            "/bin/dd if=/dev/zero bs=65536 count=1 2>/dev/null",
-        );
         let executor = DirectStepExecutor::new(&workspace)
             .unwrap()
             .with_limits(1024, Duration::from_secs(10));
         let result = executor
             .execute(
-                authorized(&program),
+                authorized(
+                    &system_executable("/bin/sh"),
+                    &[
+                        "-c",
+                        "i=0; while [ \"$i\" -lt 2048 ]; do printf x; i=$((i + 1)); done",
+                    ],
+                ),
                 Duration::from_secs(10),
                 Arc::new(AtomicBool::new(false)),
             )
