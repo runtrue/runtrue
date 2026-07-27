@@ -110,12 +110,12 @@ arbitrary public contribution code. Keep the `pull_request` trigger absent
 until Firecracker can hydrate the authenticated source snapshot and a matching
 profile and capacity are configured and validated end to end.
 
-The staged workflow also requires a Runtrue control plane whose GitHub App is
-installed on `github.com/runtrue/runtrue`, plus a signed, prehydrated assignment
-for the locked Rust OCI image. The `enterprise-ci.example.test` deployment targets
-`github.example.test` and cannot receive this repository's events. Until those
-requirements exist, the workflow is fail-closed future configuration rather
-than live post-merge evidence, and it cannot be selected as a required
+The staged workflow remains deployment-agnostic. Operators must connect the
+intended SCM provider and supply a signed, prehydrated assignment for the locked
+Rust OCI image. Instance names, domains, and provider routing are deployment
+configuration and must not be encoded in this repository. Until a deployment
+validates those requirements, the workflow is fail-closed future configuration
+rather than live post-merge evidence, and it cannot be selected as a required
 public-PR check.
 
 ## Consumer verification

@@ -1534,8 +1534,11 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
         Arc::clone(&control),
         fetcher.clone(),
         installation_provider.clone(),
-        GitHubProviderEndpoints::new("https://github.example.test", "https://github.example.test/api/v3")
-            .unwrap(),
+        GitHubProviderEndpoints::new(
+            "https://github.example.test",
+            "https://github.example.test/api/v3",
+        )
+        .unwrap(),
         builder.clone(),
     );
     let request = SourceActionResolutionRequest::new(
@@ -1672,8 +1675,11 @@ fn github_repository_action_resolution_is_exact_authorized_and_builder_agnostic(
         Arc::clone(&control),
         fetcher,
         installation_provider,
-        GitHubProviderEndpoints::new("https://github.example.test", "https://github.example.test/api/v3")
-            .unwrap(),
+        GitHubProviderEndpoints::new(
+            "https://github.example.test",
+            "https://github.example.test/api/v3",
+        )
+        .unwrap(),
     );
     assert!(component_only_resolver
         .resolve(

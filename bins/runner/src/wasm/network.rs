@@ -275,7 +275,9 @@ mod tests {
         assert!(authorize_destination(&grant(), "github.example.test", 443).is_ok());
         assert!(authorize_destination(&grant(), "github.example.test", 8443).is_err());
         assert!(authorize_destination(&grant(), "api.github.com", 443).is_err());
-        assert!(authorize_destination(&NetworkPermission::Deny, "github.example.test", 443).is_err());
+        assert!(
+            authorize_destination(&NetworkPermission::Deny, "github.example.test", 443).is_err()
+        );
     }
 
     #[test]
