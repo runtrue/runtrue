@@ -55,10 +55,13 @@ commands, builder identity, and results in the release evidence.
 
 ## Build and evidence
 
-The automated runtime-image release builds OCI layouts for `linux/amd64` and
-`linux/arm64`, with BuildKit provenance and SBOM attestations. The build job has
-read-only repository permission and no registry login or publication
-credential. It transfers one-day immutable artifacts to the promotion job.
+The automated runtime-image release builds native OCI layouts on
+`ubuntu-24.04` for `linux/amd64` and `ubuntu-24.04-arm` for `linux/arm64`, with
+BuildKit provenance and SBOM attestations. The build jobs have read-only
+repository permission and no registry login or publication credential. They
+transfer one-day immutable per-platform artifacts to the promotion job, which
+assembles the final multi-architecture indexes without rebuilding either
+platform.
 
 The `release` GitHub environment must require independent approval. Only after
 that approval does the promotion job receive package, attestation, and OIDC

@@ -34,7 +34,7 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.title }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -42,14 +42,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - title: Runtrue control plane
+          - title: Runtrue control plane (amd64)
             image: runtrue-server
-            artifact: runtrue-server
+            artifact: runtrue-server-amd64
             file: ./deploy/Containerfile.server
-          - title: Runtrue runner
+            platform: linux/amd64
+            architecture: amd64
+            runner: ubuntu-24.04
+          - title: Runtrue control plane (arm64)
+            image: runtrue-server
+            artifact: runtrue-server-arm64
+            file: ./deploy/Containerfile.server
+            platform: linux/arm64
+            architecture: arm64
+            runner: ubuntu-24.04-arm
+          - title: Runtrue runner (amd64)
             image: runtrue-runner
-            artifact: runtrue-runner
+            artifact: runtrue-runner-amd64
             file: ./deploy/Containerfile.runner
+            platform: linux/amd64
+            architecture: amd64
+            runner: ubuntu-24.04
+          - title: Runtrue runner (arm64)
+            image: runtrue-runner
+            artifact: runtrue-runner-arm64
+            file: ./deploy/Containerfile.runner
+            platform: linux/arm64
+            architecture: arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Check out source
@@ -82,9 +102,6 @@ jobs:
             printf 'revision=%s\n' "$GITHUB_SHA"
           } >>"$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -93,7 +110,7 @@ jobs:
         with:
           context: .
           file: ${{ matrix.file }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: false
           outputs: type=oci,dest=/tmp/${{ matrix.artifact }}.oci.tar
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.identity.outputs.version }}
@@ -108,21 +125,22 @@ jobs:
           provenance: mode=max
           sbom: true
 
-      - name: Verify multi-architecture OCI evidence
+      - name: Verify native-platform OCI evidence
         shell: bash
         env:
           ARCHIVE: /tmp/${{ matrix.artifact }}.oci.tar
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
         run: |
           set -Eeuo pipefail
           test -s "$ARCHIVE"
           index="$(mktemp)"
           skopeo inspect --raw "oci-archive:${ARCHIVE}" >"$index"
-          jq -e '
+          jq -e --arg architecture "$EXPECTED_ARCHITECTURE" '
             [.manifests[].platform |
               select(.os == "linux") |
               .architecture] as $architectures |
-            ($architectures | map(select(. == "amd64")) | length) == 1 and
-            ($architectures | map(select(. == "arm64")) | length) == 1
+            ($architectures | length) == 1 and
+            $architectures[0] == $architecture
           ' "$index" >/dev/null
           (
             cd /tmp
@@ -174,10 +192,14 @@ jobs:
           cd "$EVIDENCE_DIR"
           expected="$(
             printf '%s\n' \
-              runtrue-runner.oci.tar \
-              runtrue-runner.oci.tar.sha256 \
-              runtrue-server.oci.tar \
-              runtrue-server.oci.tar.sha256 |
+              runtrue-runner-amd64.oci.tar \
+              runtrue-runner-amd64.oci.tar.sha256 \
+              runtrue-runner-arm64.oci.tar \
+              runtrue-runner-arm64.oci.tar.sha256 \
+              runtrue-server-amd64.oci.tar \
+              runtrue-server-amd64.oci.tar.sha256 \
+              runtrue-server-arm64.oci.tar \
+              runtrue-server-arm64.oci.tar.sha256 |
               LC_ALL=C sort
           )"
           actual="$(find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
@@ -205,17 +227,42 @@ jobs:
           declare -A digests
 
           for component in runtrue-server runtrue-runner; do
-            archive="${EVIDENCE_DIR}/${component}.oci.tar"
             image="${REGISTRY}/${IMAGE_NAMESPACE}/${component}"
-            digest="sha256:$(skopeo inspect --raw "oci-archive:${archive}" |
-              sha256sum | awk '{print $1}')"
-            skopeo copy --all --preserve-digests \
-              "oci-archive:${archive}" \
-              "docker://${image}:sha-${GITHUB_SHA}"
-            staged="sha256:$(skopeo inspect --raw "docker://${image}:sha-${GITHUB_SHA}" |
-              sha256sum | awk '{print $1}')"
-            [[ "$staged" == "$digest" ]] ||
-              { echo "registry changed ${component} evidence" >&2; exit 1; }
+            for architecture in amd64 arm64; do
+              archive="${EVIDENCE_DIR}/${component}-${architecture}.oci.tar"
+              digest="sha256:$(skopeo inspect --raw "oci-archive:${archive}" |
+                sha256sum | awk '{print $1}')"
+              staged_tag="sha-${GITHUB_SHA}-${architecture}"
+              skopeo copy --all --preserve-digests \
+                "oci-archive:${archive}" \
+                "docker://${image}:${staged_tag}"
+              staged="sha256:$(skopeo inspect --raw "docker://${image}:${staged_tag}" |
+                sha256sum | awk '{print $1}')"
+              [[ "$staged" == "$digest" ]] ||
+                { echo "registry changed ${component} ${architecture} evidence" >&2; exit 1; }
+            done
+
+            metadata="$(mktemp)"
+            docker buildx imagetools create \
+              --metadata-file "$metadata" \
+              --tag "${image}:sha-${GITHUB_SHA}" \
+              "${image}:sha-${GITHUB_SHA}-amd64" \
+              "${image}:sha-${GITHUB_SHA}-arm64"
+            digest="$(jq -r '.["containerimage.descriptor"].digest' "$metadata")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+              { echo "invalid ${component} index digest" >&2; exit 1; }
+            index="$(mktemp)"
+            skopeo inspect --raw "docker://${image}@${digest}" >"$index"
+            published="sha256:$(sha256sum "$index" | awk '{print $1}')"
+            [[ "$published" == "$digest" ]] ||
+              { echo "registry changed ${component} index" >&2; exit 1; }
+            jq -e '
+              [.manifests[].platform |
+                select(.os == "linux") |
+                .architecture] as $architectures |
+              ($architectures | map(select(. == "amd64")) | length) == 1 and
+              ($architectures | map(select(. == "arm64")) | length) == 1
+            ' "$index" >/dev/null
             digests["$component"]="$digest"
             printf '%s_digest=%s\n' "${component//-/_}" "$digest" >>"$GITHUB_OUTPUT"
           done
@@ -225,6 +272,10 @@ jobs:
             skopeo copy --all --preserve-digests \
               "docker://${image}@${digests[$component]}" \
               "docker://${image}:${version}"
+            versioned="sha256:$(skopeo inspect --raw "docker://${image}:${version}" |
+              sha256sum | awk '{print $1}')"
+            [[ "$versioned" == "${digests[$component]}" ]] ||
+              { echo "registry changed ${component} version tag" >&2; exit 1; }
           done
 
       - name: Attest published server image

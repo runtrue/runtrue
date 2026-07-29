@@ -19,7 +19,11 @@ def forbid(fragment: str, section: str) -> None:
 
 require('      - "v*"')
 require("  pull_request:")
-require("          platforms: linux/amd64,linux/arm64")
+require("            runner: ubuntu-24.04")
+require("            runner: ubuntu-24.04-arm")
+require("            platform: linux/amd64")
+require("            platform: linux/arm64")
+require("          platforms: ${{ matrix.platform }}")
 require("          push: false")
 require("    environment: release")
 require("      packages: write")
@@ -45,6 +49,7 @@ forbid("docker/login-action", build)
 forbid("secrets.GITHUB_TOKEN", build)
 forbid("push: true", build)
 forbid("cache-to:", build)
+forbid("setup-qemu-action", build)
 
 for fragment in (
     "needs: build",
