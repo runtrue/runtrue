@@ -16,40 +16,39 @@ on:
       - "deploy/healthcheck.sh"
       - "proto/**"
   push:
-    branches:
-      - main
     tags:
       - "v*"
-  workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
-  attestations: write
-  id-token: write
 
 concurrency:
   group: publish-runtime-images-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: runtrue
 
 jobs:
-  image:
+  build:
     name: Build ${{ matrix.title }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
           - title: Runtrue control plane
             image: runtrue-server
+            artifact: runtrue-server
             file: ./deploy/Containerfile.server
           - title: Runtrue runner
             image: runtrue-runner
+            artifact: runtrue-runner
             file: ./deploy/Containerfile.runner
 
     steps:
@@ -58,51 +57,186 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve immutable build identity
+        id: identity
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$EVENT_NAME" == push ]]; then
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+              { echo "release tag must be vMAJOR.MINOR.PATCH" >&2; exit 1; }
+            version="${RELEASE_TAG#v}"
+            workspace_version="$(cargo metadata --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "runtrue") | .version')"
+            [[ "$version" == "$workspace_version" ]] ||
+              { echo "release tag does not match workspace version" >&2; exit 1; }
+          else
+            version="0.0.0-pr.${PR_NUMBER}"
+          fi
+          {
+            printf 'version=%s\n' "$version"
+            printf 'revision=%s\n' "$GITHUB_SHA"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
+      - name: Build credential-free OCI evidence
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: false
+          outputs: type=oci,dest=/tmp/${{ matrix.artifact }}.oci.tar
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.identity.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.identity.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.identity.outputs.revision }}
+            org.opencontainers.image.source=https://github.com/runtrue/runtrue
+            org.opencontainers.image.licenses=Apache-2.0
+          build-args: |
+            RUNTRUE_VERSION=${{ steps.identity.outputs.version }}
+            RUNTRUE_REVISION=${{ steps.identity.outputs.revision }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify multi-architecture OCI evidence
+        shell: bash
+        env:
+          ARCHIVE: /tmp/${{ matrix.artifact }}.oci.tar
+        run: |
+          set -Eeuo pipefail
+          test -s "$ARCHIVE"
+          index="$(mktemp)"
+          skopeo inspect --raw "oci-archive:${ARCHIVE}" >"$index"
+          jq -e '
+            [.manifests[].platform |
+              select(.os == "linux") |
+              .architecture] as $architectures |
+            ($architectures | map(select(. == "amd64")) | length) == 1 and
+            ($architectures | map(select(. == "arm64")) | length) == 1
+          ' "$index" >/dev/null
+          (
+            cd /tmp
+            sha256sum "${ARCHIVE##*/}" >"${ARCHIVE##*/}.sha256"
+          )
+
+      - name: Transfer immutable release evidence
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-image-${{ matrix.artifact }}-${{ github.sha }}
+          path: |
+            /tmp/${{ matrix.artifact }}.oci.tar
+            /tmp/${{ matrix.artifact }}.oci.tar.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  promote:
+    name: Promote approved runtime images
+    if: >-
+      github.event_name == 'push' &&
+      github.repository_visibility == 'public' &&
+      vars.RUNTIME_IMAGE_PROMOTION_ENABLED == 'true'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: Download exact build evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-image-*-${{ github.sha }}
+          path: ${{ runner.temp }}/release-images
+          merge-multiple: true
+
+      - name: Verify complete release evidence
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/release-images
+        run: |
+          set -Eeuo pipefail
+          cd "$EVIDENCE_DIR"
+          expected="$(
+            printf '%s\n' \
+              runtrue-runner.oci.tar \
+              runtrue-runner.oci.tar.sha256 \
+              runtrue-server.oci.tar \
+              runtrue-server.oci.tar.sha256 |
+              LC_ALL=C sort
+          )"
+          actual="$(find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
+          [[ "$actual" == "$expected" ]] ||
+            { echo "release evidence inventory mismatch" >&2; exit 1; }
+          sha256sum --check ./*.sha256
+
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image metadata
-        id: metadata
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
-          tags: |
-            type=sha,format=long,prefix=sha-
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+      - name: Promote exact OCI evidence
+        id: promote
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/release-images
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          version="${RELEASE_TAG#v}"
+          [[ "$RELEASE_TAG" == "v${version}" ]]
+          declare -A digests
 
-      - name: Build and publish image
-        id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: ${{ matrix.file }}
-          platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          build-args: |
-            RUNTRUE_VERSION=${{ github.ref_name }}
-            RUNTRUE_REVISION=${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
-          provenance: ${{ github.event_name != 'pull_request' && 'mode=max' || 'false' }}
-          sbom: ${{ github.event_name != 'pull_request' }}
+          for component in runtrue-server runtrue-runner; do
+            archive="${EVIDENCE_DIR}/${component}.oci.tar"
+            image="${REGISTRY}/${IMAGE_NAMESPACE}/${component}"
+            digest="sha256:$(skopeo inspect --raw "oci-archive:${archive}" |
+              sha256sum | awk '{print $1}')"
+            skopeo copy --all --preserve-digests \
+              "oci-archive:${archive}" \
+              "docker://${image}:sha-${GITHUB_SHA}"
+            staged="sha256:$(skopeo inspect --raw "docker://${image}:sha-${GITHUB_SHA}" |
+              sha256sum | awk '{print $1}')"
+            [[ "$staged" == "$digest" ]] ||
+              { echo "registry changed ${component} evidence" >&2; exit 1; }
+            digests["$component"]="$digest"
+            printf '%s_digest=%s\n' "${component//-/_}" "$digest" >>"$GITHUB_OUTPUT"
+          done
 
-      - name: Attest published image
-        if: github.event_name != 'pull_request'
+          for component in runtrue-server runtrue-runner; do
+            image="${REGISTRY}/${IMAGE_NAMESPACE}/${component}"
+            skopeo copy --all --preserve-digests \
+              "docker://${image}@${digests[$component]}" \
+              "docker://${image}:${version}"
+          done
+
+      - name: Attest published server image
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/runtrue-server
+          subject-digest: ${{ steps.promote.outputs.runtrue_server_digest }}
+          push-to-registry: true
+
+      - name: Attest published runner image
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/runtrue-runner
+          subject-digest: ${{ steps.promote.outputs.runtrue_runner_digest }}
           push-to-registry: true

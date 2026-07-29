@@ -19,8 +19,8 @@ and deployment guarantees.
 - [ ] Review Git history for large generated artifacts, production data, private
       repository content, and third-party material without compatible licensing.
 - [ ] Confirm `LICENSE`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`,
-      `SUPPORT.md`, issue forms, the pull request template, and `CODEOWNERS`
-      render correctly.
+      `SUPPORT.md`, `CODE_OF_CONDUCT.md`, issue forms, the pull request
+      template, and `CODEOWNERS` render correctly.
 - [ ] Confirm all examples and fixtures use synthetic identities and
       credentials.
 - [ ] Confirm documentation does not promise unavailable releases, support

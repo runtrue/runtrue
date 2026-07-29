@@ -13,7 +13,7 @@ may change APIs, but migrations and compatibility requirements remain explicit.
   flows separated from the runner protocol.
 - Durable SCM check revision journaling in database migrations 27 and 28.
 - Multi-architecture OCI release evidence with embedded SBOM and provenance
-  attestations for all shipped component images.
+  attestations for the published server and unified runner images.
 
 ### Changed
 

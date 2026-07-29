@@ -1,15 +1,16 @@
 # Release and promotion runbook
 
-Runtrue uses GitHub Actions to verify pull requests and pushes to `main`.
-Release automation remains disabled: CI validates source, dependencies,
-conformance, deployment configuration, and the runner image, but it does not
-publish tags, packages, images, archives, or releases.
+Runtrue uses GitHub Actions to verify source changes and runtime images. The
+runtime-image workflow validates the server and unified runner on pull requests
+without publication authority. A semantic `vMAJOR.MINOR.PATCH` tag matching the
+workspace version builds credential-free multi-architecture OCI evidence and
+transfers it to a distinct, protected promotion job.
 
-This document remains a manual, fail-closed operator checklist. Keep all
-generated release artifacts private. Do not publish a tag, package, image,
-archive, or release while any required step is manual unless the release
-decision explicitly authorizes that process. Public source visibility does not
-authorize a release.
+Current automation publishes only `runtrue-server` and `runtrue-runner` to
+GHCR. It does not create tags or GitHub releases, publish Rust packages or
+binary archives, or publish the backup, autoscaler, frontend, or provider
+components. Public source visibility does not authorize a tag or broaden the
+approved release scope.
 
 ## Source and verification gates
 
@@ -24,6 +25,7 @@ cargo +1.94.0 check --workspace --all-targets --locked
 cargo +1.94.0 test --workspace --locked
 cargo +1.94.0 clippy --workspace --all-targets --locked -- -D warnings
 tests/check_brand.sh
+python3 tests/check_release_workflow.py
 tests/conformance/verify_workflow_frontend.sh
 python3 tests/conformance/check_schema.py
 python3 tests/conformance/check_openapi_routes.py
@@ -38,10 +40,12 @@ browser tests, strict Clippy gates, and image build in a clean checkout. Retain
 those results with the release evidence; core gates verify only the neutral
 frontend contract and do not execute an external repository's test suite.
 
-Also build every shipped container definition from its pinned base and rerun
-the update trust and rollback acceptance suite:
+Also build every container in the approved release scope from its pinned base
+and rerun the update trust and rollback acceptance suite:
 
 ```bash
+docker build --tag runtrue/server:verify --file deploy/Containerfile.server .
+docker build --tag runtrue/runner:verify --file deploy/Containerfile.runner .
 docker build --tag runtrue/runner-node:verify images/runner-node
 cargo +1.94.0 test --locked -p runtrue-update -p runtrue-update-cli
 ```
@@ -51,7 +55,28 @@ commands, builder identity, and results in the release evidence.
 
 ## Build and evidence
 
-Build the six Rust binaries for `x86_64-unknown-linux-gnu` and
+The automated runtime-image release builds OCI layouts for `linux/amd64` and
+`linux/arm64`, with BuildKit provenance and SBOM attestations. The build job has
+read-only repository permission and no registry login or publication
+credential. It transfers one-day immutable artifacts to the promotion job.
+
+The `release` GitHub environment must require independent approval. Only after
+that approval does the promotion job receive package, attestation, and OIDC
+write permission. It publishes a commit-qualified `sha-<commit>` tag, verifies
+that GHCR retained the exact OCI index digest, and then copies that digest to
+the exact version tag. The workflow does not publish mutable major, minor,
+branch, or `latest` tags.
+
+Promotion fails closed while the repository is private or the repository
+variable `RUNTIME_IMAGE_PROMOTION_ENABLED` is absent. Set that variable to
+`true` only after the repository is public and the `release` environment:
+
+1. requires an independent reviewer,
+2. prevents self-review and administrator bypass, and
+3. permits only `v*` deployment tags.
+
+Binary distribution remains disabled. A future binary release must build the
+six Rust binaries for `x86_64-unknown-linux-gnu` and
 `aarch64-unknown-linux-gnu` from the locked graph:
 
 - `runtrue`
@@ -61,7 +86,8 @@ Build the six Rust binaries for `x86_64-unknown-linux-gnu` and
 - `runtrue-server`
 - `runtrue-update`
 
-Package deterministic per-binary archives with normalized timestamps,
+That future binary release must package deterministic per-binary archives with
+normalized timestamps,
 ownership, ordering, and gzip headers. Generate a dependency-complete
 CycloneDX SBOM and canonical provenance statement for every archive. Build the
 runner-node multi-architecture OCI layout with embedded SBOM and provenance
@@ -97,16 +123,18 @@ after signing.
 
 ## Automation requirement
 
-Any future Runtrue release workflow must preserve the same separation:
-credential-free build jobs, immutable evidence transfer, exact-plan approval,
-independent signing, and a distinct promotion job. Publication credentials may
-exist only in that final approved boundary. Bisim must cover the local and
-remote release plan before automated publication is enabled.
+Every Runtrue release workflow must preserve credential-free build jobs,
+immutable evidence transfer, exact-plan approval, independent signing, and a
+distinct promotion job. Publication credentials may exist only in that final
+approved boundary. Bisim must cover the local and remote release plan before
+automated publication is enabled.
 
-The checked-in GitHub Actions workflow is deployment-agnostic, runs without
-repository secrets, and has read-only source permission. It is the current
-source-verification path for both pull requests and `main`; it does not replace
-Runtrue's runtime isolation or release trust boundaries.
+The source-verification workflow runs with read-only source permission. The
+runtime-image build job also stays read-only and cannot log in to GHCR or
+publish. Only the tag-triggered promotion job, after the protected `release`
+environment boundary, receives package, attestation, and OIDC write permission.
+Neither workflow replaces Runtrue's runtime isolation or update trust
+boundaries.
 
 ## Consumer verification
 
