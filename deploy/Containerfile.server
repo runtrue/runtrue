@@ -45,6 +45,7 @@ ARG RUNTRUE_REVISION=unknown
 LABEL org.opencontainers.image.title="Runtrue server" \
       org.opencontainers.image.version="${RUNTRUE_VERSION}" \
       org.opencontainers.image.revision="${RUNTRUE_REVISION}" \
+      org.opencontainers.image.source="https://github.com/runtrue/runtrue" \
       org.opencontainers.image.licenses="Apache-2.0"
 RUN groupadd --gid 10001 --system runtrue && \
     useradd --uid 10001 --gid 10001 --system --no-create-home \

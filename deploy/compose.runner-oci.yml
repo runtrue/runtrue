@@ -21,10 +21,10 @@ x-runner-oci-environment: &runner-oci-environment
   RUNTRUE_RUNNER_REGION: "${RUNTRUE_RUNNER_REGION:-single-node-evaluation}"
 
 x-runner-oci-service: &runner-oci-service
-  image: "${RUNTRUE_IMAGE_REPOSITORY:-local/runtrue}-runner-oci:${RUNTRUE_IMAGE_TAG:-0.1.0}"
+  image: "${RUNTRUE_IMAGE_REPOSITORY:-local/runtrue}-runner:${RUNTRUE_IMAGE_TAG:-0.1.0}"
   build:
     context: ..
-    dockerfile: deploy/Containerfile.runner-oci
+    dockerfile: deploy/Containerfile.runner
     args:
       RUNTRUE_VERSION: "${RUNTRUE_IMAGE_TAG:-0.1.0}"
       RUNTRUE_REVISION: "${RUNTRUE_IMAGE_REVISION:-unknown}"

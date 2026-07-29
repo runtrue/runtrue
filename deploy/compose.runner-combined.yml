@@ -1,0 +1,44 @@
+# Opt-in combined Wasm and OCI evaluation runner. Include this file after
+# compose.runner-tls.yml and compose.runner-wasm.yml. It deliberately gives the
+# single runner service the broader OCI security boundary; use separate Wasm
+# and OCI services when least privilege is more important than topology size.
+
+x-runner-combined-oci-environment: &runner-combined-oci-environment
+  HOME: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/home"
+  XDG_RUNTIME_DIR: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/runtime"
+  TMPDIR: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/tmp"
+  RUNTRUE_RUNNER_OCI_STATE_DIRECTORY: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/${RUNTRUE_OCI_RUNTIME_STATE_SUBDIRECTORY:-oci-state}"
+  RUNTRUE_RUNNER_OCI_PODMAN: /usr/bin/podman
+  RUNTRUE_RUNNER_OCI_SECCOMP_PROFILE: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/seccomp.json"
+  RUNTRUE_RUNNER_OCI_IMAGE_STORE: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/image-store"
+  RUNTRUE_RUNNER_OCI_RUNTIME_ENVIRONMENT: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/runtime-environment.json"
+  RUNTRUE_RUNNER_OCI_MANIFEST_DIRECTORY: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/manifests"
+  RUNTRUE_RUNNER_OCI_IMAGE_KEYRING: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}/image-keys"
+
+x-runner-combined-oci-volume: &runner-combined-oci-volume
+  type: bind
+  source: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}"
+  target: "${RUNTRUE_OCI_STATE_DIR:?set RUNTRUE_OCI_STATE_DIR}"
+  bind:
+    create_host_path: false
+
+services:
+  runner-enroll:
+    environment:
+      <<: *runner-combined-oci-environment
+    volumes:
+      - *runner-combined-oci-volume
+
+  runner:
+    profiles: !override
+      - runner-combined-eval
+    privileged: true
+    devices:
+      - /dev/fuse:/dev/fuse
+    environment:
+      <<: *runner-combined-oci-environment
+    volumes:
+      - *runner-combined-oci-volume
+    pids_limit: "${RUNTRUE_RUNNER_OCI_PIDS_LIMIT:-768}"
+    mem_limit: "${RUNTRUE_RUNNER_OCI_MEMORY_LIMIT:-6g}"
+    cpus: "${RUNTRUE_RUNNER_OCI_CPUS:-2.0}"
