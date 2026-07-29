@@ -1,25 +1,36 @@
 # Public namespace reservations
 
-This runbook tracks the names that must be controlled before Runtrue is
-announced or its first public release is published. A checked item means the
-name has been verified live, reserved by an organization-owned account, and
-recorded in the private ownership register. Repository documentation must not
-claim availability based only on this list.
+This runbook tracks the names that must be controlled before Runtrue publishes
+into each distribution channel. A checked item means the name has been
+verified live, reserved by an organization-owned account, and recorded in the
+private ownership register. Repository documentation must not claim
+availability based only on this list.
 
-## Required reservation set
+## Current source and runtime-image release
 
 - [ ] GitHub organization `runtrue`
+- [ ] GitHub Container Registry namespace under the Runtrue organization
+
+The current release scope is the public source repository plus the
+`runtrue-server` and `runtrue-runner` images in GHCR. These two reservations
+must be verified immediately before the first public version tag.
+
+## Deferred distribution channels
+
 - [ ] Primary developer domain `runtrue.dev`
 - [ ] CLI-oriented domain `runtrue.sh`
 - [ ] Defensive domains selected by the project owners
 - [ ] crates.io package `runtrue`
 - [ ] crates.io package `runtrue-cli`
-- [ ] GitHub Container Registry namespace under the Runtrue organization
 - [ ] Docker Hub organization or other canonical OCI namespace `runtrue`
 - [ ] npm scope `@runtrue`
 - [ ] Homebrew organization and tap `runtrue/homebrew-tap`
 - [ ] Other package-manager names that correspond to an approved distribution
   roadmap
+
+These names become release gates only when their distribution channel is added
+to an approved release plan. Rust packages intentionally retain
+`publish = false` while crates.io distribution is deferred.
 
 Do not publish empty placeholder packages. Each registry reservation must ship
 a legitimate minimal artifact, metadata that points to the canonical project,
@@ -43,6 +54,7 @@ personal account.
 
 ## Release gate
 
-The release owner verifies this list immediately before the first public tag.
-Names that are unavailable require a naming decision; silently publishing into
-an unofficial or maintainer-owned namespace is not an acceptable fallback.
+The release owner verifies every reservation in the approved channel set
+immediately before a public tag. Names that are unavailable require a naming
+decision; silently publishing into an unofficial or maintainer-owned namespace
+is not an acceptable fallback.

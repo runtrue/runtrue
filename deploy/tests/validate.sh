@@ -25,11 +25,11 @@ required=(
   compose.runner-tls.yml
   compose.runner-wasm.yml
   compose.runner-oci.yml
+  compose.runner-combined.yml
   compose.autoscaler.yml
   compose.traefik.yml
   Containerfile.server
   Containerfile.runner
-  Containerfile.runner-oci
   Containerfile.autoscaler
   Containerfile.backup
   bootstrap.sh
@@ -96,6 +96,10 @@ common=(docker compose --env-file "${TEMPORARY_ROOT}/compose.env" -f "${DEPLOY_D
   -f "${DEPLOY_DIR}/compose.runner-wasm.yml" --profile runner-wasm-eval config --quiet
 "${common[@]}" -f "${DEPLOY_DIR}/compose.runner-tls.yml" \
   -f "${DEPLOY_DIR}/compose.runner-oci.yml" config --quiet
+"${common[@]}" -f "${DEPLOY_DIR}/compose.runner-tls.yml" \
+  -f "${DEPLOY_DIR}/compose.runner-wasm.yml" \
+  -f "${DEPLOY_DIR}/compose.runner-combined.yml" \
+  --profile runner-combined-eval config --quiet
 
 rendered="${TEMPORARY_ROOT}/full.json"
 env \
@@ -198,6 +202,8 @@ import sys
 model = json.loads(pathlib.Path(sys.argv[1]).read_text())
 services = model["services"]
 runner = services["runner-oci"]
+if runner.get("image") != "local/runtrue-runner:0.1.0":
+    raise SystemExit("OCI and Wasm deployments must use the same runner image")
 if runner.get("privileged") is not True:
     raise SystemExit("OCI runner must be privileged for nested rootless Podman")
 if runner.get("user") != "10001:10001":
@@ -212,6 +218,47 @@ if "/dev/fuse" not in json.dumps(runner.get("devices", [])):
     raise SystemExit("OCI runner is missing /dev/fuse")
 if "systemd" in json.dumps(runner).lower():
     raise SystemExit("OCI runner configuration must not depend on systemd")
+PY
+
+combined_rendered="${TEMPORARY_ROOT}/combined.json"
+"${common[@]}" \
+  -f "${DEPLOY_DIR}/compose.runner-tls.yml" \
+  -f "${DEPLOY_DIR}/compose.runner-wasm.yml" \
+  -f "${DEPLOY_DIR}/compose.runner-combined.yml" \
+  --profile runner-combined-eval \
+  config --format json >"$combined_rendered"
+
+python3 - "$combined_rendered" <<'PY'
+import json
+import pathlib
+import sys
+
+model = json.loads(pathlib.Path(sys.argv[1]).read_text())
+runner = model["services"]["runner"]
+environment = runner.get("environment", {})
+if runner.get("image") != "local/runtrue-runner:0.1.0":
+    raise SystemExit("combined deployment must use the single runner image")
+if runner.get("privileged") is not True:
+    raise SystemExit("combined Wasm/OCI runner must expose its OCI privilege boundary")
+if "/dev/fuse" not in json.dumps(runner.get("devices", [])):
+    raise SystemExit("combined Wasm/OCI runner is missing /dev/fuse")
+required = {
+    "RUNTRUE_RUNNER_WASM_COMPONENT_DIRECTORY",
+    "RUNTRUE_RUNNER_WASM_MANIFEST_DIRECTORY",
+    "RUNTRUE_RUNNER_WASM_COMPONENT_KEYRING",
+    "RUNTRUE_RUNNER_WASM_AOT_CACHE",
+    "RUNTRUE_RUNNER_WASM_RUNTIME_KEY",
+    "RUNTRUE_RUNNER_OCI_STATE_DIRECTORY",
+    "RUNTRUE_RUNNER_OCI_PODMAN",
+    "RUNTRUE_RUNNER_OCI_SECCOMP_PROFILE",
+    "RUNTRUE_RUNNER_OCI_IMAGE_STORE",
+    "RUNTRUE_RUNNER_OCI_RUNTIME_ENVIRONMENT",
+    "RUNTRUE_RUNNER_OCI_MANIFEST_DIRECTORY",
+    "RUNTRUE_RUNNER_OCI_IMAGE_KEYRING",
+}
+missing = required - set(environment)
+if missing:
+    raise SystemExit(f"combined runner is missing backend configuration: {sorted(missing)!r}")
 PY
 
 grep -q 'RUNTRUE_RUNNER_WASM_MAX_CONCURRENT_JOBS: "${RUNTRUE_RUNNER_WASM_MAX_CONCURRENT_JOBS:-1}"' \

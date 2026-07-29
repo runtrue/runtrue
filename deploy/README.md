@@ -44,7 +44,10 @@ curl --fail http://127.0.0.1:8080/healthz
 - `compose.traefik.yml` adds the public HTTPS edge.
 - `compose.runner-tls.yml` enables runner enrollment and control TLS.
 - `compose.runner-wasm.yml` configures the local WASM runner profile.
-- `compose.runner-oci.yml` adds a Docker-managed rootless Podman OCI runner.
+- `compose.runner-oci.yml` deploys the same runner image with the explicit
+  privileges and state required for rootless Podman OCI execution.
+- `compose.runner-combined.yml` applies those OCI settings to the Wasm service
+  so one enrolled runner can advertise both backends.
 - `compose.autoscaler.yml` enables capacity-aware Docker autoscaling.
 
 Initialize the state needed by the optional services:
@@ -62,8 +65,6 @@ chmod 0600 deploy/state/github-app.env
 Edit `deploy/state/github-app.env`, then start the public stack:
 
 ```sh
-export GITHUB_TOKEN="$(gh auth token)"
-
 docker compose \
   --env-file deploy/state/compose.env \
   --env-file deploy/state/github-app.env \
@@ -96,6 +97,29 @@ deploy/github-app-provider-probe.py \
 ```
 
 ## Docker-managed OCI runner
+
+The Wasm and OCI services use the same `runtrue-runner` image and binary. The
+Wasm profile remains unprivileged; the OCI overlay adds only the service-level
+devices, privileges, configuration, and state required by Podman. A deployment
+may run either profile or both without publishing a second runner image.
+
+To use one runner identity for both backends, include the combined overlay
+after the Wasm overlay and start its explicit profile:
+
+```sh
+docker compose \
+  --env-file deploy/state/compose.env \
+  -f deploy/compose.yml \
+  -f deploy/compose.runner-tls.yml \
+  -f deploy/compose.runner-wasm.yml \
+  -f deploy/compose.runner-combined.yml \
+  --profile runner-combined-eval \
+  up -d --build --wait runner
+```
+
+The combined service is privileged because OCI execution requires nested
+rootless Podman. Keep the split topology when Wasm jobs must retain the smaller
+unprivileged container boundary.
 
 The OCI runner uses a prehydrated, signed Podman image store. Set
 `RUNTRUE_OCI_STATE_DIR` to its private absolute state directory and include the
