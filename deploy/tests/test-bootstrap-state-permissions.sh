@@ -26,13 +26,31 @@ install -m 0400 -- /dev/null "${pack_directory}/pack-test.pack"
 cas_directory="${state}/server/blobs/cas/objects/sha256/aa"
 install -d -m 0700 -- "$cas_directory"
 install -m 0444 -- /dev/null "${cas_directory}/immutable-object"
+image_layer="${state}/autoscaler/runtime-assets/oci/image-store/overlay/example/diff1"
+install -d -m 0700 -- "$image_layer" "${image_layer}/usr/lib64"
+ln -s -- usr/lib64 "${image_layer}/lib64"
 if ((EUID == 0)); then
   chown -R "${runtime_uid}:${runtime_gid}" -- \
-    "${state}/server/git-mirrors" "${state}/server/blobs"
+    "${state}/server/git-mirrors" "${state}/server/blobs" \
+    "${state}/autoscaler"
 fi
 
 "${runtime[@]}" "${DEPLOY_DIR}/bootstrap.sh" \
   --state-dir "$state" --with-github-app --check-only >/dev/null
+
+ln -s -- ../../../../../../../../etc "${image_layer}/escaping-link"
+if ((EUID == 0)); then
+  chown -h "${runtime_uid}:${runtime_gid}" -- "${image_layer}/escaping-link"
+fi
+if "${runtime[@]}" "${DEPLOY_DIR}/bootstrap.sh" \
+  --state-dir "$state" --with-github-app --check-only \
+  >"${TEST_ROOT}/escaping.out" 2>&1
+then
+  printf 'bootstrap state test: escaping OCI image-store symlink was accepted\n' >&2
+  exit 1
+fi
+grep -q 'escaping OCI image-store symbolic link rejected' "${TEST_ROOT}/escaping.out"
+rm -- "${image_layer}/escaping-link"
 
 chmod 0464 -- "${cas_directory}/immutable-object"
 if "${runtime[@]}" "${DEPLOY_DIR}/bootstrap.sh" \

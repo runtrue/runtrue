@@ -406,10 +406,23 @@ EOF
 }
 
 validate_state_tree() {
-  local unsafe
+  local image_store link resolved target unsafe
   reject_symlink_components "$STATE_DIR"
-  unsafe=$(find -P "$STATE_DIR" -xdev -type l -print -quit)
-  [[ -z "$unsafe" ]] || die "symbolic link in managed state rejected: ${unsafe}"
+  image_store="${STATE_DIR}/autoscaler/runtime-assets/oci/image-store"
+  while IFS= read -r -d '' link; do
+    case "$link" in
+      "${image_store}/"*) ;;
+      *) die "symbolic link in managed state rejected: ${link}" ;;
+    esac
+    target=$(readlink -- "$link")
+    [[ -n "$target" && "$target" != /* ]] ||
+      die "absolute or empty OCI image-store symbolic link rejected: ${link}"
+    resolved=$(realpath -m -s -- "$(dirname -- "$link")/${target}")
+    case "$resolved" in
+      "$image_store" | "${image_store}/"*) ;;
+      *) die "escaping OCI image-store symbolic link rejected: ${link}" ;;
+    esac
+  done < <(find -P "$STATE_DIR" -xdev -type l -print0)
   unsafe=$(find -P "$STATE_DIR" -xdev -type d \! -perm 0700 -print -quit)
   [[ -z "$unsafe" ]] || die "managed directory does not have exact mode 0700: ${unsafe}"
   unsafe=$(find -P "$STATE_DIR" -xdev -type f \
