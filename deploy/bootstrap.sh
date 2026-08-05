@@ -406,21 +406,16 @@ EOF
 }
 
 validate_state_tree() {
-  local image_store link resolved target unsafe
+  local image_store link unsafe
   reject_symlink_components "$STATE_DIR"
   image_store="${STATE_DIR}/autoscaler/runtime-assets/oci/image-store"
+  # The pre-admitted OCI store is opaque runtime content. Rootfs links may be
+  # absolute or cross layer boundaries, so validate their location without
+  # following or interpreting their targets on the host.
   while IFS= read -r -d '' link; do
     case "$link" in
       "${image_store}/"*) ;;
       *) die "symbolic link in managed state rejected: ${link}" ;;
-    esac
-    target=$(readlink -- "$link")
-    [[ -n "$target" && "$target" != /* ]] ||
-      die "absolute or empty OCI image-store symbolic link rejected: ${link}"
-    resolved=$(realpath -m -s -- "$(dirname -- "$link")/${target}")
-    case "$resolved" in
-      "$image_store" | "${image_store}/"*) ;;
-      *) die "escaping OCI image-store symbolic link rejected: ${link}" ;;
     esac
   done < <(find -P "$STATE_DIR" -xdev -type l -print0)
   unsafe=$(find -P "$STATE_DIR" -xdev -type d \! -perm 0700 -print -quit)

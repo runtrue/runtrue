@@ -38,19 +38,19 @@ fi
 "${runtime[@]}" "${DEPLOY_DIR}/bootstrap.sh" \
   --state-dir "$state" --with-github-app --check-only >/dev/null
 
-ln -s -- ../../../../../../../../etc "${image_layer}/escaping-link"
+ln -s -- /etc "${state}/server/unsafe-link"
 if ((EUID == 0)); then
-  chown -h "${runtime_uid}:${runtime_gid}" -- "${image_layer}/escaping-link"
+  chown -h "${runtime_uid}:${runtime_gid}" -- "${state}/server/unsafe-link"
 fi
 if "${runtime[@]}" "${DEPLOY_DIR}/bootstrap.sh" \
   --state-dir "$state" --with-github-app --check-only \
   >"${TEST_ROOT}/escaping.out" 2>&1
 then
-  printf 'bootstrap state test: escaping OCI image-store symlink was accepted\n' >&2
+  printf 'bootstrap state test: symlink outside the OCI image store was accepted\n' >&2
   exit 1
 fi
-grep -q 'escaping OCI image-store symbolic link rejected' "${TEST_ROOT}/escaping.out"
-rm -- "${image_layer}/escaping-link"
+grep -q 'symbolic link in managed state rejected' "${TEST_ROOT}/escaping.out"
+rm -- "${state}/server/unsafe-link"
 
 chmod 0464 -- "${cas_directory}/immutable-object"
 if "${runtime[@]}" "${DEPLOY_DIR}/bootstrap.sh" \
