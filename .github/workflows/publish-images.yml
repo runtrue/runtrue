@@ -10,6 +10,8 @@ on:
       - "crates/**"
       - "deploy/Containerfile.runner"
       - "deploy/Containerfile.runner.dockerignore"
+      - "deploy/Containerfile.autoscaler"
+      - "deploy/Containerfile.autoscaler.dockerignore"
       - "deploy/Containerfile.server"
       - "deploy/Containerfile.server.dockerignore"
       - "deploy/containers-oci.conf"
@@ -51,6 +53,9 @@ jobs:
           - title: Runtrue runner
             image: runtrue-runner
             file: ./deploy/Containerfile.runner
+          - title: Runtrue autoscaler
+            image: runtrue-autoscaler
+            file: ./deploy/Containerfile.autoscaler
 
     steps:
       - name: Check out source
@@ -80,6 +85,7 @@ jobs:
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and publish image
         id: build
