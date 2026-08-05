@@ -412,8 +412,10 @@ validate_state_tree() {
   [[ -z "$unsafe" ]] || die "symbolic link in managed state rejected: ${unsafe}"
   unsafe=$(find -P "$STATE_DIR" -xdev -type d \! -perm 0700 -print -quit)
   [[ -z "$unsafe" ]] || die "managed directory does not have exact mode 0700: ${unsafe}"
-  unsafe=$(find -P "$STATE_DIR" -xdev -type f \! -perm 0600 -print -quit)
-  [[ -z "$unsafe" ]] || die "managed file does not have exact mode 0600: ${unsafe}"
+  unsafe=$(find -P "$STATE_DIR" -xdev -type f \
+    \( -perm /022 -o \! -perm -0400 \) -print -quit)
+  [[ -z "$unsafe" ]] ||
+    die "managed file is not owner-readable or is writable by group/other: ${unsafe}"
   unsafe=$(find -P "$STATE_DIR" -xdev \! -uid "$RUNTIME_UID" -print -quit)
   [[ -z "$unsafe" ]] || die "managed path has an unexpected owner: ${unsafe}"
   unsafe=$(find -P "$STATE_DIR" -xdev \! -gid "$RUNTIME_GID" -print -quit)

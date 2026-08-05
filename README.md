@@ -57,13 +57,14 @@ For a containerized control plane and runners, follow the
 - [Single-node deployment](docs/operations/single-node-deployment.md)
 - [Backup and recovery](docs/operations/single-node-backup-restore.md)
 - [Security policy](SECURITY.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
 
 ## Contributing
 
 GitHub Actions runs the complete verification suite, including formatting,
 Clippy, workspace tests, protocol conformance, dependency and secret scanning,
-and Docker image builds. See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a
-change.
+and the published server and runner image builds. See
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a change.
 
 ## License
 

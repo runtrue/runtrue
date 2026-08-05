@@ -3,7 +3,7 @@
 This crate is Runtrue's embedded WebAssembly Component backend. It accepts only
 digest-pinned components implementing `runtrue:action/run@1.0.0`, verifies their
 exact signed image manifest and expected image-signing key, and then compiles
-them with the pinned Wasmtime 46.0.1 runtime and final WASI 0.3.0 host.
+them with the pinned Wasmtime 46.0.2 runtime and final WASI 0.3.0 host.
 
 The guest receives a fresh WASI context with no inherited filesystem, network,
 environment, arguments, working directory, standard streams, process, or

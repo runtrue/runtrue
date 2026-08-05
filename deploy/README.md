@@ -65,8 +65,6 @@ chmod 0600 deploy/state/github-app.env
 Edit `deploy/state/github-app.env`, then start the public stack:
 
 ```sh
-export GITHUB_TOKEN="$(gh auth token)"
-
 docker compose \
   --env-file deploy/state/compose.env \
   --env-file deploy/state/github-app.env \

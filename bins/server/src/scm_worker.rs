@@ -37,9 +37,9 @@ use runtrue_trusted_planner::{
     TrustedPlannerError, DEFAULT_LOCKFILE_PATH,
 };
 use runtrue_workflow_frontend::{
-    ResolvedActionInput, ResolvedProgram, ResolvedProgramRef, ResolvedSourceAction,
-    SourceActionResolutionRequest, WorkflowFrontendOptions, WorkflowFrontendRegistry,
-    WorkflowSourceFrontend,
+    ResolvedActionInput, ResolvedActionNetworkDestination, ResolvedActionSecret, ResolvedProgram,
+    ResolvedProgramRef, ResolvedSourceAction, SourceActionResolutionRequest,
+    WorkflowFrontendOptions, WorkflowFrontendRegistry, WorkflowSourceFrontend,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -78,6 +78,10 @@ const CAPABILITY_GRANT_LIFETIME_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 struct DurableResolvedAction {
     program: DurableResolvedProgram,
     inputs: BTreeMap<String, DurableResolvedInput>,
+    #[serde(default)]
+    network: Vec<DurableResolvedNetworkDestination>,
+    #[serde(default)]
+    secrets: Vec<DurableResolvedSecret>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +105,21 @@ enum DurableResolvedProgram {
 struct DurableResolvedInput {
     required: bool,
     default: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableResolvedNetworkDestination {
+    host: String,
+    port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableResolvedSecret {
+    name: String,
+    purpose: String,
+    file_env: String,
 }
 
 fn durable_resolved_actions(
@@ -143,9 +162,29 @@ fn durable_resolved_actions(
                     )
                 })
                 .collect();
+            let network = action
+                .network_destinations()
+                .map(|destination| DurableResolvedNetworkDestination {
+                    host: destination.host().to_owned(),
+                    port: destination.port(),
+                })
+                .collect();
+            let secrets = action
+                .secrets()
+                .map(|secret| DurableResolvedSecret {
+                    name: secret.name().to_owned(),
+                    purpose: secret.purpose().to_owned(),
+                    file_env: secret.file_env().to_owned(),
+                })
+                .collect();
             (
                 reference.to_owned(),
-                DurableResolvedAction { program, inputs },
+                DurableResolvedAction {
+                    program,
+                    inputs,
+                    network,
+                    secrets,
+                },
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -182,6 +221,36 @@ fn restore_resolved_actions(
             resolved.insert_input(name, input).map_err(|_| {
                 TaskFailure::terminal("durable repository-action inputs are invalid")
             })?;
+        }
+        for destination in action.network {
+            resolved
+                .insert_network_destination(
+                    ResolvedActionNetworkDestination::new(destination.host, destination.port)
+                        .map_err(|_| {
+                            TaskFailure::terminal(
+                                "durable repository-action network destination is invalid",
+                            )
+                        })?,
+                )
+                .map_err(|_| {
+                    TaskFailure::terminal(
+                        "durable repository-action network destinations are invalid",
+                    )
+                })?;
+        }
+        for secret in action.secrets {
+            resolved
+                .insert_secret(
+                    ResolvedActionSecret::new(secret.name, secret.purpose, secret.file_env)
+                        .map_err(|_| {
+                            TaskFailure::terminal(
+                                "durable repository-action secret declaration is invalid",
+                            )
+                        })?,
+                )
+                .map_err(|_| {
+                    TaskFailure::terminal("durable repository-action secrets are invalid")
+                })?;
         }
         options
             .insert_resolved_action(reference, resolved)
