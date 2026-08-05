@@ -406,7 +406,7 @@ EOF
 }
 
 validate_state_tree() {
-  local image_store link unsafe
+  local image_store image_store_mode link unsafe
   reject_symlink_components "$STATE_DIR"
   image_store="${STATE_DIR}/autoscaler/runtime-assets/oci/image-store"
   # The pre-admitted OCI store is opaque runtime content. Rootfs links may be
@@ -418,15 +418,27 @@ validate_state_tree() {
       *) die "symbolic link in managed state rejected: ${link}" ;;
     esac
   done < <(find -P "$STATE_DIR" -xdev -type l -print0)
-  unsafe=$(find -P "$STATE_DIR" -xdev -type d \! -perm 0700 -print -quit)
+  if [[ -e "$image_store" || -L "$image_store" ]]; then
+    [[ -d "$image_store" && ! -L "$image_store" ]] ||
+      die "OCI image store root is missing or unsafe: ${image_store}"
+    [[ "$(stat -c '%u:%g' -- "$image_store")" == "${RUNTIME_UID}:${RUNTIME_GID}" ]] ||
+      die "OCI image store root has an unexpected owner: ${image_store}"
+    image_store_mode=$(stat -c '%a' -- "$image_store")
+    (((8#$image_store_mode & 8#022) == 0)) ||
+      die "OCI image store root is writable by group or other: ${image_store}"
+  fi
+  unsafe=$(find -P "$STATE_DIR" -xdev -path "$image_store" -prune -o \
+    -type d \! -perm 0700 -print -quit)
   [[ -z "$unsafe" ]] || die "managed directory does not have exact mode 0700: ${unsafe}"
-  unsafe=$(find -P "$STATE_DIR" -xdev -type f \
+  unsafe=$(find -P "$STATE_DIR" -xdev -path "$image_store" -prune -o -type f \
     \( -perm /022 -o \! -perm -0400 \) -print -quit)
   [[ -z "$unsafe" ]] ||
     die "managed file is not owner-readable or is writable by group/other: ${unsafe}"
-  unsafe=$(find -P "$STATE_DIR" -xdev \! -uid "$RUNTIME_UID" -print -quit)
+  unsafe=$(find -P "$STATE_DIR" -xdev -path "$image_store" -prune -o \
+    \! -uid "$RUNTIME_UID" -print -quit)
   [[ -z "$unsafe" ]] || die "managed path has an unexpected owner: ${unsafe}"
-  unsafe=$(find -P "$STATE_DIR" -xdev \! -gid "$RUNTIME_GID" -print -quit)
+  unsafe=$(find -P "$STATE_DIR" -xdev -path "$image_store" -prune -o \
+    \! -gid "$RUNTIME_GID" -print -quit)
   [[ -z "$unsafe" ]] || die "managed path has an unexpected group: ${unsafe}"
 }
 

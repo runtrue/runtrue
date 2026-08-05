@@ -28,6 +28,8 @@ install -d -m 0700 -- "$cas_directory"
 install -m 0444 -- /dev/null "${cas_directory}/immutable-object"
 image_layer="${state}/autoscaler/runtime-assets/oci/image-store/overlay/example/diff1"
 install -d -m 0700 -- "$image_layer" "${image_layer}/usr/lib64"
+chmod 0755 -- "$image_layer" "${image_layer}/usr" "${image_layer}/usr/lib64"
+install -m 0555 -- /dev/null "${image_layer}/usr/lib64/runtime-loader"
 ln -s -- usr/lib64 "${image_layer}/lib64"
 if ((EUID == 0)); then
   chown -R "${runtime_uid}:${runtime_gid}" -- \
