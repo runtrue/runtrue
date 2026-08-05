@@ -1,4 +1,23 @@
 use super::*;
+
+#[test]
+fn newly_published_assignment_is_loaded_without_restarting() {
+    let fixture = Fixture::new(true);
+    fixture.write_job_manifest();
+    let executor = fixture.load(RecordingFactory::default()).unwrap();
+
+    assert!(matches!(
+        executor.preflight_lease(&fixture.lease()),
+        Err(RunnerError::MissingOciManifest {
+            service_id: Some(service),
+            ..
+        }) if service == "db"
+    ));
+
+    fixture.write_service_manifest();
+    executor.preflight_lease(&fixture.lease()).unwrap();
+}
+
 #[test]
 fn service_lease_uses_oci_only_and_finalizes_network_and_containers() {
     let fixture = Fixture::new(true);

@@ -26,6 +26,9 @@ const MAX_RESOLVED_ACTION_REFERENCE_BYTES: usize = 1024;
 const MAX_RESOLVED_ACTION_INPUTS: usize = 256;
 const MAX_RESOLVED_ACTION_INPUT_NAME_BYTES: usize = 128;
 const MAX_RESOLVED_ACTION_INPUT_DEFAULT_BYTES: usize = 4096;
+const MAX_RESOLVED_ACTION_NETWORK_DESTINATIONS: usize = 64;
+const MAX_RESOLVED_ACTION_SECRETS: usize = 64;
+const MAX_RESOLVED_ACTION_HOST_BYTES: usize = 253;
 const MAX_RESOLVED_PROGRAM_FIELD_BYTES: usize = 4096;
 const MAX_RESOLVED_PROGRAM_ARGUMENTS: usize = 128;
 const MAX_RESOLVED_ACTION_BYTES: usize = 4 * 1024 * 1024;
@@ -44,10 +47,10 @@ pub const MAX_FRONTEND_REPORT_BYTES: usize = 1024 * 1024;
 /// This is separate from `frontend_generation`, which versions one adapter's
 /// translation semantics. A contract generation change requires both sides of
 /// the repository boundary to opt in explicitly.
-pub const WORKFLOW_FRONTEND_CONTRACT_GENERATION: u32 = 2;
+pub const WORKFLOW_FRONTEND_CONTRACT_GENERATION: u32 = 3;
 
-const OPTIONS_DIGEST_DOMAIN: &[u8] = b"runtrue.workflow-frontend.options.v2\0";
-const RESOLVED_ACTIONS_ENCODING_DOMAIN: &[u8] = b"resolved-source-actions.v1\0";
+const OPTIONS_DIGEST_DOMAIN: &[u8] = b"runtrue.workflow-frontend.options.v3\0";
+const RESOLVED_ACTIONS_ENCODING_DOMAIN: &[u8] = b"resolved-source-actions.v2\0";
 
 /// Inputs that affect source translation and therefore its emitted digest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -215,6 +218,7 @@ impl WorkflowFrontendOptions {
 pub struct ResolvedSourceAction {
     program: ResolvedProgram,
     inputs: BTreeMap<String, ResolvedActionInput>,
+    requirements: ResolvedActionRequirements,
     encoded_bytes: usize,
 }
 
@@ -227,6 +231,12 @@ pub enum ResolvedActionError {
     InputDefaultTooLarge,
     TooManyInputs,
     DuplicateInput,
+    InvalidNetworkDestination,
+    TooManyNetworkDestinations,
+    DuplicateNetworkDestination,
+    InvalidSecret,
+    TooManySecrets,
+    DuplicateSecret,
     ActionTooLarge,
 }
 
@@ -240,6 +250,16 @@ impl fmt::Display for ResolvedActionError {
             Self::InputDefaultTooLarge => "resolved action input default exceeds its bound",
             Self::TooManyInputs => "resolved action input count exceeds its bound",
             Self::DuplicateInput => "resolved action input name is duplicated",
+            Self::InvalidNetworkDestination => "resolved action network destination is invalid",
+            Self::TooManyNetworkDestinations => {
+                "resolved action network destination count exceeds its bound"
+            }
+            Self::DuplicateNetworkDestination => {
+                "resolved action network destination is duplicated"
+            }
+            Self::InvalidSecret => "resolved action secret declaration is invalid",
+            Self::TooManySecrets => "resolved action secret count exceeds its bound",
+            Self::DuplicateSecret => "resolved action secret declaration is duplicated",
             Self::ActionTooLarge => "resolved action exceeds its total bound",
         })
     }
@@ -250,10 +270,12 @@ impl Error for ResolvedActionError {}
 impl ResolvedSourceAction {
     #[must_use]
     pub fn new(program: ResolvedProgram) -> Self {
-        let encoded_bytes = program.encoded_len();
+        let requirements = ResolvedActionRequirements::default();
+        let encoded_bytes = program.encoded_len() + requirements.encoded_len();
         Self {
             program,
             inputs: BTreeMap::new(),
+            requirements,
             encoded_bytes,
         }
     }
@@ -301,6 +323,55 @@ impl ResolvedSourceAction {
             .map(|(name, input)| (name.as_str(), input))
     }
 
+    pub fn insert_network_destination(
+        &mut self,
+        destination: ResolvedActionNetworkDestination,
+    ) -> Result<(), ResolvedActionError> {
+        self.requirements.insert_network_destination(destination)?;
+        self.refresh_encoded_bytes()
+    }
+
+    pub fn insert_secret(
+        &mut self,
+        secret: ResolvedActionSecret,
+    ) -> Result<(), ResolvedActionError> {
+        self.requirements.insert_secret(secret)?;
+        self.refresh_encoded_bytes()
+    }
+
+    #[must_use]
+    pub const fn deny_private_networks(&self) -> bool {
+        self.requirements.deny_private_networks
+    }
+
+    pub fn network_destinations(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &ResolvedActionNetworkDestination> {
+        self.requirements.network_destinations.iter()
+    }
+
+    pub fn secrets(&self) -> impl ExactSizeIterator<Item = &ResolvedActionSecret> {
+        self.requirements.secrets.iter()
+    }
+
+    fn refresh_encoded_bytes(&mut self) -> Result<(), ResolvedActionError> {
+        let encoded_bytes = self
+            .program
+            .encoded_len()
+            .saturating_add(
+                self.inputs
+                    .iter()
+                    .map(|(name, input)| 4 + name.len() + input.encoded_len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(self.requirements.encoded_len());
+        if encoded_bytes > MAX_RESOLVED_ACTION_BYTES {
+            return Err(ResolvedActionError::ActionTooLarge);
+        }
+        self.encoded_bytes = encoded_bytes;
+        Ok(())
+    }
+
     fn encoded_len(&self) -> usize {
         self.encoded_bytes + 4
     }
@@ -311,6 +382,168 @@ impl ResolvedSourceAction {
         for (name, input) in &self.inputs {
             encode_bytes(canonical, name.as_bytes());
             input.encode(canonical);
+        }
+        self.requirements.encode(canonical);
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ResolvedActionRequirements {
+    deny_private_networks: bool,
+    network_destinations: BTreeSet<ResolvedActionNetworkDestination>,
+    secrets: BTreeSet<ResolvedActionSecret>,
+}
+
+impl ResolvedActionRequirements {
+    fn insert_network_destination(
+        &mut self,
+        destination: ResolvedActionNetworkDestination,
+    ) -> Result<(), ResolvedActionError> {
+        if self.network_destinations.len() >= MAX_RESOLVED_ACTION_NETWORK_DESTINATIONS {
+            return Err(ResolvedActionError::TooManyNetworkDestinations);
+        }
+        if !self.network_destinations.insert(destination) {
+            return Err(ResolvedActionError::DuplicateNetworkDestination);
+        }
+        self.deny_private_networks = true;
+        Ok(())
+    }
+
+    fn insert_secret(&mut self, secret: ResolvedActionSecret) -> Result<(), ResolvedActionError> {
+        if self.secrets.len() >= MAX_RESOLVED_ACTION_SECRETS {
+            return Err(ResolvedActionError::TooManySecrets);
+        }
+        if self
+            .secrets
+            .iter()
+            .any(|existing| existing.name == secret.name || existing.file_env == secret.file_env)
+        {
+            return Err(ResolvedActionError::DuplicateSecret);
+        }
+        self.secrets.insert(secret);
+        Ok(())
+    }
+
+    fn encoded_len(&self) -> usize {
+        1 + 4
+            + self
+                .network_destinations
+                .iter()
+                .map(ResolvedActionNetworkDestination::encoded_len)
+                .sum::<usize>()
+            + 4
+            + self
+                .secrets
+                .iter()
+                .map(ResolvedActionSecret::encoded_len)
+                .sum::<usize>()
+    }
+
+    fn encode(&self, canonical: &mut Vec<u8>) {
+        canonical.push(u8::from(self.deny_private_networks));
+        canonical.extend_from_slice(&(self.network_destinations.len() as u32).to_be_bytes());
+        for destination in &self.network_destinations {
+            destination.encode(canonical);
+        }
+        canonical.extend_from_slice(&(self.secrets.len() as u32).to_be_bytes());
+        for secret in &self.secrets {
+            secret.encode(canonical);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ResolvedActionNetworkDestination {
+    host: String,
+    port: u16,
+}
+
+impl ResolvedActionNetworkDestination {
+    pub fn new(host: impl Into<String>, port: u16) -> Result<Self, ResolvedActionError> {
+        let host = host.into();
+        if port == 0
+            || host.is_empty()
+            || host.len() > MAX_RESOLVED_ACTION_HOST_BYTES
+            || host != host.to_ascii_lowercase()
+            || host.contains(['/', '@', ':'])
+            || host.chars().any(char::is_whitespace)
+        {
+            return Err(ResolvedActionError::InvalidNetworkDestination);
+        }
+        Ok(Self { host, port })
+    }
+
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.port
+    }
+
+    fn encoded_len(&self) -> usize {
+        4 + self.host.len() + 2
+    }
+
+    fn encode(&self, canonical: &mut Vec<u8>) {
+        encode_bytes(canonical, self.host.as_bytes());
+        canonical.extend_from_slice(&self.port.to_be_bytes());
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ResolvedActionSecret {
+    name: String,
+    purpose: String,
+    file_env: String,
+}
+
+impl ResolvedActionSecret {
+    pub fn new(
+        name: impl Into<String>,
+        purpose: impl Into<String>,
+        file_env: impl Into<String>,
+    ) -> Result<Self, ResolvedActionError> {
+        let name = name.into();
+        let purpose = purpose.into();
+        let file_env = file_env.into();
+        if !valid_identifier(&name, MAX_RESOLVED_ACTION_INPUT_NAME_BYTES)
+            || !valid_identifier(&purpose, MAX_RESOLVED_ACTION_INPUT_NAME_BYTES)
+            || !valid_environment_name(&file_env)
+        {
+            return Err(ResolvedActionError::InvalidSecret);
+        }
+        Ok(Self {
+            name,
+            purpose,
+            file_env,
+        })
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn purpose(&self) -> &str {
+        &self.purpose
+    }
+
+    #[must_use]
+    pub fn file_env(&self) -> &str {
+        &self.file_env
+    }
+
+    fn encoded_len(&self) -> usize {
+        12 + self.name.len() + self.purpose.len() + self.file_env.len()
+    }
+
+    fn encode(&self, canonical: &mut Vec<u8>) {
+        for value in [&self.name, &self.purpose, &self.file_env] {
+            encode_bytes(canonical, value.as_bytes());
         }
     }
 }
@@ -533,6 +766,15 @@ fn valid_identifier(value: &str, maximum: usize) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+fn valid_environment_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && value.len() <= MAX_RESOLVED_ACTION_INPUT_NAME_BYTES
 }
 
 fn validate_program_field(value: &str) -> Result<(), ResolvedActionError> {
@@ -818,6 +1060,7 @@ pub struct SourceActionDeclaration {
     descriptor_path: String,
     program: SourceActionProgramDeclaration,
     inputs: BTreeMap<String, ResolvedActionInput>,
+    requirements: ResolvedActionRequirements,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -860,6 +1103,7 @@ impl SourceActionDeclaration {
             descriptor_path,
             program,
             inputs: BTreeMap::new(),
+            requirements: ResolvedActionRequirements::default(),
         })
     }
 
@@ -898,6 +1142,35 @@ impl SourceActionDeclaration {
         self.inputs
             .iter()
             .map(|(name, input)| (name.as_str(), input))
+    }
+
+    pub fn insert_network_destination(
+        &mut self,
+        destination: ResolvedActionNetworkDestination,
+    ) -> Result<(), ResolvedActionError> {
+        self.requirements.insert_network_destination(destination)
+    }
+
+    pub fn insert_secret(
+        &mut self,
+        secret: ResolvedActionSecret,
+    ) -> Result<(), ResolvedActionError> {
+        self.requirements.insert_secret(secret)
+    }
+
+    #[must_use]
+    pub const fn deny_private_networks(&self) -> bool {
+        self.requirements.deny_private_networks
+    }
+
+    pub fn network_destinations(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &ResolvedActionNetworkDestination> {
+        self.requirements.network_destinations.iter()
+    }
+
+    pub fn secrets(&self) -> impl ExactSizeIterator<Item = &ResolvedActionSecret> {
+        self.requirements.secrets.iter()
     }
 }
 
@@ -1287,6 +1560,16 @@ mod tests {
                 ResolvedActionInput::new(true, Some("default".to_owned())).unwrap(),
             )
             .unwrap();
+        first_action
+            .insert_network_destination(
+                ResolvedActionNetworkDestination::new("api.example.test", 443).unwrap(),
+            )
+            .unwrap();
+        first_action
+            .insert_secret(
+                ResolvedActionSecret::new("API_KEY", "inference", "INPUT_API_KEY_FILE").unwrap(),
+            )
+            .unwrap();
         let second_action = ResolvedSourceAction::new(
             ResolvedProgram::component(
                 COMPONENT_A,
@@ -1325,6 +1608,21 @@ mod tests {
             }
         ));
         assert!(resolved.input("token").unwrap().required());
+        assert!(resolved.deny_private_networks());
+        assert_eq!(
+            resolved
+                .network_destinations()
+                .next()
+                .map(ResolvedActionNetworkDestination::host),
+            Some("api.example.test")
+        );
+        assert_eq!(
+            resolved
+                .secrets()
+                .next()
+                .map(ResolvedActionSecret::file_env),
+            Some("INPUT_API_KEY_FILE")
+        );
 
         let mut changed = WorkflowFrontendOptions::default();
         changed
@@ -1364,6 +1662,14 @@ mod tests {
                 Some("x".repeat(MAX_RESOLVED_ACTION_INPUT_DEFAULT_BYTES + 1)),
             ),
             Err(ResolvedActionError::InputDefaultTooLarge)
+        );
+        assert_eq!(
+            ResolvedActionNetworkDestination::new("https://invalid.example", 443),
+            Err(ResolvedActionError::InvalidNetworkDestination)
+        );
+        assert_eq!(
+            ResolvedActionSecret::new("API_KEY", "inference", "bad-env"),
+            Err(ResolvedActionError::InvalidSecret)
         );
 
         let mut action = container_action(IMAGE_A);

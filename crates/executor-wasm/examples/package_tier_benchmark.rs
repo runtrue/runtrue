@@ -140,7 +140,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let report = Report {
         schema_version: 1,
         runtime: "wasm",
-        runtime_version: "46.0.1",
+        runtime_version: "46.0.2",
         target: host_target(),
         profile: if cfg!(debug_assertions) {
             "debug"
