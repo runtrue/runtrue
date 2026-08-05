@@ -23,21 +23,26 @@ state="${TEST_ROOT}/state"
 pack_directory="${state}/server/git-mirrors/mirrors/example/repo.git/objects/pack"
 install -d -m 0700 -- "$pack_directory"
 install -m 0400 -- /dev/null "${pack_directory}/pack-test.pack"
+cas_directory="${state}/server/blobs/cas/objects/sha256/aa"
+install -d -m 0700 -- "$cas_directory"
+install -m 0444 -- /dev/null "${cas_directory}/immutable-object"
 if ((EUID == 0)); then
-  chown -R "${runtime_uid}:${runtime_gid}" -- "${state}/server/git-mirrors"
+  chown -R "${runtime_uid}:${runtime_gid}" -- \
+    "${state}/server/git-mirrors" "${state}/server/blobs"
 fi
 
 "${runtime[@]}" "${DEPLOY_DIR}/bootstrap.sh" \
   --state-dir "$state" --with-github-app --check-only >/dev/null
 
-chmod 0440 -- "${pack_directory}/pack-test.pack"
+chmod 0464 -- "${cas_directory}/immutable-object"
 if "${runtime[@]}" "${DEPLOY_DIR}/bootstrap.sh" \
   --state-dir "$state" --with-github-app --check-only \
   >"${TEST_ROOT}/unsafe.out" 2>&1
 then
-  printf 'bootstrap state test: group-readable Git pack was accepted\n' >&2
+  printf 'bootstrap state test: group-writable CAS object was accepted\n' >&2
   exit 1
 fi
-grep -q 'Git mirror file is not owner-private and readable' "${TEST_ROOT}/unsafe.out"
+grep -q 'managed file is not owner-readable or is writable by group/other' \
+  "${TEST_ROOT}/unsafe.out"
 
-printf 'Bootstrap Git mirror permission validation passed\n'
+printf 'Bootstrap immutable state permission validation passed\n'
