@@ -268,6 +268,63 @@ impl ControlPlane {
         Ok(normalized)
     }
 
+    pub fn repository_auto_approve_writers(
+        &self,
+        tenant_id: &str,
+        repository_id: &str,
+    ) -> Result<bool, ControlPlaneError> {
+        validate_text("repository approval tenant", tenant_id)?;
+        validate_text("repository approval repository", repository_id)?;
+        let connection = self.connection()?;
+        let enabled: Option<i64> = connection
+            .query_row(
+                "SELECT enabled FROM repository_auto_approval_policies
+                 WHERE tenant_id = ?1 AND repository_id = ?2",
+                params![tenant_id, repository_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match enabled {
+            None | Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            Some(_) => Err(ControlPlaneError::CorruptState(
+                "repository auto-approval policy".to_owned(),
+            )),
+        }
+    }
+
+    pub fn set_repository_auto_approve_writers(
+        &self,
+        tenant_id: &str,
+        repository_id: &str,
+        enabled: bool,
+        now_unix_ms: u64,
+    ) -> Result<bool, ControlPlaneError> {
+        validate_text("repository approval tenant", tenant_id)?;
+        validate_text("repository approval repository", repository_id)?;
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "INSERT INTO repository_auto_approval_policies
+             (repository_id, tenant_id, enabled, updated_unix_ms)
+             SELECT id, tenant_id, ?3, ?4 FROM repositories
+             WHERE tenant_id = ?1 AND id = ?2
+             ON CONFLICT(repository_id) DO UPDATE SET
+                 enabled = excluded.enabled,
+                 updated_unix_ms = excluded.updated_unix_ms
+             WHERE repository_auto_approval_policies.tenant_id = excluded.tenant_id",
+            params![
+                tenant_id,
+                repository_id,
+                i64::from(enabled),
+                to_i64(now_unix_ms)?,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(not_found("repository", repository_id));
+        }
+        Ok(enabled)
+    }
+
     pub fn create_scm_installation(
         &self,
         record: &ScmInstallationRecord,

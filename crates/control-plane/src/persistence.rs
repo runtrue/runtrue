@@ -1974,6 +1974,9 @@ async fn verify_postgres_schema_contract(
                 .map(str::to_owned),
         );
     }
+    if forward_migrations >= 6 {
+        expected.insert("repository_auto_approval_policies".to_owned());
+    }
     if actual != expected {
         return Err(ControlPlaneError::InvalidMigrationHistory(
             "PostgreSQL schema tables do not match the recognized v12 baseline".to_owned(),
@@ -3073,7 +3076,8 @@ mod tests {
                 "reusable-capability-approvals-v1",
                 "user-management-v1",
                 "durable-event-replay-v1",
-                "scm-event-recovery-v1"
+                "scm-event-recovery-v1",
+                "repository-writer-auto-approval-v1"
             ]
         );
         assert_eq!(
@@ -3096,7 +3100,8 @@ mod tests {
                 "reusable-capability-approvals-v1",
                 "user-management-v1",
                 "durable-event-replay-v1",
-                "scm-event-recovery-v1"
+                "scm-event-recovery-v1",
+                "repository-writer-auto-approval-v1"
             ]
         );
         assert!(replayed.applied_migration_ids.is_empty());
@@ -3145,6 +3150,7 @@ mod tests {
              DELETE FROM runner_pools;
              DELETE FROM scm_webhook_events;
              DELETE FROM scm_repository_links;
+             DELETE FROM repository_auto_approval_policies;
              DELETE FROM repository_workflow_settings;
              DELETE FROM scm_installations;
              DELETE FROM repositories;
@@ -3315,7 +3321,8 @@ mod tests {
                 "reusable-capability-approvals-v1",
                 "user-management-v1",
                 "durable-event-replay-v1",
-                "scm-event-recovery-v1"
+                "scm-event-recovery-v1",
+                "repository-writer-auto-approval-v1"
             ]
         );
         let legacy_rows: i64 =

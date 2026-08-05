@@ -7,7 +7,7 @@ use crate::ControlPlaneError;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
-pub const LOGICAL_SCHEMA_GENERATION: u32 = 6;
+pub const LOGICAL_SCHEMA_GENERATION: u32 = 7;
 pub const LEGACY_BASELINE_SEQUENCE: u32 = 1;
 pub const LEGACY_BASELINE_ID: &str = "legacy-baseline-v1";
 pub const SQLITE_LEGACY_SCHEMA_VERSION: u32 = 34;
@@ -54,6 +54,12 @@ const SQLITE_SCM_EVENT_RECOVERY_IMPLEMENTATION: &str =
     include_str!("../migrations/unified/0006_scm_event_recovery/sqlite.json");
 const POSTGRES_SCM_EVENT_RECOVERY_IMPLEMENTATION: &str =
     include_str!("../migrations/unified/0006_scm_event_recovery/postgres.json");
+const REPOSITORY_WRITER_AUTO_APPROVAL_DEFINITION: &str =
+    include_str!("../migrations/unified/0007_repository_writer_auto_approval/definition.json");
+const SQLITE_REPOSITORY_WRITER_AUTO_APPROVAL_IMPLEMENTATION: &str =
+    include_str!("../migrations/unified/0007_repository_writer_auto_approval/sqlite.json");
+const POSTGRES_REPOSITORY_WRITER_AUTO_APPROVAL_IMPLEMENTATION: &str =
+    include_str!("../migrations/unified/0007_repository_writer_auto_approval/postgres.json");
 const HISTORY_DIGEST_DOMAIN: &[u8] = b"runtrue.migration.legacy-history.v1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -193,6 +199,14 @@ pub fn forward_catalog_entries(
         6,
         "scm-event-recovery-v1",
     )?;
+    let repository_writer_auto_approval = materialize_forward_migration(
+        backend,
+        REPOSITORY_WRITER_AUTO_APPROVAL_DEFINITION,
+        SQLITE_REPOSITORY_WRITER_AUTO_APPROVAL_IMPLEMENTATION,
+        POSTGRES_REPOSITORY_WRITER_AUTO_APPROVAL_IMPLEMENTATION,
+        7,
+        "repository-writer-auto-approval-v1",
+    )?;
     Ok(vec![
         MaterializedMigration {
             sequence: definition.sequence,
@@ -209,6 +223,7 @@ pub fn forward_catalog_entries(
         user_management,
         event_replay,
         scm_event_recovery,
+        repository_writer_auto_approval,
     ])
 }
 

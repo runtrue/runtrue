@@ -1,0 +1,6 @@
+{
+  "backend": "sqlite",
+  "sql": "CREATE TABLE repository_auto_approval_policies (repository_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)), updated_unix_ms INTEGER NOT NULL CHECK (updated_unix_ms >= 0), FOREIGN KEY (tenant_id, repository_id) REFERENCES repositories(tenant_id, id)) STRICT;",
+  "post_sql": "SELECT 1;",
+  "trust_sql": "SELECT 1;"
+}
