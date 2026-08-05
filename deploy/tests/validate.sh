@@ -48,6 +48,7 @@ bash -n "${DEPLOY_DIR}/bootstrap.sh"
 bash -n "${DEPLOY_DIR}/healthcheck.sh"
 sh -n "${DEPLOY_DIR}/traefik-entrypoint.sh"
 PYTHONDONTWRITEBYTECODE=1 python3 "${DEPLOY_DIR}/tests/test-github-app-provider-probe.py"
+bash "${DEPLOY_DIR}/tests/test-bootstrap-state-permissions.sh"
 
 validate_tracked_executable() {
   local path=$1 mode

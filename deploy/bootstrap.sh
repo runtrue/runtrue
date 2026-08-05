@@ -406,14 +406,23 @@ EOF
 }
 
 validate_state_tree() {
-  local unsafe
+  local unsafe mirror_root="${STATE_DIR}/server/git-mirrors"
   reject_symlink_components "$STATE_DIR"
   unsafe=$(find -P "$STATE_DIR" -xdev -type l -print -quit)
   [[ -z "$unsafe" ]] || die "symbolic link in managed state rejected: ${unsafe}"
   unsafe=$(find -P "$STATE_DIR" -xdev -type d \! -perm 0700 -print -quit)
   [[ -z "$unsafe" ]] || die "managed directory does not have exact mode 0700: ${unsafe}"
-  unsafe=$(find -P "$STATE_DIR" -xdev -type f \! -perm 0600 -print -quit)
+  unsafe=$(find -P "$STATE_DIR" -xdev -path "$mirror_root" -prune -o \
+    -type f \! -perm 0600 -print -quit)
   [[ -z "$unsafe" ]] || die "managed file does not have exact mode 0600: ${unsafe}"
+  if [[ -e "$mirror_root" || -L "$mirror_root" ]]; then
+    [[ -d "$mirror_root" && ! -L "$mirror_root" ]] ||
+      die "Git mirror root is missing or unsafe: ${mirror_root}"
+    unsafe=$(find -P "$mirror_root" -xdev -type f \
+      \( -perm /077 -o \! -perm -0400 \) -print -quit)
+    [[ -z "$unsafe" ]] ||
+      die "Git mirror file is not owner-private and readable: ${unsafe}"
+  fi
   unsafe=$(find -P "$STATE_DIR" -xdev \! -uid "$RUNTIME_UID" -print -quit)
   [[ -z "$unsafe" ]] || die "managed path has an unexpected owner: ${unsafe}"
   unsafe=$(find -P "$STATE_DIR" -xdev \! -gid "$RUNTIME_GID" -print -quit)
