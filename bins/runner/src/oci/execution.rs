@@ -6,7 +6,7 @@ use super::{
     AdmittedLease, Arc, BTreeSet, CancellationToken, Engine, ExecutionResult, ExecutorDispatcher,
     Isolation, LoadedOciConfiguration, OciExecutor, OciExecutorConfig, OciRecoveryConfig,
     OciRuntimeFactory, OciRuntimePaths, Path, ProcessRuntimeFactory, RunnerError,
-    SelectedManifestAdmission, StepStateObserver,
+    SelectedAssignments, SelectedManifestAdmission, StepStateObserver,
 };
 
 #[derive(Clone)]
@@ -82,6 +82,7 @@ impl OciJobExecutor {
                 seccomp_profile,
                 image_store,
                 runtime_environment,
+                manifest_directory,
                 keys,
                 assignments,
             }),
@@ -90,7 +91,7 @@ impl OciJobExecutor {
     }
 
     pub fn preflight_lease(&self, lease: &AdmittedLease) -> Result<(), RunnerError> {
-        self.configuration.select(lease).map(|_| ())
+        self.select_current(lease).map(|_| ())
     }
 
     pub fn execute(
@@ -120,7 +121,7 @@ impl OciJobExecutor {
         observer: Option<Arc<dyn StepStateObserver>>,
         broker_socket: Option<&Path>,
     ) -> Result<ExecutionResult, RunnerError> {
-        let selected = self.configuration.select(lease)?;
+        let selected = self.select_current(lease)?;
         let lease_state = self.configuration.lease_state_path(lease);
         if fs::symlink_metadata(&lease_state).is_ok() {
             return Err(RunnerError::OciConfiguration(format!(
@@ -196,6 +197,18 @@ impl OciJobExecutor {
     #[must_use]
     pub fn state_root(&self) -> &Path {
         &self.configuration.state_root
+    }
+
+    fn select_current(&self, lease: &AdmittedLease) -> Result<SelectedAssignments, RunnerError> {
+        // Repository actions can be built and admitted while this runner is
+        // serving other leases. Admission publishes manifests atomically, so
+        // reloading here makes new immutable assignments available without
+        // restarting (and interrupting) the runner.
+        let assignments = load_assignments(
+            &self.configuration.manifest_directory,
+            &self.configuration.keys,
+        )?;
+        self.configuration.select(lease, &assignments)
     }
 }
 

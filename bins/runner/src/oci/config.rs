@@ -35,12 +35,17 @@ pub(super) struct LoadedOciConfiguration {
     pub(super) seccomp_profile: PathBuf,
     pub(super) image_store: PathBuf,
     pub(super) runtime_environment: BTreeMap<String, String>,
+    pub(super) manifest_directory: PathBuf,
     pub(super) keys: Arc<BTreeMap<ContentDigest, ImageVerifyingKey>>,
     pub(super) assignments: LoadedAssignments,
 }
 
 impl LoadedOciConfiguration {
-    pub(super) fn select(&self, lease: &AdmittedLease) -> Result<SelectedAssignments, RunnerError> {
+    pub(super) fn select(
+        &self,
+        lease: &AdmittedLease,
+        assignments: &LoadedAssignments,
+    ) -> Result<SelectedAssignments, RunnerError> {
         let job = lease
             .capsule
             .jobs
@@ -68,11 +73,10 @@ impl LoadedOciConfiguration {
                 job.id
             ))
         })?;
-        let job_record = self
-            .assignments
+        let job_record = assignments
             .exact
             .get(&job_key)
-            .or_else(|| self.assignments.reusable.get(planned_job_image))
+            .or_else(|| assignments.reusable.get(planned_job_image))
             .ok_or_else(|| RunnerError::MissingOciManifest {
                 job_id: job.id.clone(),
                 service_id: None,
@@ -92,11 +96,10 @@ impl LoadedOciConfiguration {
                 job_id: job.id.clone(),
                 service_id: Some(service.id.clone()),
             };
-            let record = self
-                .assignments
+            let record = assignments
                 .exact
                 .get(&key)
-                .or_else(|| self.assignments.reusable.get(&service.image))
+                .or_else(|| assignments.reusable.get(&service.image))
                 .ok_or_else(|| RunnerError::MissingOciManifest {
                     job_id: job.id.clone(),
                     service_id: Some(service.id.clone()),
@@ -117,7 +120,7 @@ impl LoadedOciConfiguration {
             .map(|service| Some(service.id.as_str()))
             .chain(std::iter::once(None))
             .collect::<BTreeSet<_>>();
-        if self.assignments.exact.keys().any(|key| {
+        if assignments.exact.keys().any(|key| {
             key.capsule_digest == capsule_digest
                 && key.job_id == job.id
                 && !expected.contains(&key.service_id.as_deref())
