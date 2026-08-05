@@ -168,10 +168,17 @@ fn preflight_rejects_ambient_capabilities_and_unused_image_assignments() {
     let fixture = fixture_with(AdmissionMode::Exact);
     let mut missing_lock = capsule();
     missing_lock.context.lockfile_digest = None;
+    missing_lock.jobs[0].runner.image = Some("registry.example/runtrue/job:latest".to_owned());
     assert!(matches!(
         fixture.executor.preflight_capsule(&missing_lock),
         Err(OciError::UnsupportedFeature(_))
     ));
+    let mut immutable_without_lock = capsule();
+    immutable_without_lock.context.lockfile_digest = None;
+    fixture
+        .executor
+        .preflight_capsule(&immutable_without_lock)
+        .expect("fully pinned OCI images should not require a lockfile digest");
     let mut privileged = capsule();
     privileged.jobs[0]
         .runner
