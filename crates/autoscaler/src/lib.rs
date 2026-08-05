@@ -12,7 +12,7 @@ mod reconciler;
 mod runtime;
 mod traits;
 
-pub use docker::{DockerMount, DockerProvider, DockerTemplate};
+pub use docker::{DockerDevice, DockerMount, DockerProvider, DockerTemplate};
 pub use error::AutoscalerError;
 pub use http::HttpControlPlane;
 pub use model::*;

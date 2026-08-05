@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Reserved compatibility key for an operator-approved template that can serve
+/// any demand class in its pool. The reconciler binds it to the demand's exact
+/// compatibility digest before creating a fleet request.
+pub const GENERIC_RUNTIME_COMPATIBILITY_DIGEST: &str =
+    "sha256:e5b5fc9c576175a0bdacc09872fed2390332da870ce6140503664d07b88292ca";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalingPolicy {
     pub pool_id: String,

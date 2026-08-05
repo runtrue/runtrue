@@ -10,6 +10,8 @@ on:
       - "crates/**"
       - "deploy/Containerfile.runner"
       - "deploy/Containerfile.runner.dockerignore"
+      - "deploy/Containerfile.autoscaler"
+      - "deploy/Containerfile.autoscaler.dockerignore"
       - "deploy/Containerfile.server"
       - "deploy/Containerfile.server.dockerignore"
       - "deploy/containers-oci.conf"

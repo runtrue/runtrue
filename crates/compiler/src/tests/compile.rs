@@ -867,6 +867,25 @@ platform = "linux/amd64"
 }
 
 #[test]
+fn immutable_oci_runner_and_service_images_do_not_require_a_lockfile() {
+    let runner_digest = "c".repeat(64);
+    let service_digest = "d".repeat(64);
+    let source = workflow(&format!(
+        "  build:\n    runner: {{ isolation: oci, image: 'registry.example/build@sha256:{runner_digest}' }}\n    services:\n      db:\n        image: 'registry.example/db@sha256:{service_digest}'\n    steps:\n      - run: {{ command: [\"true\"] }}\n"
+    ));
+
+    let compilation = compile(&source).expect("immutable OCI references should self-resolve");
+    assert_eq!(compilation.approval_subject.lockfile_digest, None);
+    assert_eq!(
+        compilation.approval_subject.resolved_image_digests,
+        vec![
+            format!("sha256:{runner_digest}"),
+            format!("sha256:{service_digest}"),
+        ]
+    );
+}
+
+#[test]
 fn oci_runner_digest_changes_rebind_the_capsule_approval_and_risk_diff() {
     let source = workflow(
             "  build:\n    runner: { isolation: oci, image: registry.example/build:v1 }\n    steps:\n      - run: { command: [\"true\"] }\n",
