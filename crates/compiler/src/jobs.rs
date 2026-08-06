@@ -25,10 +25,14 @@ pub(crate) fn resolve_external_references(
             }
         );
         if let Some(image) = &job.runner.image {
-            requirements.require_image(image.clone(), platform.clone());
+            if !is_immutable_image_reference(image) {
+                requirements.require_image(image.clone(), platform.clone());
+            }
         }
         for service in &job.services {
-            requirements.require_image(service.image.clone(), platform.clone());
+            if !is_immutable_image_reference(&service.image) {
+                requirements.require_image(service.image.clone(), platform.clone());
+            }
         }
         for step in job_steps(job) {
             if let ir::StepAction::Component { reference } = &step.action {
@@ -65,16 +69,20 @@ pub(crate) fn resolve_external_references(
             }
         );
         if let Some(image) = &mut job.runner.image {
-            let resolved_image = resolved
-                .image(image, &platform)
-                .expect("all OCI job image requirements were resolved");
-            resolved_image.clone_into(image);
+            if !is_immutable_image_reference(image) {
+                let resolved_image = resolved
+                    .image(image, &platform)
+                    .expect("all OCI job image requirements were resolved");
+                resolved_image.clone_into(image);
+            }
         }
         for service in &mut job.services {
-            let resolved_image = resolved
-                .image(&service.image, &platform)
-                .expect("all image requirements were resolved");
-            resolved_image.clone_into(&mut service.image);
+            if !is_immutable_image_reference(&service.image) {
+                let resolved_image = resolved
+                    .image(&service.image, &platform)
+                    .expect("all image requirements were resolved");
+                resolved_image.clone_into(&mut service.image);
+            }
         }
         for step in job_steps_mut(job) {
             if let ir::StepAction::Component { reference } = &mut step.action {
@@ -86,6 +94,14 @@ pub(crate) fn resolve_external_references(
         }
     }
     Ok(Some(resolved.digest().clone()))
+}
+
+fn is_immutable_image_reference(reference: &str) -> bool {
+    reference
+        .rsplit_once('@')
+        .is_some_and(|(repository, digest)| {
+            !repository.is_empty() && ContentDigest::parse(digest.to_owned()).is_ok()
+        })
 }
 
 pub(crate) fn approval_subject(

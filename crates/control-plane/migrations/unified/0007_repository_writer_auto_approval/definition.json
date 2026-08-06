@@ -1,0 +1,15 @@
+{
+  "sequence": 7,
+  "migration_id": "repository-writer-auto-approval-v1",
+  "logical_schema_generation": 7,
+  "purpose": "Persist an exact repository-scoped opt-in for automatic approval only after the triggering GitHub actor is revalidated with write access.",
+  "preconditions": [
+    "scm-event-recovery-v1-applied",
+    "repositories-present"
+  ],
+  "postconditions": [
+    "repository-auto-approval-is-tenant-scoped",
+    "repository-auto-approval-defaults-disabled",
+    "repository-auto-approval-updates-are-timestamped"
+  ]
+}

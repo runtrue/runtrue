@@ -265,6 +265,7 @@ const RUNNER_UPDATE_TABLES: &[&str] = &[
 
 const EVENT_REPLAY_TABLES: &[&str] = &["durable_event_replays", "durable_events"];
 const USER_MANAGEMENT_TABLES: &[&str] = &["repository_access_grants", "team_memberships", "teams"];
+const REPOSITORY_WRITER_AUTO_APPROVAL_TABLES: &[&str] = &["repository_auto_approval_policies"];
 
 const SQLITE_REQUIRED_TRIGGERS: &[&str] = &[
     "audit_events_no_delete",
@@ -767,6 +768,13 @@ fn verify_sqlite_schema_contract(
     }
     if forward_migrations >= 3 {
         expected_tables.extend(EVENT_REPLAY_TABLES.iter().map(|table| (*table).to_owned()));
+    }
+    if forward_migrations >= 6 {
+        expected_tables.extend(
+            REPOSITORY_WRITER_AUTO_APPROVAL_TABLES
+                .iter()
+                .map(|table| (*table).to_owned()),
+        );
     }
     if actual_tables != expected_tables {
         return Err(ControlPlaneError::InvalidMigrationHistory(

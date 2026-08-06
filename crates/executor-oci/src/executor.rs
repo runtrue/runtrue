@@ -167,9 +167,12 @@ where
             .lock()
             .map_err(|_| OciError::Internal("planned service state is poisoned".to_owned()))?
             .clear();
-        if !capsule.jobs.is_empty() && capsule.context.lockfile_digest.is_none() {
+        if !capsule.jobs.is_empty()
+            && capsule.context.lockfile_digest.is_none()
+            && !capsule_uses_only_immutable_images(capsule)
+        {
             return Err(OciError::UnsupportedFeature(
-                "OCI execution requires a canonical lockfile digest in the capsule".to_owned(),
+                "OCI execution requires a canonical lockfile digest or exclusively immutable image references in the capsule".to_owned(),
             ));
         }
         let mut admitted = BTreeMap::new();
@@ -899,6 +902,27 @@ where
             environment: self.config.runtime_environment.clone(),
         })
     }
+}
+
+fn capsule_uses_only_immutable_images(capsule: &ExecutionCapsule) -> bool {
+    capsule.jobs.iter().all(|job| {
+        job.runner
+            .image
+            .as_deref()
+            .is_some_and(is_immutable_image_reference)
+            && job
+                .services
+                .iter()
+                .all(|service| is_immutable_image_reference(&service.image))
+    })
+}
+
+fn is_immutable_image_reference(reference: &str) -> bool {
+    reference
+        .rsplit_once('@')
+        .is_some_and(|(repository, digest)| {
+            !repository.is_empty() && ContentDigest::parse(digest.to_owned()).is_ok()
+        })
 }
 
 impl<P, R> Executor for OciExecutor<P, R>

@@ -1,6 +1,6 @@
 use crate::{
     AutoscalerError, Clock, ControlPlaneClient, FleetRequest, FleetView, OwnershipLease,
-    PoolTemplate, Provider, ProviderInstance, SystemClock,
+    PoolTemplate, Provider, ProviderInstance, SystemClock, GENERIC_RUNTIME_COMPATIBILITY_DIGEST,
 };
 use std::{cmp, collections::BTreeMap};
 
@@ -111,7 +111,14 @@ where
             .iter()
             .map(|template| (template.runtime_compatibility_digest.as_str(), template))
             .collect::<BTreeMap<_, _>>();
-        let mut current = view.online_workers.saturating_add(view.draining_workers);
+        let mut current = view
+            .requests
+            .iter()
+            .filter(|request| {
+                matches!(request.state.as_str(), "online" | "draining")
+                    && matches!(request.runner_status.as_str(), "online" | "draining")
+            })
+            .count() as u64;
         if planned.is_some() {
             current = current.saturating_add(1);
         }
@@ -236,14 +243,30 @@ where
             }
             let template = templates
                 .get(demand.runtime_compatibility_digest.as_str())
+                .copied()
+                .or_else(|| templates.get(GENERIC_RUNTIME_COMPATIBILITY_DIGEST).copied())
                 .ok_or_else(|| {
                     AutoscalerError::Reconcile(format!(
-                        "no exact template for demand {}",
+                        "no exact or generic template for demand {}",
                         demand.runtime_compatibility_digest
                     ))
                 })?;
+            let mut bound_template = template.clone();
+            bound_template.runtime_compatibility_digest =
+                demand.runtime_compatibility_digest.clone();
+            if template.runtime_compatibility_digest == GENERIC_RUNTIME_COMPATIBILITY_DIGEST {
+                let suffix = demand
+                    .runtime_compatibility_digest
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&demand.runtime_compatibility_digest);
+                bound_template.provider_template_id = format!(
+                    "{}--{}",
+                    template.provider_template_id,
+                    &suffix[..suffix.len().min(16)]
+                );
+            }
             for _ in 0..count {
-                self.provision(&lease, template).await?;
+                self.provision(&lease, &bound_template).await?;
                 current = current.saturating_add(1);
                 remaining_batch = remaining_batch.saturating_sub(1);
                 provider_capacity = provider_capacity.saturating_sub(1);
@@ -404,35 +427,9 @@ where
         lease: &OwnershipLease,
         view: &FleetView,
     ) -> Result<(), AutoscalerError> {
-        let minimum = cmp::max(
-            u64::from(view.policy.minimum_workers),
-            u64::from(view.policy.minimum_idle_workers),
-        );
-        let mut excess = view.online_workers.saturating_sub(minimum);
-        if excess == 0 {
-            return Ok(());
-        }
-        let now = self.clock.now_unix_ms()?;
-        for request in &view.requests {
-            if excess == 0 {
-                break;
-            }
-            if request.state != "online"
-                || request.runner_id.is_empty()
-                || request.runner_active_jobs != 0
-                || now
-                    < request
-                        .updated_unix_ms
-                        .saturating_add(view.policy.idle_timeout_ms)
-            {
-                continue;
-            }
-            self.control_plane
-                .transition(request, "draining", lease.fencing_generation, "")
-                .await
-                .map_err(|error| reconcile(&format!("record drain for {}", request.id), error))?;
-            excess = excess.saturating_sub(1);
-        }
+        // A request that was drained during an earlier reconciliation must
+        // finish terminating even though it no longer contributes to the
+        // online-worker excess calculated below.
         for request in &view.requests {
             if request.state != "draining"
                 || request.runner_active_jobs != 0
@@ -473,6 +470,41 @@ where
                 .map_err(|error| {
                     reconcile(&format!("record termination for {}", request.id), error)
                 })?;
+        }
+
+        let minimum = cmp::max(
+            u64::from(view.policy.minimum_workers),
+            u64::from(view.policy.minimum_idle_workers),
+        );
+        let managed_online = view
+            .requests
+            .iter()
+            .filter(|request| request.state == "online" && request.runner_status == "online")
+            .count() as u64;
+        let mut excess = managed_online.saturating_sub(minimum);
+        if excess == 0 {
+            return Ok(());
+        }
+        let now = self.clock.now_unix_ms()?;
+        for request in &view.requests {
+            if excess == 0 {
+                break;
+            }
+            if request.state != "online"
+                || request.runner_id.is_empty()
+                || request.runner_active_jobs != 0
+                || now
+                    < request
+                        .updated_unix_ms
+                        .saturating_add(view.policy.idle_timeout_ms)
+            {
+                continue;
+            }
+            self.control_plane
+                .transition(request, "draining", lease.fencing_generation, "")
+                .await
+                .map_err(|error| reconcile(&format!("record drain for {}", request.id), error))?;
+            excess = excess.saturating_sub(1);
         }
         Ok(())
     }
@@ -518,6 +550,8 @@ mod tests {
     struct FakeControl {
         view: Mutex<FleetView>,
         created: AtomicUsize,
+        created_digests: Mutex<Vec<String>>,
+        created_template_ids: Mutex<Vec<String>>,
         transitions: Mutex<Vec<String>>,
         activated: AtomicUsize,
         planned: Mutex<Option<PlannedReplacement>>,
@@ -550,9 +584,18 @@ mod tests {
             template: &PoolTemplate,
         ) -> Result<FleetRequest, AutoscalerError> {
             let number = self.created.fetch_add(1, Ordering::Relaxed) + 1;
+            self.created_digests
+                .lock()
+                .unwrap()
+                .push(template.runtime_compatibility_digest.clone());
+            self.created_template_ids
+                .lock()
+                .unwrap()
+                .push(template.provider_template_id.clone());
             Ok(FleetRequest {
                 id: format!("request-{number}"),
                 pool_id: pool.into(),
+                runtime_compatibility_digest: template.runtime_compatibility_digest.clone(),
                 provider: template.provider.clone(),
                 state: "requested".into(),
                 ..FleetRequest::default()
@@ -721,6 +764,84 @@ mod tests {
         assert_eq!(control.created.load(Ordering::Relaxed), 2);
         assert_eq!(provider.created.load(Ordering::Relaxed), 2);
         assert_eq!(provider.started.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn generic_template_is_bound_to_the_exact_demand_digest() {
+        let control = FakeControl {
+            view: Mutex::new(FleetView {
+                policy: ScalingPolicy {
+                    enabled: true,
+                    maximum_workers: 1,
+                    scale_up_batch: 1,
+                    ..ScalingPolicy::default()
+                },
+                demand: vec![DemandGroup {
+                    runtime_compatibility_digest: "sha256:job-specific".into(),
+                    queued_jobs: 1,
+                    ..DemandGroup::default()
+                }],
+                templates: vec![template(GENERIC_RUNTIME_COMPATIBILITY_DIGEST)],
+                ..FleetView::default()
+            }),
+            ..FakeControl::default()
+        };
+        let provider = FakeProvider::default();
+        Reconciler::with_clock(
+            &control,
+            &provider,
+            "pool".into(),
+            "owner".into(),
+            FixedClock(10_000),
+        )
+        .reconcile()
+        .await
+        .unwrap();
+        assert_eq!(control.created.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            control.created_digests.lock().unwrap().as_slice(),
+            &["sha256:job-specific"]
+        );
+        assert_eq!(
+            control.created_template_ids.lock().unwrap().as_slice(),
+            &["--job-specific"]
+        );
+    }
+
+    #[tokio::test]
+    async fn fixed_pool_workers_do_not_consume_the_managed_worker_limit() {
+        let control = FakeControl {
+            view: Mutex::new(FleetView {
+                policy: ScalingPolicy {
+                    enabled: true,
+                    maximum_workers: 1,
+                    scale_up_batch: 1,
+                    ..ScalingPolicy::default()
+                },
+                demand: vec![DemandGroup {
+                    runtime_compatibility_digest: "sha256:exact".into(),
+                    queued_jobs: 1,
+                    ..DemandGroup::default()
+                }],
+                templates: vec![template("sha256:exact")],
+                online_workers: 2,
+                draining_workers: 3,
+                ..FleetView::default()
+            }),
+            ..FakeControl::default()
+        };
+        let provider = FakeProvider::default();
+        Reconciler::with_clock(
+            &control,
+            &provider,
+            "pool".into(),
+            "owner".into(),
+            FixedClock(10_000),
+        )
+        .reconcile()
+        .await
+        .unwrap();
+        assert_eq!(control.created.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -913,6 +1034,47 @@ mod tests {
         .unwrap();
         assert_eq!(control.transitions.lock().unwrap()[0], "online->draining");
         assert_eq!(provider.destroyed.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn previously_drained_request_is_terminated_without_online_excess() {
+        let control = FakeControl {
+            view: Mutex::new(FleetView {
+                observed_unix_ms: 10_000,
+                policy: ScalingPolicy {
+                    enabled: true,
+                    maximum_workers: 1,
+                    ..ScalingPolicy::default()
+                },
+                requests: vec![FleetRequest {
+                    id: "one".into(),
+                    pool_id: "pool".into(),
+                    state: "draining".into(),
+                    runner_id: "runner".into(),
+                    runner_status: "draining".into(),
+                    provider_instance_id: "instance".into(),
+                    ..FleetRequest::default()
+                }],
+                ..FleetView::default()
+            }),
+            ..FakeControl::default()
+        };
+        let provider = FakeProvider::default();
+        Reconciler::with_clock(
+            &control,
+            &provider,
+            "pool".into(),
+            "owner".into(),
+            FixedClock(10_000),
+        )
+        .reconcile()
+        .await
+        .unwrap();
+        assert_eq!(
+            *control.transitions.lock().unwrap(),
+            ["draining->terminating", "terminating->terminated"]
+        );
+        assert_eq!(provider.destroyed.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

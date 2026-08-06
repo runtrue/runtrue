@@ -16,6 +16,13 @@ use runtrue_model::ContentDigest;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
+
+// GitHub calculates installation-token expiry from its own request handling
+// time, while callers intentionally pass the timestamp captured at the start
+// of an inspection. Keep the upper bound tight, but allow bounded clock and
+// request-processing skew around GitHub's documented one-hour lifetime.
+const INSTALLATION_TOKEN_EXPIRY_SKEW_SECONDS: u64 = 60;
+
 pub(super) fn parse_installation_token(
     body: &[u8],
     request: InstallationTokenRequest,
@@ -33,7 +40,8 @@ pub(super) fn parse_installation_token(
         .ok_or(GitHubError::MalformedResponse)?;
     let expires_at_unix_seconds = parse_utc_timestamp(expires_at)?;
     if expires_at_unix_seconds <= now_unix_seconds.saturating_add(30)
-        || expires_at_unix_seconds > now_unix_seconds.saturating_add(60 * 60 + 60)
+        || expires_at_unix_seconds
+            > now_unix_seconds.saturating_add(60 * 60 + INSTALLATION_TOKEN_EXPIRY_SKEW_SECONDS)
     {
         return Err(GitHubError::MalformedResponse);
     }
@@ -137,7 +145,8 @@ pub(super) fn parse_catalog_token(
         .ok_or(GitHubError::MalformedResponse)?;
     let expires_at_unix_seconds = parse_utc_timestamp(expires_at)?;
     if expires_at_unix_seconds <= now_unix_seconds.saturating_add(30)
-        || expires_at_unix_seconds > now_unix_seconds.saturating_add(60 * 60)
+        || expires_at_unix_seconds
+            > now_unix_seconds.saturating_add(60 * 60 + INSTALLATION_TOKEN_EXPIRY_SKEW_SECONDS)
     {
         return Err(GitHubError::MalformedResponse);
     }

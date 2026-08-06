@@ -2,6 +2,8 @@ use super::*;
 
 const MAX_FLEET_REQUESTS: u64 = 1_000;
 const MAX_AUTOSCALER_LEASE_MS: u64 = 5 * 60 * 1_000;
+const GENERIC_RUNTIME_COMPATIBILITY_DIGEST: &str =
+    "sha256:e5b5fc9c576175a0bdacc09872fed2390332da870ce6140503664d07b88292ca";
 
 pub(in crate::store) fn fleet_request_state_name(state: RunnerFleetRequestState) -> &'static str {
     match state {
@@ -537,9 +539,11 @@ impl ControlPlane {
              SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'requested', ?7, ?7
              WHERE EXISTS (
                SELECT 1 FROM runner_pool_templates
-               WHERE pool_id = ?2 AND runtime_compatibility_digest = ?3
-                 AND provider = ?4 AND provider_template_id = ?5
-                 AND runner_template_digest = ?6
+               WHERE pool_id = ?2
+                 AND provider = ?4 AND runner_template_digest = ?6
+                 AND (runtime_compatibility_digest = ?3 AND provider_template_id = ?5
+                      OR runtime_compatibility_digest = ?8
+                         AND ?5 LIKE provider_template_id || '--%')
              )",
             params![
                 request.id,
@@ -549,6 +553,7 @@ impl ControlPlane {
                 request.provider_template_id,
                 request.runner_template_digest.as_str(),
                 to_i64(request.created_unix_ms)?,
+                GENERIC_RUNTIME_COMPATIBILITY_DIGEST,
             ],
         )?;
         if changed != 1 {
@@ -565,7 +570,7 @@ impl ControlPlane {
                 .optional()?;
             if existing.as_ref() != Some(request) {
                 return Err(ControlPlaneError::InvalidInput(
-                    "runner fleet request has no exact registered template or conflicts with an idempotent replay",
+                    "runner fleet request has no compatible registered template or conflicts with an idempotent replay",
                 ));
             }
         }
@@ -1175,6 +1180,35 @@ mod tests {
             ),
             Err(ControlPlaneError::RunnerAutoscalerLeaseLost)
         ));
+    }
+
+    #[test]
+    fn generic_template_authorizes_an_exact_demand_request() {
+        let control = fleet_control();
+        let generic = RunnerPoolTemplateRecord {
+            pool_id: "pool-fleet".to_owned(),
+            runtime_compatibility_digest: GENERIC_RUNTIME_COMPATIBILITY_DIGEST.parse().unwrap(),
+            provider: "docker".to_owned(),
+            provider_template_id: "generic-docker".to_owned(),
+            runner_template_digest: ContentDigest::sha256(b"generic-runner-template"),
+            created_unix_ms: 10,
+            updated_unix_ms: 10,
+        };
+        control.upsert_runner_pool_template(&generic).unwrap();
+        control
+            .acquire_runner_autoscaler_lease("pool-fleet", "owner", 10, 1_000)
+            .unwrap();
+        let mut request = fleet_request(&generic, "generic-request", 11);
+        request.runtime_compatibility_digest = ContentDigest::sha256(b"exact-job-demand");
+        request.provider_template_id = "generic-docker--7f6f09d29c8912ff".to_owned();
+        control
+            .create_runner_fleet_request(&request, "owner", 1)
+            .unwrap();
+        assert_eq!(
+            control.list_runner_fleet_requests("pool-fleet").unwrap()[0]
+                .runtime_compatibility_digest,
+            request.runtime_compatibility_digest
+        );
     }
 
     #[test]

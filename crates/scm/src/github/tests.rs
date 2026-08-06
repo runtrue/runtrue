@@ -1,7 +1,8 @@
 use super::*;
 use super::{
     pagination::{
-        parse_account, parse_repository_array, parse_utc_timestamp, valid_default_branch,
+        parse_account, parse_catalog_token, parse_repository_array, parse_utc_timestamp,
+        valid_default_branch,
     },
     validation::{headers, is_public_ip, validate_token_request},
 };
@@ -433,6 +434,36 @@ mod installation {
             transport.requests[2].url,
             "https://github.example.com:8443/api/v3/installation/repositories?per_page=100&page=1"
         );
+    }
+
+    #[test]
+    fn catalog_token_expiry_allows_only_bounded_request_and_clock_skew() {
+        let response = |expires_at: &str| {
+            serde_json::to_vec(&json!({
+                "token": "ghs_catalog_secret",
+                "expires_at": expires_at,
+                "repository_selection": "selected",
+                "permissions": {"metadata": "read"}
+            }))
+            .unwrap()
+        };
+
+        assert!(parse_catalog_token(
+            &response("2026-07-11T01:01:00Z"),
+            7,
+            GitHubRepositorySelection::Selected,
+            NOW,
+        )
+        .is_ok());
+        assert!(matches!(
+            parse_catalog_token(
+                &response("2026-07-11T01:01:01Z"),
+                7,
+                GitHubRepositorySelection::Selected,
+                NOW,
+            ),
+            Err(GitHubError::MalformedResponse)
+        ));
     }
 
     #[test]

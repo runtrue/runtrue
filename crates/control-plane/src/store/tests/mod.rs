@@ -2049,6 +2049,35 @@ fn repository_workflow_directory_is_tenant_scoped_and_canonical() {
 }
 
 #[test]
+fn repository_writer_auto_approval_defaults_off_and_is_tenant_scoped() {
+    let control = ControlPlane::open_in_memory("repository-writer-auto-approval", NOW).unwrap();
+    control.create_repository(&repository()).unwrap();
+
+    assert!(!control
+        .repository_auto_approve_writers("tenant-1", "repo-1")
+        .unwrap());
+    assert!(control
+        .set_repository_auto_approve_writers("tenant-1", "repo-1", true, NOW)
+        .unwrap());
+    assert!(control
+        .repository_auto_approve_writers("tenant-1", "repo-1")
+        .unwrap());
+    assert!(!control
+        .repository_auto_approve_writers("tenant-2", "repo-1")
+        .unwrap());
+    assert!(!control
+        .set_repository_auto_approve_writers("tenant-1", "repo-1", false, NOW + 1)
+        .unwrap());
+    assert!(!control
+        .repository_auto_approve_writers("tenant-1", "repo-1")
+        .unwrap());
+    assert!(matches!(
+        control.set_repository_auto_approve_writers("tenant-2", "repo-1", true, NOW + 2),
+        Err(ControlPlaneError::NotFound { .. })
+    ));
+}
+
+#[test]
 fn remote_dag_queues_roots_unlocks_successors_and_skips_failed_descendants() {
     let control = ControlPlane::open_in_memory("dag", NOW).unwrap();
     control.create_repository(&repository()).unwrap();
@@ -2240,7 +2269,8 @@ fn unified_sqlite_ledger_is_authoritative_and_detects_drift() {
             "reusable-capability-approvals-v1",
             "user-management-v1",
             "durable-event-replay-v1",
-            "scm-event-recovery-v1"
+            "scm-event-recovery-v1",
+            "repository-writer-auto-approval-v1"
         ]
     );
     assert_eq!(
@@ -2274,7 +2304,8 @@ fn unified_sqlite_ledger_is_authoritative_and_detects_drift() {
             "reusable-capability-approvals-v1",
             "user-management-v1",
             "durable-event-replay-v1",
-            "scm-event-recovery-v1"
+            "scm-event-recovery-v1",
+            "repository-writer-auto-approval-v1"
         ]
     );
     assert!(replayed.applied_migration_ids.is_empty());
@@ -2408,7 +2439,8 @@ fn every_sqlite_legacy_head_bridges_to_the_same_logical_baseline() {
                 "reusable-capability-approvals-v1",
                 "user-management-v1",
                 "durable-event-replay-v1",
-                "scm-event-recovery-v1"
+                "scm-event-recovery-v1",
+                "repository-writer-auto-approval-v1"
             ]
         );
         assert_eq!(

@@ -10,6 +10,8 @@ on:
       - "crates/**"
       - "deploy/Containerfile.runner"
       - "deploy/Containerfile.runner.dockerignore"
+      - "deploy/Containerfile.autoscaler"
+      - "deploy/Containerfile.autoscaler.dockerignore"
       - "deploy/Containerfile.server"
       - "deploy/Containerfile.server.dockerignore"
       - "deploy/containers-oci.conf"
@@ -67,6 +69,20 @@ jobs:
             image: runtrue-runner
             artifact: runtrue-runner-arm64
             file: ./deploy/Containerfile.runner
+            platform: linux/arm64
+            architecture: arm64
+            runner: ubuntu-24.04-arm
+          - title: Runtrue autoscaler (amd64)
+            image: runtrue-autoscaler
+            artifact: runtrue-autoscaler-amd64
+            file: ./deploy/Containerfile.autoscaler
+            platform: linux/amd64
+            architecture: amd64
+            runner: ubuntu-24.04
+          - title: Runtrue autoscaler (arm64)
+            image: runtrue-autoscaler
+            artifact: runtrue-autoscaler-arm64
+            file: ./deploy/Containerfile.autoscaler
             platform: linux/arm64
             architecture: arm64
             runner: ubuntu-24.04-arm
@@ -192,6 +208,10 @@ jobs:
           cd "$EVIDENCE_DIR"
           expected="$(
             printf '%s\n' \
+              runtrue-autoscaler-amd64.oci.tar \
+              runtrue-autoscaler-amd64.oci.tar.sha256 \
+              runtrue-autoscaler-arm64.oci.tar \
+              runtrue-autoscaler-arm64.oci.tar.sha256 \
               runtrue-runner-amd64.oci.tar \
               runtrue-runner-amd64.oci.tar.sha256 \
               runtrue-runner-arm64.oci.tar \
@@ -226,7 +246,7 @@ jobs:
           [[ "$RELEASE_TAG" == "v${version}" ]]
           declare -A digests
 
-          for component in runtrue-server runtrue-runner; do
+          for component in runtrue-server runtrue-runner runtrue-autoscaler; do
             image="${REGISTRY}/${IMAGE_NAMESPACE}/${component}"
             for architecture in amd64 arm64; do
               archive="${EVIDENCE_DIR}/${component}-${architecture}.oci.tar"
@@ -267,7 +287,7 @@ jobs:
             printf '%s_digest=%s\n' "${component//-/_}" "$digest" >>"$GITHUB_OUTPUT"
           done
 
-          for component in runtrue-server runtrue-runner; do
+          for component in runtrue-server runtrue-runner runtrue-autoscaler; do
             image="${REGISTRY}/${IMAGE_NAMESPACE}/${component}"
             skopeo copy --all --preserve-digests \
               "docker://${image}@${digests[$component]}" \
@@ -290,4 +310,11 @@ jobs:
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/runtrue-runner
           subject-digest: ${{ steps.promote.outputs.runtrue_runner_digest }}
+          push-to-registry: true
+
+      - name: Attest published autoscaler image
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/runtrue-autoscaler
+          subject-digest: ${{ steps.promote.outputs.runtrue_autoscaler_digest }}
           push-to-registry: true

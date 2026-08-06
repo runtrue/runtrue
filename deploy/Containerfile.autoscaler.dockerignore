@@ -1,0 +1,7 @@
+.git
+.github
+target
+deploy/state
+**/target
+**/*.sqlite
+**/*.sqlite-journal

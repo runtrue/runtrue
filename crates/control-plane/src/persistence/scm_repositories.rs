@@ -75,6 +75,18 @@ pub trait ScmRepositoryStore: Send + Sync {
         workflow_directory: &'a str,
         now_unix_ms: u64,
     ) -> StoreFuture<'a, String>;
+    fn repository_auto_approve_writers<'a>(
+        &'a self,
+        tenant_id: &'a str,
+        repository_id: &'a str,
+    ) -> StoreFuture<'a, bool>;
+    fn set_repository_auto_approve_writers<'a>(
+        &'a self,
+        tenant_id: &'a str,
+        repository_id: &'a str,
+        enabled: bool,
+        now_unix_ms: u64,
+    ) -> StoreFuture<'a, bool>;
     fn create_scm_installation<'a>(
         &'a self,
         record: &'a ScmInstallationRecord,
@@ -1383,6 +1395,32 @@ impl ScmRepositoryStore for ControlPlane {
         Box::pin(async move { result })
     }
 
+    fn repository_auto_approve_writers<'a>(
+        &'a self,
+        tenant_id: &'a str,
+        repository_id: &'a str,
+    ) -> StoreFuture<'a, bool> {
+        let result = ControlPlane::repository_auto_approve_writers(self, tenant_id, repository_id);
+        Box::pin(async move { result })
+    }
+
+    fn set_repository_auto_approve_writers<'a>(
+        &'a self,
+        tenant_id: &'a str,
+        repository_id: &'a str,
+        enabled: bool,
+        now_unix_ms: u64,
+    ) -> StoreFuture<'a, bool> {
+        let result = ControlPlane::set_repository_auto_approve_writers(
+            self,
+            tenant_id,
+            repository_id,
+            enabled,
+            now_unix_ms,
+        );
+        Box::pin(async move { result })
+    }
+
     fn create_scm_installation<'a>(
         &'a self,
         record: &'a ScmInstallationRecord,
@@ -1983,6 +2021,60 @@ impl ScmRepositoryStore for PostgresInstallationStore {
                 return Err(not_found("repository", repository_id));
             }
             Ok(normalized)
+        })
+    }
+
+    fn repository_auto_approve_writers<'a>(
+        &'a self,
+        tenant_id: &'a str,
+        repository_id: &'a str,
+    ) -> StoreFuture<'a, bool> {
+        Box::pin(async move {
+            validate_text("repository approval tenant", tenant_id)?;
+            validate_text("repository approval repository", repository_id)?;
+            let enabled: Option<bool> = sqlx::query_scalar(
+                "SELECT enabled FROM repository_auto_approval_policies
+                 WHERE tenant_id = $1 AND repository_id = $2",
+            )
+            .bind(tenant_id)
+            .bind(repository_id)
+            .fetch_optional(self.pool())
+            .await?;
+            Ok(enabled.unwrap_or(false))
+        })
+    }
+
+    fn set_repository_auto_approve_writers<'a>(
+        &'a self,
+        tenant_id: &'a str,
+        repository_id: &'a str,
+        enabled: bool,
+        now_unix_ms: u64,
+    ) -> StoreFuture<'a, bool> {
+        Box::pin(async move {
+            validate_text("repository approval tenant", tenant_id)?;
+            validate_text("repository approval repository", repository_id)?;
+            let changed = sqlx::query(
+                "INSERT INTO repository_auto_approval_policies
+                 (repository_id, tenant_id, enabled, updated_unix_ms)
+                 SELECT id, tenant_id, $3, $4 FROM repositories
+                 WHERE tenant_id = $1 AND id = $2
+                 ON CONFLICT(repository_id) DO UPDATE SET
+                     enabled = excluded.enabled,
+                     updated_unix_ms = excluded.updated_unix_ms
+                 WHERE repository_auto_approval_policies.tenant_id = excluded.tenant_id",
+            )
+            .bind(tenant_id)
+            .bind(repository_id)
+            .bind(enabled)
+            .bind(to_i64(now_unix_ms, "repository approval update")?)
+            .execute(self.pool())
+            .await?
+            .rows_affected();
+            if changed != 1 {
+                return Err(not_found("repository", repository_id));
+            }
+            Ok(enabled)
         })
     }
 

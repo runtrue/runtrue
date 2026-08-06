@@ -32,7 +32,27 @@ pub struct DockerTemplate {
     #[serde(default)]
     pub mounts: Vec<DockerMount>,
     pub network: String,
+    #[serde(default)]
+    pub additional_networks: Vec<String>,
     pub user: String,
+    pub runtime_uid: u32,
+    pub runtime_gid: u32,
+    #[serde(default = "default_state_mount_target")]
+    pub state_mount_target: String,
+    #[serde(default)]
+    pub working_directory: Option<String>,
+    #[serde(default)]
+    pub privileged: bool,
+    #[serde(default)]
+    pub devices: Vec<DockerDevice>,
+    #[serde(default = "default_read_only_rootfs")]
+    pub read_only_rootfs: bool,
+    #[serde(default = "default_cap_drop")]
+    pub cap_drop: Vec<String>,
+    #[serde(default = "default_security_opt")]
+    pub security_opt: Vec<String>,
+    #[serde(default)]
+    pub state_directories: Vec<PathBuf>,
     pub memory_bytes: i64,
     pub nano_cpus: i64,
     pub pids_limit: i64,
@@ -43,6 +63,22 @@ pub struct DockerTemplate {
     #[serde(default = "default_capacity_reserve_nano_cpus")]
     pub capacity_reserve_nano_cpus: i64,
     pub tmpfs: BTreeMap<String, String>,
+}
+
+fn default_cap_drop() -> Vec<String> {
+    vec!["ALL".to_owned()]
+}
+
+const fn default_read_only_rootfs() -> bool {
+    true
+}
+
+fn default_security_opt() -> Vec<String> {
+    vec!["no-new-privileges:true".to_owned()]
+}
+
+fn default_state_mount_target() -> String {
+    "/var/lib/runtrue".to_owned()
 }
 
 const fn default_capacity_reserve_memory_bytes() -> i64 {
@@ -64,6 +100,17 @@ pub struct DockerMount {
     pub target: String,
     #[serde(rename = "ReadOnly")]
     pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerDevice {
+    #[serde(rename = "PathOnHost")]
+    pub path_on_host: PathBuf,
+    #[serde(rename = "PathInContainer")]
+    pub path_in_container: String,
+    #[serde(rename = "CgroupPermissions")]
+    pub cgroup_permissions: String,
 }
 
 pub struct DockerProvider {
@@ -298,20 +345,41 @@ impl Provider for DockerProvider {
         let root = self.claim_root.join(&request.id);
         let claim_directory = root.join("claim");
         let state_directory = root.join("state");
-        for directory in [
+        let mut directories = vec![
             root.clone(),
             claim_directory.clone(),
             state_directory.clone(),
             state_directory.join("runner"),
             state_directory.join("workspaces"),
-        ] {
-            fs::create_dir_all(&directory).map_err(|error| {
-                AutoscalerError::file("create provider directory", &directory, error)
+        ];
+        directories.extend(
+            self.template
+                .state_directories
+                .iter()
+                .map(|directory| state_directory.join(directory)),
+        );
+        for directory in &directories {
+            fs::create_dir_all(directory).map_err(|error| {
+                AutoscalerError::file("create provider directory", directory, error)
             })?;
-            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).map_err(
-                |error| AutoscalerError::file("secure provider directory", &directory, error),
-            )?;
-            require_private_directory(&directory, "provider state directory")?;
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                AutoscalerError::file("secure provider directory", directory, error)
+            })?;
+            require_private_directory(directory, "provider state directory")?;
+        }
+        for directory in directories.iter().filter(|directory| **directory != root) {
+            nix::unistd::chown(
+                directory,
+                Some(nix::unistd::Uid::from_raw(self.template.runtime_uid)),
+                Some(nix::unistd::Gid::from_raw(self.template.runtime_gid)),
+            )
+            .map_err(|error| {
+                AutoscalerError::file(
+                    "assign provider directory ownership",
+                    directory,
+                    error.into(),
+                )
+            })?;
         }
         Ok(PreparedInstance {
             provider_request_id: request.id.clone(),
@@ -348,27 +416,35 @@ impl Provider for DockerProvider {
         mounts.push(DockerMount {
             kind: "bind".into(),
             source: prepared.state_directory.clone(),
-            target: "/var/lib/runtrue".into(),
+            target: self.template.state_mount_target.clone(),
             read_only: false,
         });
+        let endpoints = std::iter::once(&self.template.network)
+            .chain(self.template.additional_networks.iter())
+            .map(|network| (network.clone(), json!({})))
+            .collect::<serde_json::Map<_, _>>();
         let body = json!({
             "Image": self.template.image,
             "Cmd": self.template.command,
             "Env": self.template.environment,
             "Labels": labels,
             "User": self.template.user,
+            "WorkingDir": self.template.working_directory.clone().unwrap_or_default(),
             "HostConfig": {
                 "Mounts": mounts,
                 "AutoRemove": false,
                 "NetworkMode": self.template.network,
-                "ReadonlyRootfs": true,
-                "CapDrop": ["ALL"],
-                "SecurityOpt": ["no-new-privileges:true"],
+                "ReadonlyRootfs": self.template.read_only_rootfs,
+                "Privileged": self.template.privileged,
+                "Devices": self.template.devices,
+                "CapDrop": self.template.cap_drop,
+                "SecurityOpt": self.template.security_opt,
                 "Memory": self.template.memory_bytes,
                 "NanoCpus": self.template.nano_cpus,
                 "PidsLimit": self.template.pids_limit,
                 "Tmpfs": self.template.tmpfs,
-            }
+            },
+            "NetworkingConfig": {"EndpointsConfig": endpoints},
         });
         let response = self
             .request(
@@ -421,7 +497,12 @@ impl Provider for DockerProvider {
         prepared: &PreparedInstance,
         claim: &LaunchClaim,
     ) -> Result<(), AutoscalerError> {
-        require_private_directory(&prepared.claim_directory, "claim directory")?;
+        require_private_directory_owner(
+            &prepared.claim_directory,
+            "claim directory",
+            self.template.runtime_uid,
+            self.template.runtime_gid,
+        )?;
         let encoded = serde_json::to_vec(claim)?;
         let final_path = prepared.claim_directory.join("claim.json");
         if final_path.exists() {
@@ -453,6 +534,14 @@ impl Provider for DockerProvider {
             .and_then(|()| file.sync_all())
             .map_err(|error| AutoscalerError::file("write launch claim", &temporary, error))?;
         drop(file);
+        nix::unistd::chown(
+            &temporary,
+            Some(nix::unistd::Uid::from_raw(self.template.runtime_uid)),
+            Some(nix::unistd::Gid::from_raw(self.template.runtime_gid)),
+        )
+        .map_err(|error| {
+            AutoscalerError::file("assign launch claim ownership", &temporary, error.into())
+        })?;
         fs::rename(&temporary, &final_path)
             .map_err(|error| AutoscalerError::file("publish launch claim", &final_path, error))?;
         File::open(&prepared.claim_directory)
@@ -636,15 +725,81 @@ fn validate_template(template: &DockerTemplate, trust_root: &Path) -> Result<(),
         || template.user.is_empty()
         || template.user == "0"
         || template.user.starts_with("0:")
+        || template.runtime_uid == 0
+        || template.runtime_gid == 0
+        || template.user != format!("{}:{}", template.runtime_uid, template.runtime_gid)
+        || !template.state_mount_target.starts_with('/')
+        || template
+            .state_mount_target
+            .split('/')
+            .any(|component| component == "..")
         || template.memory_bytes <= 0
         || template.nano_cpus <= 0
         || template.pids_limit <= 0
         || template.capacity_reserve_memory_bytes < 0
         || template.capacity_reserve_nano_cpus < 0
+        || (!template.privileged
+            && (!template
+                .cap_drop
+                .iter()
+                .any(|capability| capability == "ALL")
+                || !template
+                    .security_opt
+                    .iter()
+                    .any(|option| option == "no-new-privileges:true")
+                || !template.devices.is_empty()))
     {
         return Err(AutoscalerError::InvalidConfiguration(
             "Docker template is missing hardened settings",
         ));
+    }
+    let mut networks = std::collections::BTreeSet::from([template.network.as_str()]);
+    for network in &template.additional_networks {
+        if network.is_empty()
+            || matches!(network.as_str(), "host" | "none")
+            || !networks.insert(network)
+        {
+            return Err(AutoscalerError::InvalidConfiguration(
+                "Docker template contains an unsafe network",
+            ));
+        }
+    }
+    if template
+        .working_directory
+        .as_ref()
+        .is_some_and(|directory| {
+            !directory.starts_with('/') || directory.split('/').any(|component| component == "..")
+        })
+    {
+        return Err(AutoscalerError::InvalidConfiguration(
+            "Docker template working directory is unsafe",
+        ));
+    }
+    for device in &template.devices {
+        if !device.path_on_host.starts_with("/dev/")
+            || !device.path_in_container.starts_with("/dev/")
+            || device.cgroup_permissions.is_empty()
+            || !device
+                .cgroup_permissions
+                .bytes()
+                .all(|permission| matches!(permission, b'r' | b'w' | b'm'))
+        {
+            return Err(AutoscalerError::InvalidConfiguration(
+                "Docker template contains an unsafe device",
+            ));
+        }
+    }
+    for directory in &template.state_directories {
+        if directory.as_os_str().is_empty()
+            || directory.is_absolute()
+            || directory
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(AutoscalerError::InvalidConfiguration(
+                "Docker template contains an unsafe state directory",
+            ));
+        }
     }
     let trust_root = normalized_absolute(trust_root)?;
     if trust_root == Path::new("/") {
@@ -657,7 +812,7 @@ fn validate_template(template: &DockerTemplate, trust_root: &Path) -> Result<(),
     for mount in &template.mounts {
         let source = normalized_absolute(&mount.source)?;
         if mount.kind != "bind"
-            || !mount.read_only
+            || (!mount.read_only && !template.privileged)
             || !source.starts_with(&trust_root)
             || mount
                 .source
@@ -668,6 +823,17 @@ fn validate_template(template: &DockerTemplate, trust_root: &Path) -> Result<(),
         {
             return Err(AutoscalerError::InvalidConfiguration(
                 "Docker template contains an unsafe mount",
+            ));
+        }
+        if !mount.read_only
+            && (source == trust_root
+                || matches!(
+                    mount.target.as_str(),
+                    "/run/runtrue-runner-ca.pem" | "/run/runtrue-runner-trust"
+                ))
+        {
+            return Err(AutoscalerError::InvalidConfiguration(
+                "Docker template contains an unsafe writable trust mount",
             ));
         }
         ca |= mount.target == "/run/runtrue-runner-ca.pem";
@@ -723,12 +889,27 @@ fn validate_request_id(value: &str) -> Result<(), AutoscalerError> {
 }
 
 fn require_private_directory(path: &Path, name: &'static str) -> Result<(), AutoscalerError> {
+    require_private_directory_owner(
+        path,
+        name,
+        nix::unistd::geteuid().as_raw(),
+        nix::unistd::getegid().as_raw(),
+    )
+}
+
+fn require_private_directory_owner(
+    path: &Path,
+    name: &'static str,
+    uid: u32,
+    gid: u32,
+) -> Result<(), AutoscalerError> {
     require_absolute(path, "autoscaler directories must be absolute")?;
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| AutoscalerError::file("inspect private directory", path, error))?;
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
-        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.uid() != uid
+        || metadata.gid() != gid
         || metadata.permissions().mode() & 0o077 != 0
     {
         return Err(AutoscalerError::Provider(format!(
@@ -820,7 +1001,18 @@ mod tests {
                 },
             ],
             network: "runtrue_control".into(),
+            additional_networks: Vec::new(),
             user: "10002:10002".into(),
+            runtime_uid: 10002,
+            runtime_gid: 10002,
+            state_mount_target: default_state_mount_target(),
+            working_directory: None,
+            privileged: false,
+            devices: Vec::new(),
+            read_only_rootfs: true,
+            cap_drop: default_cap_drop(),
+            security_opt: default_security_opt(),
+            state_directories: Vec::new(),
             memory_bytes: 1,
             nano_cpus: 1,
             pids_limit: 1,
@@ -829,6 +1021,27 @@ mod tests {
             tmpfs: BTreeMap::from([("/tmp".into(), "rw".into()), ("/run".into(), "rw".into())]),
         };
         validate_template(&template, root.path()).unwrap();
+        let writable = root.path().join("oci-store");
+        fs::create_dir(&writable).unwrap();
+        template.privileged = true;
+        template.cap_drop.clear();
+        template.security_opt = vec!["label=disable".into()];
+        template.additional_networks = vec!["runtrue_scm-egress".into()];
+        template.devices.push(DockerDevice {
+            path_on_host: "/dev/fuse".into(),
+            path_in_container: "/dev/fuse".into(),
+            cgroup_permissions: "rwm".into(),
+        });
+        template.mounts.push(DockerMount {
+            kind: "bind".into(),
+            source: writable,
+            target: "/var/lib/runtrue/oci-store".into(),
+            read_only: false,
+        });
+        validate_template(&template, root.path()).unwrap();
+        template.privileged = false;
+        assert!(validate_template(&template, root.path()).is_err());
+        template.privileged = true;
         template.mounts.push(DockerMount {
             kind: "bind".into(),
             source: PathBuf::from("/var/run/docker.sock"),
@@ -848,7 +1061,18 @@ mod tests {
             labels: BTreeMap::new(),
             mounts: Vec::new(),
             network: "control".into(),
+            additional_networks: Vec::new(),
             user: "10002:10002".into(),
+            runtime_uid: 10002,
+            runtime_gid: 10002,
+            state_mount_target: default_state_mount_target(),
+            working_directory: None,
+            privileged: false,
+            devices: Vec::new(),
+            read_only_rootfs: true,
+            cap_drop: default_cap_drop(),
+            security_opt: default_security_opt(),
+            state_directories: Vec::new(),
             memory_bytes: 2_000,
             nano_cpus: 2_000_000_000,
             pids_limit: 1,

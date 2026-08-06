@@ -1,0 +1,6 @@
+{
+  "backend": "postgres",
+  "sql": "CREATE TABLE repository_auto_approval_policies (repository_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, enabled BOOLEAN NOT NULL, updated_unix_ms BIGINT NOT NULL CHECK (updated_unix_ms >= 0), FOREIGN KEY (tenant_id, repository_id) REFERENCES repositories(tenant_id, id));",
+  "post_sql": "SELECT 1;",
+  "trust_sql": "SELECT 1;"
+}
