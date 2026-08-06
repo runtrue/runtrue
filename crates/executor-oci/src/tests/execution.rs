@@ -2,6 +2,9 @@ use super::*;
 #[test]
 fn run_command_has_mandatory_isolation_and_no_tag_or_socket_exposure() {
     let mut fixture = fixture_with(AdmissionMode::Exact);
+    let image_store = fixture._directory.path().join("images");
+    fs::create_dir(&image_store).unwrap();
+    fixture.executor.config.image_store = Some(image_store.clone());
     let mut request = command_request();
     request
         .environment
@@ -29,6 +32,17 @@ fn run_command_has_mandatory_isolation_and_no_tag_or_socket_exposure() {
         .arguments
         .iter()
         .any(|argument| argument.starts_with("--security-opt=seccomp=")));
+    assert!(run
+        .arguments
+        .iter()
+        .any(|argument| argument == &format!("--imagestore={}", image_store.display())));
+    assert!(run.arguments.iter().any(|argument| {
+        argument.starts_with("--root=") && !argument.contains(&image_store.display().to_string())
+    }));
+    assert!(!run
+        .arguments
+        .iter()
+        .any(|argument| argument.contains(".runtrue-runroot")));
     assert!(run.arguments.iter().any(|argument| argument == IMAGE));
     assert!(run
         .arguments

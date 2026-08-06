@@ -388,18 +388,26 @@ where
     }
 
     pub(crate) fn runtime_prefix(&self, state_path: &Path) -> Result<Vec<String>, OciError> {
-        let (root, runroot) = self.config.image_store.as_ref().map_or_else(
-            || (state_path.join("storage"), state_path.join("run")),
-            |store| (store.clone(), store.join(".runtrue-runroot")),
-        );
-        let prefix = vec![
-            format!("--root={}", utf8_path(&root, "runtime storage")?),
-            format!("--runroot={}", utf8_path(&runroot, "runtime runroot")?),
+        let mut prefix = vec![
+            format!(
+                "--root={}",
+                utf8_path(&state_path.join("storage"), "runtime storage")?
+            ),
+            format!(
+                "--runroot={}",
+                utf8_path(&state_path.join("run"), "runtime runroot")?
+            ),
             format!(
                 "--tmpdir={}",
                 utf8_path(&state_path.join("tmp"), "runtime tmpdir")?
             ),
         ];
+        if let Some(image_store) = &self.config.image_store {
+            prefix.push(format!(
+                "--imagestore={}",
+                utf8_path(image_store, "runtime image store")?
+            ));
+        }
         Ok(prefix)
     }
 }
