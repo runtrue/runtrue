@@ -128,24 +128,32 @@ pub(crate) fn recovery_runtime_prefix(
     job_state: &Path,
     image_store: Option<&Path>,
 ) -> Result<Vec<String>, OciError> {
-    let (root, runroot) = image_store.map_or_else(
-        || (job_state.join("storage"), job_state.join("run")),
-        |store| (store.to_path_buf(), store.join(".runtrue-runroot")),
-    );
-    let prefix = vec![
-        format!("--root={}", utf8_path(&root, "recovery storage")?),
-        format!("--runroot={}", utf8_path(&runroot, "recovery runroot")?),
+    let mut prefix = vec![
+        format!(
+            "--root={}",
+            utf8_path(&job_state.join("storage"), "recovery storage")?
+        ),
+        format!(
+            "--runroot={}",
+            utf8_path(&job_state.join("run"), "recovery runroot")?
+        ),
         format!(
             "--tmpdir={}",
             utf8_path(&job_state.join("tmp"), "recovery tmpdir")?
         ),
     ];
+    if let Some(image_store) = image_store {
+        prefix.push(format!(
+            "--imagestore={}",
+            utf8_path(image_store, "recovery image store")?
+        ));
+    }
     Ok(prefix)
 }
 
 /// Prove that every admitted digest-only image is already available in the
-/// configured private Podman graph store. Only the probe's tmp directory is
-/// lease-scoped; Podman requires one stable runroot for a graph store.
+/// configured private Podman image store. The probe owns its Podman graph and
+/// runtime state; the admitted image store is attached read-only by contract.
 pub fn verify_preloaded_images<R, I, S>(
     probe_state: &Path,
     config: &OciRecoveryConfig,
