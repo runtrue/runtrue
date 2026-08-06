@@ -28,18 +28,6 @@ jobs:
         ),
     )
     .unwrap();
-    fs::write(
-        directory.path().join(".runtrue.lock"),
-        format!(
-            r#"lock_version = 1
-[[image]]
-source = "{image}"
-resolved = "{image}"
-platform = "linux/amd64"
-"#
-        ),
-    )
-    .unwrap();
     let result = runtrue()
         .current_dir(directory.path())
         .args(["run", "build", "--workflow"])
@@ -49,7 +37,8 @@ platform = "linux/amd64"
         .unwrap();
     assert_eq!(result.status.code(), Some(10));
     assert!(!String::from_utf8_lossy(&result.stdout).contains("must-not-run"));
-    assert!(String::from_utf8_lossy(&result.stderr).contains("service containers"));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("service containers"), "{stderr}");
 }
 
 #[test]
