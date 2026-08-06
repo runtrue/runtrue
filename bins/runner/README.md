@@ -86,7 +86,8 @@ OCI is advertised only when all seven settings below are present and validate:
 - `--oci-podman`: absolute, real, non-group/world-writable Podman executable.
 - `--oci-seccomp-profile`: mode-`0600`, default-deny seccomp JSON.
 - `--oci-image-store`: mode-`0700`, prehydrated Podman `--imagestore` used with
-  `--pull=never`.
+  `--pull=never`; each job keeps its writable graph and runtime state in its
+  private lease directory.
 - `--oci-runtime-environment`: mode-`0600` JSON object. Only the OCI executor's
   narrow Podman allowlist (`HOME`, `PATH`, `XDG_RUNTIME_DIR`, `TMPDIR`, `LANG`,
   and `LC_ALL`) is accepted.
