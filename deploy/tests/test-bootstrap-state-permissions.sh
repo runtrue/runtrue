@@ -26,6 +26,8 @@ install -m 0400 -- /dev/null "${pack_directory}/pack-test.pack"
 cas_directory="${state}/server/blobs/cas/objects/sha256/aa"
 install -d -m 0700 -- "$cas_directory"
 install -m 0444 -- /dev/null "${cas_directory}/immutable-object"
+find "${state}/server/git-mirrors" "${state}/server/blobs" -type d \
+  -exec chmod 0700 -- {} +
 if ((EUID == 0)); then
   chown -R "${runtime_uid}:${runtime_gid}" -- \
     "${state}/server/git-mirrors" "${state}/server/blobs"
