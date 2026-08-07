@@ -63,6 +63,15 @@ fn services_start_before_the_job_on_an_internal_job_only_network() {
         .arguments
         .iter()
         .any(|argument| argument == "--userns=keep-id"));
+    assert_eq!(
+        service
+            .arguments
+            .iter()
+            .filter(|argument| argument.starts_with("--user="))
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["--user=0:0"]
+    );
     assert!(service
         .arguments
         .iter()

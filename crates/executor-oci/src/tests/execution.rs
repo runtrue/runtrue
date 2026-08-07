@@ -32,6 +32,14 @@ fn run_command_has_mandatory_isolation_and_no_tag_or_socket_exposure() {
         .arguments
         .iter()
         .any(|argument| argument == "--userns=keep-id"));
+    assert_eq!(
+        run.arguments
+            .iter()
+            .filter(|argument| argument.starts_with("--user="))
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["--user=0:0"]
+    );
     assert!(run
         .arguments
         .iter()

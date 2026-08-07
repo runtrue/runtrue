@@ -252,11 +252,11 @@ pub(crate) fn ensure_secure_runtime_arguments(
     if arguments
         .iter()
         .filter(|argument| argument.starts_with("--user="))
-        .count()
-        != 1
+        .map(String::as_str)
+        .ne(["--user=0:0"])
     {
         return Err(OciError::InvalidConfiguration(
-            "runtime must explicitly use the rootless runner uid and gid".to_owned(),
+            "runtime must explicitly use root mapped to the unprivileged outer runner".to_owned(),
         ));
     }
     let expected_network = network.map_or_else(
@@ -335,11 +335,12 @@ pub(crate) fn ensure_secure_service_arguments(
     if arguments
         .iter()
         .filter(|argument| argument.starts_with("--user="))
-        .count()
-        != 1
+        .map(String::as_str)
+        .ne(["--user=0:0"])
     {
         return Err(OciError::InvalidConfiguration(
-            "service runtime must explicitly use the rootless runner uid and gid".to_owned(),
+            "service runtime must explicitly use root mapped to the unprivileged outer runner"
+                .to_owned(),
         ));
     }
     let network_argument = format!("--network={network}");

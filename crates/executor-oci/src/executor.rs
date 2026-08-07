@@ -830,14 +830,11 @@ where
             container_name.to_owned(),
             "--rm".to_owned(),
             "--pull=never".to_owned(),
-            // The runner already executes Podman as the fixed unprivileged runtime UID.
-            // keep-id would force a chowned layer copy out of the admitted image store.
+            // Root in this rootless Podman namespace maps to the fixed, unprivileged
+            // outer runner UID. This preserves access to private workspace runtime
+            // files without forcing a chowned image-layer copy through keep-id.
             "--userns=host".to_owned(),
-            format!(
-                "--user={}:{}",
-                nix::unistd::geteuid(),
-                nix::unistd::getegid()
-            ),
+            "--user=0:0".to_owned(),
             "--read-only".to_owned(),
             "--security-opt=no-new-privileges".to_owned(),
             format!(
