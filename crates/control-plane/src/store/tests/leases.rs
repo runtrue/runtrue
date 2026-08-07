@@ -152,7 +152,7 @@ fn expired_lease_evidence_blocks_replay_after_a_clean_completion() {
 }
 
 #[test]
-fn runner_logs_are_visible_only_after_an_explicit_clean_completion() {
+fn runner_logs_require_clean_completion_or_explicit_operator_opt_in() {
     let control = ControlPlane::open_in_memory("lease-log-taint", NOW).unwrap();
     bootstrap(&control);
     add_runner(&control);
@@ -163,6 +163,11 @@ fn runner_logs_are_visible_only_after_an_explicit_clean_completion() {
             "tainted",
             CredentialTaintState::CredentialReleased,
             NOW + 100,
+        ),
+        (
+            "tainted-opt-in",
+            CredentialTaintState::CredentialReleased,
+            NOW + 200,
         ),
     ] {
         let run_id = format!("run-log-{suffix}");
@@ -196,7 +201,11 @@ fn runner_logs_are_visible_only_after_an_explicit_clean_completion() {
             monotonic_nanoseconds: 1,
             wall_time_unix_ms: at + 3,
             payload: format!("{suffix} output").into_bytes(),
-            redaction_state: "redacted".to_owned(),
+            redaction_state: if suffix == "tainted-opt-in" {
+                "credential_taint_unredacted_operator_opt_in".to_owned()
+            } else {
+                "redacted".to_owned()
+            },
         };
         control
             .append_runner_logs(
@@ -230,7 +239,7 @@ fn runner_logs_are_visible_only_after_an_explicit_clean_completion() {
             )
             .unwrap();
 
-        if taint == CredentialTaintState::None {
+        if taint == CredentialTaintState::None || suffix == "tainted-opt-in" {
             assert_eq!(control.runner_logs_for_run(&run_id, 10).unwrap(), [frame]);
         } else {
             assert!(control.runner_logs_for_run(&run_id, 10).unwrap().is_empty());

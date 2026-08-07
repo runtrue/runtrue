@@ -3451,10 +3451,14 @@ impl RunnerLeaseBrokerStore for PostgresInstallationStore {
                 .await?;
             revoke_postgres_brokers(&mut tx, &lease, completed_unix_ms, "revoked").await?;
             if !effective_taint.permits_replay_or_checkpoint() {
-                sqlx::query("DELETE FROM runner_log_frames WHERE execution_lease_id=$1")
-                    .bind(lease_id)
-                    .execute(&mut *tx)
-                    .await?;
+                sqlx::query(
+                    "DELETE FROM runner_log_frames
+                     WHERE execution_lease_id=$1
+                       AND redaction_state <> 'credential_taint_unredacted_operator_opt_in'",
+                )
+                .bind(lease_id)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query("DELETE FROM job_result_objects WHERE job_id=$1")
                     .bind(&lease.job_id)
                     .execute(&mut *tx)
@@ -3660,7 +3664,8 @@ impl RunnerLeaseBrokerStore for PostgresInstallationStore {
                  JOIN leases l ON l.id=f.execution_lease_id
                  JOIN jobs j ON j.id=l.job_id
                  WHERE j.run_id=$1 AND l.state='completed'
-                   AND l.terminal_credential_taint='none'
+                   AND (l.terminal_credential_taint='none'
+                        OR f.redaction_state='credential_taint_unredacted_operator_opt_in')
                  ORDER BY f.wall_time_unix_ms,f.execution_lease_id,f.job_attempt,
                           f.step_id,f.stream,f.sequence LIMIT $2",
             )

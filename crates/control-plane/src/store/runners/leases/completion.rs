@@ -289,7 +289,9 @@ impl ControlPlane {
             )?;
             if !effective.permits_replay_or_checkpoint() {
                 transaction.execute(
-                    "DELETE FROM runner_log_frames WHERE execution_lease_id = ?1",
+                    "DELETE FROM runner_log_frames
+                     WHERE execution_lease_id = ?1
+                       AND redaction_state <> 'credential_taint_unredacted_operator_opt_in'",
                     [lease_id],
                 )?;
                 transaction.execute(

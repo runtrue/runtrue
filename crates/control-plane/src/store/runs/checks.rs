@@ -110,7 +110,8 @@ pub(in crate::store) fn enqueue_terminal_scm_check_tx(
              JOIN jobs j ON j.id = l.job_id
              WHERE j.id = ?1
                AND l.state = 'completed'
-               AND l.terminal_credential_taint = 'none'
+               AND (l.terminal_credential_taint = 'none'
+                    OR f.redaction_state = 'credential_taint_unredacted_operator_opt_in')
              ORDER BY f.wall_time_unix_ms DESC, f.execution_lease_id DESC,
                       f.job_attempt DESC, f.step_id DESC, f.stream DESC, f.sequence DESC
              LIMIT ?2",
