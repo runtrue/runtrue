@@ -191,6 +191,14 @@ pub(super) fn execution_from_engine(
     lease: &AdmittedLease,
     result: ExecutionResult,
 ) -> Result<JobExecution, RunnerError> {
+    execution_from_engine_with_log_policy(lease, result, false)
+}
+
+pub(super) fn execution_from_engine_with_log_policy(
+    lease: &AdmittedLease,
+    result: ExecutionResult,
+    publish_credential_tainted_logs: bool,
+) -> Result<JobExecution, RunnerError> {
     let credential_taint = result.credential_taint();
     let result_bytes = serde_json::to_vec(&result).map_err(RunnerError::ResultEncoding)?;
     if result_bytes.len() > MAX_RESULT_BYTES {
@@ -220,7 +228,7 @@ pub(super) fn execution_from_engine(
         .and_then(|attempt| attempt.steps.last())
         .and_then(|step| step.output.as_ref())
         .and_then(|output| output.exit_code);
-    let log_frames = bounded_log_frames(lease, &result)?;
+    let log_frames = bounded_log_frames(lease, &result, publish_credential_tainted_logs)?;
     Ok(JobExecution {
         final_state: final_state.to_owned(),
         exit_code,
@@ -237,8 +245,9 @@ pub(super) fn execution_from_engine(
 pub(super) fn bounded_log_frames(
     lease: &AdmittedLease,
     result: &ExecutionResult,
+    publish_credential_tainted_logs: bool,
 ) -> Result<Vec<v1::LogFrame>, RunnerError> {
-    if result.credential_taint().is_tainted() {
+    if result.credential_taint().is_tainted() && !publish_credential_tainted_logs {
         // Workspace state can carry a transformed credential into later
         // steps, whose individual executor output would otherwise look
         // untainted. Suppress the complete execution log stream once any
@@ -277,10 +286,11 @@ pub(super) fn bounded_log_frames(
                             .saturating_mul(1_000_000),
                         wall_time: Some(timestamp(now_unix_ms()?)),
                         payload: chunk.to_vec(),
-                        // A declaration alone says nothing about whether a
-                        // credential was released. Tainted frames are omitted
-                        // above; these bytes came from an untainted step.
-                        redaction_state: "credential_taint_absent".to_owned(),
+                        redaction_state: if result.credential_taint().is_tainted() {
+                            "credential_taint_unredacted_operator_opt_in".to_owned()
+                        } else {
+                            "credential_taint_absent".to_owned()
+                        },
                         job_attempt: attempt.number,
                     });
                     *sequence = sequence

@@ -227,7 +227,7 @@ fn credential_tainted_logs_are_not_published_and_untainted_logs_make_no_redactio
         credential_taint: CredentialTaint::None,
     };
 
-    let frames = crate::daemon::executor::bounded_log_frames(&lease, &result).unwrap();
+    let frames = crate::daemon::executor::bounded_log_frames(&lease, &result, false).unwrap();
     assert_eq!(frames.len(), 1);
     assert!(frames.iter().all(|frame| frame.step_id == "clean"));
     assert!(frames
@@ -241,7 +241,15 @@ fn credential_tainted_logs_are_not_published_and_untainted_logs_make_no_redactio
         "dmFsdWU= val|ue",
         CredentialTaint::CredentialReleased,
     ));
-    assert!(crate::daemon::executor::bounded_log_frames(&lease, &result)
-        .unwrap()
-        .is_empty());
+    assert!(
+        crate::daemon::executor::bounded_log_frames(&lease, &result, false)
+            .unwrap()
+            .is_empty()
+    );
+
+    let frames = crate::daemon::executor::bounded_log_frames(&lease, &result, true).unwrap();
+    assert_eq!(frames.len(), 2);
+    assert!(frames
+        .iter()
+        .all(|frame| { frame.redaction_state == "credential_taint_unredacted_operator_opt_in" }));
 }

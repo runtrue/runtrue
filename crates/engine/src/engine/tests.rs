@@ -462,6 +462,35 @@ fn credential_taint_is_propagated_and_guest_publication_is_suppressed() {
 }
 
 #[test]
+fn operator_log_policy_retains_output_while_propagating_credential_taint() {
+    let mut output = ExecutorOutput::success();
+    output.stdout = "diagnostic stdout".to_owned();
+    output.stderr = "diagnostic stderr".to_owned();
+    let mut engine = Engine::new(ScriptedExecutor::with_outputs([output]));
+    let mut result = engine
+        .execute(&capsule(vec![job("job", vec![command_step("step")])]))
+        .unwrap();
+
+    result
+        .apply_credential_taint_with_publication(crate::CredentialTaint::CredentialReleased, true);
+
+    assert_eq!(
+        result.credential_taint(),
+        crate::CredentialTaint::CredentialReleased
+    );
+    let output = result.jobs["job"].attempts[0].steps[0]
+        .output
+        .as_ref()
+        .unwrap();
+    assert_eq!(output.stdout, "diagnostic stdout");
+    assert_eq!(output.stderr, "diagnostic stderr");
+    assert_eq!(
+        output.credential_taint,
+        crate::CredentialTaint::CredentialReleased
+    );
+}
+
+#[test]
 fn finalization_failure_is_fatal_and_prevents_retry_or_success() {
     let mut executor =
         ScriptedExecutor::with_outputs([ExecutorOutput::success(), ExecutorOutput::success()]);
