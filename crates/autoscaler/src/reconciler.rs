@@ -66,6 +66,8 @@ where
             return Ok(());
         }
         self.reconcile_stale_bootstraps(&lease, &view).await?;
+        self.reconcile_stale_offline_instances(&lease, &view)
+            .await?;
         for request in &view.requests {
             if matches!(
                 request.state.as_str(),
@@ -324,6 +326,74 @@ where
                 .await
                 .map_err(|error| {
                     reconcile(&format!("finish stale bootstrap {}", request.id), error)
+                })?;
+            self.provider.cleanup_claim(request).await?;
+        }
+        Ok(())
+    }
+
+    async fn reconcile_stale_offline_instances(
+        &self,
+        lease: &OwnershipLease,
+        view: &FleetView,
+    ) -> Result<(), AutoscalerError> {
+        for request in &view.requests {
+            if request.state != "online"
+                || request.runner_status != "offline"
+                || request.runner_active_jobs != 0
+                || request.runner_last_heartbeat_unix_ms == 0
+                || request.provider_instance_id.is_empty()
+                || view.observed_unix_ms
+                    < request
+                        .runner_last_heartbeat_unix_ms
+                        .saturating_add(view.policy.offline_grace_ms)
+            {
+                continue;
+            }
+            let quarantined = self
+                .control_plane
+                .transition(
+                    request,
+                    "quarantined",
+                    lease.fencing_generation,
+                    "offline_timeout",
+                )
+                .await
+                .map_err(|error| {
+                    reconcile(
+                        &format!("quarantine stale offline instance {}", request.id),
+                        error,
+                    )
+                })?;
+            let terminating = self
+                .control_plane
+                .transition(&quarantined, "terminating", lease.fencing_generation, "")
+                .await
+                .map_err(|error| {
+                    reconcile(
+                        &format!("terminate stale offline instance {}", request.id),
+                        error,
+                    )
+                })?;
+            let instance = ProviderInstance {
+                id: request.provider_instance_id.clone(),
+                fleet_request_id: request.id.clone(),
+                ..ProviderInstance::default()
+            };
+            if let Err(error) = self.provider.destroy(&instance).await {
+                return Err(reconcile(
+                    &format!("destroy stale offline instance {}", request.id),
+                    error,
+                ));
+            }
+            self.control_plane
+                .transition(&terminating, "terminated", lease.fencing_generation, "")
+                .await
+                .map_err(|error| {
+                    reconcile(
+                        &format!("finish stale offline instance {}", request.id),
+                        error,
+                    )
                 })?;
             self.provider.cleanup_claim(request).await?;
         }
@@ -1126,6 +1196,54 @@ mod tests {
         control.view.lock().unwrap().requests[0].updated_unix_ms = 60_000;
         reconciler.reconcile().await.unwrap();
         assert_eq!(control.created.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn offline_instance_past_grace_is_destroyed_and_terminated() {
+        let control = FakeControl {
+            view: Mutex::new(FleetView {
+                observed_unix_ms: 100_000,
+                policy: ScalingPolicy {
+                    enabled: true,
+                    maximum_workers: 1,
+                    scale_up_batch: 1,
+                    offline_grace_ms: 10_000,
+                    ..ScalingPolicy::default()
+                },
+                requests: vec![FleetRequest {
+                    id: "stopped".into(),
+                    pool_id: "pool".into(),
+                    state: "online".into(),
+                    runner_id: "runner".into(),
+                    runner_status: "offline".into(),
+                    runner_last_heartbeat_unix_ms: 80_000,
+                    provider_instance_id: "instance".into(),
+                    ..FleetRequest::default()
+                }],
+                ..FleetView::default()
+            }),
+            ..FakeControl::default()
+        };
+        let provider = FakeProvider::default();
+        Reconciler::with_clock(
+            &control,
+            &provider,
+            "pool".into(),
+            "owner".into(),
+            FixedClock(100_000),
+        )
+        .reconcile()
+        .await
+        .unwrap();
+        assert_eq!(provider.destroyed.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            control.transitions.lock().unwrap().as_slice(),
+            [
+                "online->quarantined",
+                "quarantined->terminating",
+                "terminating->terminated"
+            ]
+        );
     }
 
     #[tokio::test]
