@@ -279,13 +279,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
 
-    let mode = match config.command {
-        Command::Once => RunMode::Once,
-        Command::Daemon => RunMode::Daemon,
-        Command::EnrollIfNeeded => RunMode::Daemon,
-        Command::Enroll => unreachable!("enroll returned above"),
-        Command::Doctor => unreachable!("doctor returned above"),
-    };
+    let mode = run_mode(config.command, config.ephemeral);
     loop {
         let (
             active_runner_id,
@@ -367,5 +361,31 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             Err(RunnerError::CertificateRotated) => continue,
             result => return result.map_err(Into::into),
         }
+    }
+}
+
+fn run_mode(command: Command, ephemeral: bool) -> RunMode {
+    match command {
+        Command::Once => RunMode::Once,
+        Command::Daemon => RunMode::Daemon,
+        Command::EnrollIfNeeded if ephemeral => RunMode::Once,
+        Command::EnrollIfNeeded => RunMode::Daemon,
+        Command::Enroll => unreachable!("enroll returned above"),
+        Command::Doctor => unreachable!("doctor returned above"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ephemeral_automatic_enrollment_runs_exactly_one_lease() {
+        assert_eq!(run_mode(Command::EnrollIfNeeded, true), RunMode::Once);
+    }
+
+    #[test]
+    fn reusable_automatic_enrollment_remains_a_daemon() {
+        assert_eq!(run_mode(Command::EnrollIfNeeded, false), RunMode::Daemon);
     }
 }
