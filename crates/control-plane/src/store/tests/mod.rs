@@ -409,6 +409,65 @@ fn pending_approval(
     .unwrap()
 }
 
+#[test]
+fn durable_tasks_can_be_bounded_by_kind_and_exact_creation_time() {
+    let control = ControlPlane::open_in_memory("task-batch", NOW).unwrap();
+    for (id, kind, created) in [
+        ("batch-b", "scm.event", NOW),
+        ("batch-a", "scm.event", NOW),
+        ("other-kind", "runner.cleanup", NOW),
+        ("other-time", "scm.event", NOW + 1),
+    ] {
+        control
+            .enqueue_task(&DurableTask {
+                id: id.to_owned(),
+                kind: kind.to_owned(),
+                payload: json!({"id": id}),
+                status: DurableTaskStatus::Pending,
+                available_unix_ms: created,
+                attempts: 0,
+                lease_owner: None,
+                lease_expires_unix_ms: None,
+                last_error: None,
+                created_unix_ms: created,
+                completed_unix_ms: None,
+            })
+            .unwrap();
+    }
+
+    let tasks = control
+        .tasks_by_kind_and_creation("scm.event", NOW, 2)
+        .unwrap();
+    assert_eq!(
+        tasks
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        ["batch-a", "batch-b"]
+    );
+    assert!(matches!(
+        control.tasks_by_kind_and_creation("scm.event", NOW, 0),
+        Err(ControlPlaneError::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn scm_task_completion_can_be_observed_after_durable_completion() {
+    let fixture = pending_scm_fixture();
+    let completion = fixture
+        .control
+        .scm_task_completion("scm-origin")
+        .unwrap()
+        .unwrap();
+    assert!(completion.run_ids.is_empty());
+    assert_eq!(completion.pending_execution_ids, ["scm-pending"]);
+    assert!(fixture
+        .control
+        .scm_task_completion("missing-task")
+        .unwrap()
+        .is_none());
+}
+
 fn approve(control: &ControlPlane, id: &str, subject: &ContentDigest, at: u64) {
     control
         .decide_approval(

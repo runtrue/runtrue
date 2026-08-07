@@ -11,11 +11,29 @@ use super::super::{
     ControlPlaneError, CreateRunRequest, ExecutionCapsule, IdempotentResult,
     PendingApprovalResolution, PreparedScmExecution, ScmContinuationCommit, ScmContinuationContext,
     ScmContinuationResolution, ScmPendingExecution, ScmPendingExecutionState,
-    ScmProposedAnalysisRecord, SignedCapsuleRecord, TransactionBehavior,
+    ScmProposedAnalysisRecord, ScmTaskCompletion, SignedCapsuleRecord, TransactionBehavior,
 };
 use rusqlite::OptionalExtension as _;
 
 impl ControlPlane {
+    pub fn scm_task_completion(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<ScmTaskCompletion>, ControlPlaneError> {
+        validate_text("SCM task id", task_id)?;
+        let connection = self.connection()?;
+        let encoded = connection
+            .query_row(
+                "SELECT result_json FROM scm_task_results WHERE task_id = ?1",
+                [task_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        encoded
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
+            .transpose()
+    }
+
     pub fn scm_pending_execution(
         &self,
         id: &str,
