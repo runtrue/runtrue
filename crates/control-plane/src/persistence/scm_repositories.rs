@@ -305,6 +305,10 @@ pub trait ScmRepositoryStore: Send + Sync {
         analysis: Option<&'a ScmProposedAnalysisRecord>,
         verifying_key: &'a runtrue_attest::CapsuleVerifyingKey,
     ) -> StoreFuture<'a, IdempotentResult<ScmTaskCompletion>>;
+    fn scm_task_completion<'a>(
+        &'a self,
+        task_id: &'a str,
+    ) -> StoreFuture<'a, Option<ScmTaskCompletion>>;
     fn scm_pending_execution<'a>(&'a self, id: &'a str) -> StoreFuture<'a, ScmPendingExecution>;
     fn scm_proposed_analysis_for_task<'a>(
         &'a self,
@@ -1787,6 +1791,13 @@ impl ScmRepositoryStore for ControlPlane {
     ) -> StoreFuture<'a, IdempotentResult<ScmTaskCompletion>> {
         let x =
             ControlPlane::complete_scm_task_with_executions_idempotent(self, t, w, n, k, e, a, v);
+        Box::pin(async move { x })
+    }
+    fn scm_task_completion<'a>(
+        &'a self,
+        task_id: &'a str,
+    ) -> StoreFuture<'a, Option<ScmTaskCompletion>> {
+        let x = ControlPlane::scm_task_completion(self, task_id);
         Box::pin(async move { x })
     }
     fn scm_pending_execution<'a>(&'a self, id: &'a str) -> StoreFuture<'a, ScmPendingExecution> {
@@ -3936,6 +3947,23 @@ impl ScmRepositoryStore for PostgresInstallationStore {
         v: &'a runtrue_attest::CapsuleVerifyingKey,
     ) -> StoreFuture<'a, IdempotentResult<ScmTaskCompletion>> {
         Box::pin(async move { complete_scm_executions_pg(self, t, w, n, k, e, a, v).await })
+    }
+    fn scm_task_completion<'a>(
+        &'a self,
+        task_id: &'a str,
+    ) -> StoreFuture<'a, Option<ScmTaskCompletion>> {
+        Box::pin(async move {
+            validate_text("SCM task id", task_id)?;
+            let result = sqlx::query_scalar::<_, Vec<u8>>(
+                "SELECT result_json FROM scm_task_results WHERE task_id=$1",
+            )
+            .bind(task_id)
+            .fetch_optional(self.pool())
+            .await?;
+            result
+                .map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
+                .transpose()
+        })
     }
     fn scm_pending_execution<'a>(&'a self, id: &'a str) -> StoreFuture<'a, ScmPendingExecution> {
         Box::pin(async move {

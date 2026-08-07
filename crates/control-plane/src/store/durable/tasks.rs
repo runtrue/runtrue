@@ -407,4 +407,36 @@ impl ControlPlane {
         let connection = self.connection()?;
         task_conn(&connection, id)
     }
+
+    pub fn tasks_by_kind_and_creation(
+        &self,
+        kind: &str,
+        created_unix_ms: u64,
+        limit: usize,
+    ) -> Result<Vec<DurableTask>, ControlPlaneError> {
+        validate_text("task.kind", kind)?;
+        if limit == 0 || limit > 256 {
+            return Err(ControlPlaneError::InvalidInput(
+                "durable task batch limit must be between 1 and 256",
+            ));
+        }
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, kind, payload_json, status, available_unix_ms, attempts,
+                    lease_owner, lease_expires_unix_ms, last_error, created_unix_ms,
+                    completed_unix_ms FROM durable_tasks
+             WHERE kind = ?1 AND created_unix_ms = ?2 ORDER BY id LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![
+                kind,
+                to_i64(created_unix_ms)?,
+                i64::try_from(limit).map_err(|_| ControlPlaneError::IntegerRange {
+                    field: "durable task batch limit",
+                })?
+            ],
+            task_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }

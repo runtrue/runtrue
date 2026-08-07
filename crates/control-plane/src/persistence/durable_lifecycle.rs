@@ -62,6 +62,12 @@ pub trait DurableTaskStore: Send + Sync {
         recoverable_until_unix_ms: Option<u64>,
     ) -> StoreFuture<'a, DurableTask>;
     fn task<'a>(&'a self, id: &'a str) -> StoreFuture<'a, DurableTask>;
+    fn tasks_by_kind_and_creation<'a>(
+        &'a self,
+        kind: &'a str,
+        created_unix_ms: u64,
+        limit: usize,
+    ) -> StoreFuture<'a, Vec<DurableTask>>;
 }
 
 pub trait LifecycleGcStore: Send + Sync {
@@ -184,6 +190,15 @@ impl DurableTaskStore for ControlPlane {
     }
     fn task<'a>(&'a self, id: &'a str) -> StoreFuture<'a, DurableTask> {
         let r = ControlPlane::task(self, id);
+        Box::pin(async move { r })
+    }
+    fn tasks_by_kind_and_creation<'a>(
+        &'a self,
+        kind: &'a str,
+        created_unix_ms: u64,
+        limit: usize,
+    ) -> StoreFuture<'a, Vec<DurableTask>> {
+        let r = ControlPlane::tasks_by_kind_and_creation(self, kind, created_unix_ms, limit);
         Box::pin(async move { r })
     }
 }
@@ -471,6 +486,28 @@ impl DurableTaskStore for PostgresInstallationStore {
                 .ok_or_else(|| not_found("task", id))?;
             tx.commit().await?;
             Ok(task)
+        })
+    }
+    fn tasks_by_kind_and_creation<'a>(
+        &'a self,
+        kind: &'a str,
+        created_unix_ms: u64,
+        limit: usize,
+    ) -> StoreFuture<'a, Vec<DurableTask>> {
+        Box::pin(async move {
+            validate_text("task.kind", kind)?;
+            if limit == 0 || limit > 256 {
+                return Err(ControlPlaneError::InvalidInput(
+                    "durable task batch limit must be between 1 and 256",
+                ));
+            }
+            let rows = sqlx::query("SELECT id,kind,payload_json,status,available_unix_ms,attempts,lease_owner,lease_expires_unix_ms,last_error,created_unix_ms,completed_unix_ms FROM durable_tasks WHERE kind=$1 AND created_unix_ms=$2 ORDER BY id LIMIT $3")
+                .bind(kind)
+                .bind(postgres_i64(created_unix_ms, "task creation")?)
+                .bind(i64::try_from(limit).map_err(|_| ControlPlaneError::IntegerRange { field: "durable task batch limit" })?)
+                .fetch_all(self.pool())
+                .await?;
+            rows.into_iter().map(task_row).collect()
         })
     }
 }
