@@ -593,6 +593,17 @@ impl ControlPlane {
             transaction.commit()?;
             return Ok(None);
         }
+        if runner.ephemeral {
+            let already_used: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM leases WHERE runner_id = ?1)",
+                [runner_id],
+                |row| row.get(0),
+            )?;
+            if already_used {
+                transaction.commit()?;
+                return Ok(None);
+            }
+        }
         let (bound_pool_id, _) = authoritative_runner_binding_tx(&transaction, runner_id)?;
         if bound_pool_id != runner.pool_id {
             return Err(ControlPlaneError::RunnerInventoryMismatch);
