@@ -175,7 +175,9 @@ where
             "--name".to_owned(),
             container.to_owned(),
             "--pull=never".to_owned(),
-            "--userns=keep-id".to_owned(),
+            // The runner already executes Podman as the fixed unprivileged runtime UID.
+            // keep-id would force a chowned layer copy out of the admitted image store.
+            "--userns=host".to_owned(),
             format!(
                 "--user={}:{}",
                 nix::unistd::geteuid(),

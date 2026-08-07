@@ -17,7 +17,7 @@ fn run_command_has_mandatory_isolation_and_no_tag_or_socket_exposure() {
     assert_eq!(run.kind, RuntimeInvocationKind::Run);
     for required in [
         "--pull=never",
-        "--userns=keep-id",
+        "--userns=host",
         "--read-only",
         "--security-opt=no-new-privileges",
         "--cap-drop=ALL",
@@ -28,6 +28,10 @@ fn run_command_has_mandatory_isolation_and_no_tag_or_socket_exposure() {
     ] {
         assert!(run.arguments.iter().any(|argument| argument == required));
     }
+    assert!(!run
+        .arguments
+        .iter()
+        .any(|argument| argument == "--userns=keep-id"));
     assert!(run
         .arguments
         .iter()

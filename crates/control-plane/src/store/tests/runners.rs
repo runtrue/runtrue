@@ -375,6 +375,58 @@ fn offline_ephemeral_runner_with_lease_history_is_retired_from_fleet() {
 }
 
 #[test]
+fn ephemeral_runner_never_receives_a_second_lease() {
+    let control = ControlPlane::open_in_memory("ephemeral-single-use", NOW).unwrap();
+    bootstrap(&control);
+    add_runner(&control);
+    let mut disposable = control.runner("runner-1").unwrap().runner;
+    disposable.ephemeral = true;
+    control.update_runner(&disposable, NOW + 1).unwrap();
+    control
+        .create_run_idempotent(
+            "ephemeral-first-run-key",
+            &run_request("run-ephemeral-first", "job-ephemeral-first"),
+        )
+        .unwrap();
+    control
+        .create_run_idempotent(
+            "ephemeral-second-run-key",
+            &run_request("run-ephemeral-second", "job-ephemeral-second"),
+        )
+        .unwrap();
+
+    let offered = control
+        .offer_next_lease_for_runner("runner-1", NOW + 2)
+        .unwrap()
+        .unwrap();
+    let repeated = control
+        .offer_next_lease_for_runner("runner-1", NOW + 3)
+        .unwrap()
+        .unwrap();
+    assert_eq!(repeated.id, offered.id);
+    control
+        .accept_lease(
+            &offered.id,
+            "runner-1",
+            offered.fencing_generation,
+            offered.installation_fencing_epoch,
+            NOW + 4,
+        )
+        .unwrap();
+
+    assert!(control
+        .offer_next_lease_for_runner("runner-1", NOW + 5)
+        .unwrap()
+        .is_none());
+    let queued = ["run-ephemeral-first", "run-ephemeral-second"]
+        .into_iter()
+        .flat_map(|run_id| control.jobs_for_run(run_id).unwrap())
+        .filter(|job| job.status == JobState::Queued)
+        .count();
+    assert_eq!(queued, 1);
+}
+
+#[test]
 fn offline_ephemeral_runner_with_fleet_history_is_retired_from_fleet() {
     let control = ControlPlane::open_in_memory("ephemeral-runner-fleet-history", NOW).unwrap();
     add_runner_pool_only(&control);

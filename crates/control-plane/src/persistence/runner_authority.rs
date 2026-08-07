@@ -2949,6 +2949,17 @@ impl RunnerLeaseBrokerStore for PostgresInstallationStore {
             {
                 return Err(ControlPlaneError::RunnerInventoryMismatch);
             }
+            if runner.ephemeral {
+                let already_used: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM leases WHERE runner_id=$1)")
+                        .bind(runner_id)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                if already_used {
+                    tx.commit().await?;
+                    return Ok(None);
+                }
+            }
             let posture_exists: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM runner_enrollment_postures WHERE runner_id=$1)",
             )

@@ -49,7 +49,7 @@ fn services_start_before_the_job_on_an_internal_job_only_network() {
     }
     for required in [
         "--pull=never",
-        "--userns=keep-id",
+        "--userns=host",
         "--read-only",
         "--security-opt=no-new-privileges",
         "--cap-drop=ALL",
@@ -59,6 +59,10 @@ fn services_start_before_the_job_on_an_internal_job_only_network() {
             .iter()
             .any(|argument| argument == required));
     }
+    assert!(!service
+        .arguments
+        .iter()
+        .any(|argument| argument == "--userns=keep-id"));
     assert!(service
         .arguments
         .iter()

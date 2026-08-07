@@ -235,7 +235,7 @@ pub(crate) fn ensure_secure_runtime_arguments(
 ) -> Result<(), OciError> {
     for required in [
         "--pull=never",
-        "--userns=keep-id",
+        "--userns=host",
         "--read-only",
         "--security-opt=no-new-privileges",
         "--cap-drop=ALL",
@@ -318,7 +318,7 @@ pub(crate) fn ensure_secure_service_arguments(
     for required in [
         "--detach",
         "--pull=never",
-        "--userns=keep-id",
+        "--userns=host",
         "--read-only",
         "--security-opt=no-new-privileges",
         "--cap-drop=ALL",
