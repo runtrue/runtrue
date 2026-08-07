@@ -32,6 +32,7 @@ pub(super) struct Config {
     pub(super) workspace_directory: PathBuf,
     pub(super) capsule_keyring: PathBuf,
     pub(super) trusted_native: bool,
+    pub(super) allow_credential_tainted_logs: bool,
     pub(super) oci: Option<OciRuntimePaths>,
     pub(super) wasm: Option<WasmRuntimePaths>,
     pub(super) wasm_max_concurrent_jobs: u32,
@@ -111,6 +112,8 @@ impl Config {
             || environment_flag("RUNTRUE_RUNNER_INSECURE_LOOPBACK")?.unwrap_or(false);
         let trusted_native = args.trusted_native
             || environment_flag("RUNTRUE_RUNNER_TRUSTED_NATIVE")?.unwrap_or(false);
+        let allow_credential_tainted_logs = args.allow_credential_tainted_logs
+            || environment_flag("RUNTRUE_RUNNER_ALLOW_CREDENTIAL_TAINTED_LOGS")?.unwrap_or(false);
         let oci = complete_oci_configuration([
             configured_path(
                 args.oci_state_directory,
@@ -226,6 +229,7 @@ impl Config {
             workspace_directory,
             capsule_keyring,
             trusted_native,
+            allow_credential_tainted_logs,
             oci,
             wasm,
             wasm_max_concurrent_jobs,

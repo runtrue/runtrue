@@ -355,7 +355,8 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                 oci.clone(),
                 wasm.clone(),
                 firecracker.clone(),
-            ),
+            )
+            .with_credential_tainted_logs(config.allow_credential_tainted_logs),
             daemon_config,
             state,
             workspaces,

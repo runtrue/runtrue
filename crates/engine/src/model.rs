@@ -69,6 +69,16 @@ impl ExecutionResult {
     /// Apply a monotonic workspace-level taint discovered outside an executor
     /// output, such as an OCI credential file injected by the runner.
     pub fn apply_credential_taint(&mut self, taint: CredentialTaint) {
+        self.apply_credential_taint_with_publication(taint, false);
+    }
+
+    /// Apply credential taint while optionally retaining guest output for an
+    /// operator-selected, explicitly insecure diagnostic policy.
+    pub fn apply_credential_taint_with_publication(
+        &mut self,
+        taint: CredentialTaint,
+        publish_tainted_output: bool,
+    ) {
         self.credential_taint = self.credential_taint.merge(taint);
         if !self.credential_taint.is_tainted() {
             return;
@@ -82,7 +92,9 @@ impl ExecutionResult {
                     if let Some(output) = &mut step.output {
                         output.credential_taint =
                             output.credential_taint.merge(self.credential_taint);
-                        output.suppress_tainted_publication();
+                        if !publish_tainted_output {
+                            output.suppress_tainted_publication();
+                        }
                     }
                 }
             }

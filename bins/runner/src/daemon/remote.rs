@@ -22,6 +22,7 @@ pub struct RemoteJobExecutor {
     oci: Option<OciJobExecutor>,
     wasm: Option<WasmJobExecutor>,
     firecracker: Option<FirecrackerJobExecutor>,
+    publish_credential_tainted_logs: bool,
 }
 
 impl RemoteJobExecutor {
@@ -51,7 +52,14 @@ impl RemoteJobExecutor {
             oci,
             wasm,
             firecracker,
+            publish_credential_tainted_logs: false,
         }
+    }
+
+    #[must_use]
+    pub const fn with_credential_tainted_logs(mut self, enabled: bool) -> Self {
+        self.publish_credential_tainted_logs = enabled;
+        self
     }
 }
 
@@ -164,8 +172,15 @@ impl JobExecutor for RemoteJobExecutor {
                         observer,
                         runtime.as_ref().and_then(ScmRuntimeFiles::proxy_socket),
                     )?;
-                result.apply_credential_taint(credential_taint.credential_taint());
-                execution_from_engine(lease, result)
+                result.apply_credential_taint_with_publication(
+                    credential_taint.credential_taint(),
+                    self.publish_credential_tainted_logs,
+                );
+                super::executor::execution_from_engine_with_log_policy(
+                    lease,
+                    result,
+                    self.publish_credential_tainted_logs,
+                )
             }
             Isolation::Wasm => {
                 let result = self

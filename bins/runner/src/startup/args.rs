@@ -76,6 +76,11 @@ pub(super) struct Args {
     #[arg(long)]
     pub(super) trusted_native: bool,
 
+    /// Publish guest logs after a credential is released. This can expose
+    /// secrets and is intended only for explicitly trusted self-hosted use.
+    #[arg(long)]
+    pub(super) allow_credential_tainted_logs: bool,
+
     /// Mode-0700 root for private per-lease Podman state.
     #[arg(long)]
     pub(super) oci_state_directory: Option<PathBuf>,
@@ -217,6 +222,7 @@ mod tests {
         assert!(help.contains("enroll-if-needed"));
         assert!(help.contains("--credential-directory"));
         assert!(help.contains("--protocol-version"));
+        assert!(help.contains("--allow-credential-tainted-logs"));
         assert!(help.contains("--oci-state-directory"));
         assert!(help.contains("--oci-image-keyring"));
         assert!(help.contains("--wasm-component-directory"));
