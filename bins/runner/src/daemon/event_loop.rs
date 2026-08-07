@@ -215,19 +215,23 @@ where
                                 "runner_busy"
                             };
                             self.reject_offer(&offer, code).await?;
-                        } else if let Some(execution) = self
-                            .prepare_offer(
-                                &admission,
-                                &clock,
-                                *offer,
-                                active.is_empty(),
-                                completion_sender.clone(),
-                                lifecycle_sender.clone(),
-                            )
-                            .await?
-                        {
-                            active.insert(execution.offer.lease_id.clone(), execution);
-                            processed_one = true;
+                        } else {
+                            let execution = self
+                                .prepare_offer(
+                                    &admission,
+                                    &clock,
+                                    *offer,
+                                    active.is_empty(),
+                                    completion_sender.clone(),
+                                    lifecycle_sender.clone(),
+                                )
+                                .await?;
+                            if let Some(execution) = execution {
+                                active.insert(execution.offer.lease_id.clone(), execution);
+                                processed_one = true;
+                            } else if self.config.mode == RunMode::Once {
+                                return Ok(());
+                            }
                         }
                     }
                     Some(v1::control_message::Body::CancelLease(cancel)) => {
