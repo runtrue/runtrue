@@ -20,6 +20,9 @@ const STREAM_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 pub trait RunnerTransport: Send {
     async fn open(&mut self, hello: v1::RunnerHello) -> Result<v1::ControlHello, TransportError>;
     async fn send(&mut self, message: v1::RunnerMessage) -> Result<(), TransportError>;
+    async fn close(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
     async fn next_control(&mut self) -> Result<Option<v1::ControlMessage>, TransportError>;
     async fn fetch_capsule(
         &mut self,
