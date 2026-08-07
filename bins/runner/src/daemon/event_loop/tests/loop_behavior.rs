@@ -213,6 +213,7 @@ async fn once_runner_exits_after_rejecting_an_offer() {
 
     let state = shared.lock().await;
     assert!(state.completions.is_empty());
+    assert_eq!(state.closes, 1);
     assert!(state.sent.iter().any(|message| matches!(
         &message.body,
         Some(runner_message::Body::LeaseDecision(decision))

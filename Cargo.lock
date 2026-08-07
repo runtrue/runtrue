@@ -2903,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-bisim",
  "runtrue-execution",
@@ -2915,7 +2915,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-artifacts"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "nix",
  "rand_core 0.6.4",
@@ -2931,7 +2931,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-attest"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "ed25519-dalek",
  "rand_core 0.6.4",
@@ -2945,7 +2945,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-audit"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "ed25519-dalek",
  "nix",
@@ -2960,7 +2960,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-auth"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64ct",
  "hex",
@@ -2975,7 +2975,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-autoscaler"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "async-trait",
  "hex",
@@ -2993,7 +2993,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-autoscaler-bin"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-autoscaler",
  "tokio",
@@ -3001,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-backup"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "clap",
  "hex",
@@ -3029,7 +3029,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-bisim"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64ct",
  "hex",
@@ -3045,7 +3045,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-cache"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "nix",
  "rand_core 0.6.4",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-cli"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "clap",
  "nix",
@@ -3084,7 +3084,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-compiler"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "regex",
  "runtrue-expression",
@@ -3099,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-control-plane"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "hex",
  "libc",
@@ -3129,7 +3129,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-engine"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "nix",
  "runtrue-expression",
@@ -3144,7 +3144,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-execution"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-model",
  "serde",
@@ -3154,7 +3154,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-executor-dispatch"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-engine",
  "runtrue-model",
@@ -3164,7 +3164,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-executor-firecracker"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "hex",
  "nix",
@@ -3184,7 +3184,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-executor-oci"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "nix",
  "runtrue-engine",
@@ -3199,7 +3199,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-executor-wasm"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "hex",
  "hmac",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-expression"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "serde",
  "thiserror 1.0.61",
@@ -3233,7 +3233,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-git"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "hex",
  "nix",
@@ -3249,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-guest"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "clap",
  "hex",
@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-guest-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "hex",
  "hmac",
@@ -3286,7 +3286,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-image"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "clap",
  "hex",
@@ -3305,14 +3305,14 @@ dependencies = [
 
 [[package]]
 name = "runtrue-lifecycle"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "runtrue-lock"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-model",
  "serde",
@@ -3323,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-model"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "hex",
  "serde",
@@ -3333,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-oidc"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64ct",
  "ed25519-dalek",
@@ -3347,7 +3347,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-output-lifecycle"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-artifacts",
  "runtrue-cache",
@@ -3363,7 +3363,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-policy"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "cedar-policy",
  "enum-ordinalize",
@@ -3379,7 +3379,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-protocol"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "hex",
  "prost",
@@ -3395,7 +3395,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-provider-contract"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-execution",
  "runtrue-model",
@@ -3407,7 +3407,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-replay"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-engine",
  "runtrue-model",
@@ -3419,7 +3419,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-reports"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "quick-xml",
  "runtrue-model",
@@ -3430,7 +3430,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-runner"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -3477,7 +3477,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-runner-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "prost-types",
  "runtrue-attest",
@@ -3490,7 +3490,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-runtime-local"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "hex",
  "libc",
@@ -3512,7 +3512,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-runtime-metrics"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -3521,7 +3521,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-scheduler"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-model",
  "runtrue-workflow-ir",
@@ -3531,7 +3531,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-scm"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64ct",
  "hex",
@@ -3547,7 +3547,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-secrets"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64ct",
  "chacha20poly1305",
@@ -3567,7 +3567,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-server"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "axum 0.6.20",
  "base64ct",
@@ -3631,7 +3631,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-storage"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "nix",
  "runtrue-model",
@@ -3645,7 +3645,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-trusted-planner"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-compiler",
  "runtrue-git",
@@ -3661,7 +3661,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-update"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -3678,7 +3678,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-update-cli"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "clap",
  "ed25519-dalek",
@@ -3697,7 +3697,7 @@ dependencies = [
 
 [[package]]
 name = "runtrue-workflow-ast"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -3706,14 +3706,14 @@ dependencies = [
 
 [[package]]
 name = "runtrue-workflow-frontend"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-model",
 ]
 
 [[package]]
 name = "runtrue-workflow-ir"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "runtrue-model",
  "serde",

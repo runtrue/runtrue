@@ -230,6 +230,7 @@ where
                                 active.insert(execution.offer.lease_id.clone(), execution);
                                 processed_one = true;
                             } else if self.config.mode == RunMode::Once {
+                                self.transport.close().await?;
                                 return Ok(());
                             }
                         }

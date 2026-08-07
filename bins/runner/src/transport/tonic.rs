@@ -65,6 +65,20 @@ impl RunnerTransport for TonicRunnerTransport {
             .map_err(|_| TransportError::StreamClosed)
     }
 
+    async fn close(&mut self) -> Result<(), TransportError> {
+        self.outbound.take().ok_or(TransportError::NotOpen)?;
+        let inbound = self.inbound.as_mut().ok_or(TransportError::NotOpen)?;
+        loop {
+            let message = tokio::time::timeout(STREAM_SEND_TIMEOUT, inbound.message())
+                .await
+                .map_err(|_| TransportError::StreamBackpressure)??;
+            if message.is_none() {
+                self.inbound.take();
+                return Ok(());
+            }
+        }
+    }
+
     async fn next_control(&mut self) -> Result<Option<v1::ControlMessage>, TransportError> {
         self.inbound
             .as_mut()

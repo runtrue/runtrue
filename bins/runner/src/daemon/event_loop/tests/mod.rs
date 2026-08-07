@@ -101,6 +101,7 @@ struct FakeState {
     controls: VecDeque<v1::ControlMessage>,
     fetched: Option<v1::FetchExecutionCapsuleResponse>,
     sent: Vec<v1::RunnerMessage>,
+    closes: usize,
     completions: Vec<v1::CompleteLeaseRequest>,
     completion_attempts: usize,
     rotation_requests: Vec<v1::RotateCertificateRequest>,
@@ -129,6 +130,11 @@ impl RunnerTransport for FakeTransport {
 
     async fn send(&mut self, message: v1::RunnerMessage) -> Result<(), TransportError> {
         self.0.lock().await.sent.push(message);
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), TransportError> {
+        self.0.lock().await.closes += 1;
         Ok(())
     }
 

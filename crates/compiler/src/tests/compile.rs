@@ -311,7 +311,7 @@ fn shipped_example_has_a_generation_local_golden_capsule_digest() {
         .unwrap();
     assert_eq!(
         compilation.capsule_digest.to_string(),
-        "sha256:bf4da1225770cbff20cf1ae6f30708cadd310c73fd3d6a65e69fd25663433a3d"
+        "sha256:3986d3407f9f934c98509a00eb7b8f11622f4b0ed23ae8a6e41c6053a2381092"
     );
 }
 
