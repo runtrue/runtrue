@@ -186,6 +186,41 @@ async fn drain_rejects_new_work_and_exits_without_execution() {
 }
 
 #[tokio::test]
+async fn once_runner_exits_after_rejecting_an_offer() {
+    let (mut config, offer, fetched) = fixture();
+    config.allow_trusted_native = false;
+    let shared = Arc::new(Mutex::new(FakeState {
+        controls: VecDeque::from([v1::ControlMessage {
+            body: Some(control_message::Body::LeaseOffer(Box::new(offer))),
+        }]),
+        fetched: Some(fetched),
+        ..FakeState::default()
+    }));
+    let directory = tempfile::tempdir().unwrap();
+
+    RunnerDaemon::new(
+        FakeTransport(Arc::clone(&shared)),
+        FakeExecutor {
+            wait_for_cancel: false,
+        },
+        config,
+        RunnerStateStore::open(directory.path().join("state")).unwrap(),
+        WorkspaceManager::open(directory.path().join("work")).unwrap(),
+    )
+    .run()
+    .await
+    .unwrap();
+
+    let state = shared.lock().await;
+    assert!(state.completions.is_empty());
+    assert!(state.sent.iter().any(|message| matches!(
+        &message.body,
+        Some(runner_message::Body::LeaseDecision(decision))
+            if !decision.accepted && decision.rejection_code == "trusted_native_disabled"
+    )));
+}
+
+#[tokio::test]
 async fn wasm_runner_executes_two_accepted_leases_concurrently() {
     let (mut config, first_offer, fetched) = fixture_for(Isolation::Wasm, 2);
     config.mode = RunMode::Daemon;
