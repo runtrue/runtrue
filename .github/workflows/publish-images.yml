@@ -318,3 +318,25 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/runtrue-autoscaler
           subject-digest: ${{ steps.promote.outputs.runtrue_autoscaler_digest }}
           push-to-registry: true
+
+      - name: Promote attested release as latest
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          version="${RELEASE_TAG#v}"
+          [[ "$RELEASE_TAG" == "v${version}" ]]
+
+          for component in runtrue-server runtrue-runner runtrue-autoscaler; do
+            image="${REGISTRY}/${IMAGE_NAMESPACE}/${component}"
+            skopeo copy --all --preserve-digests \
+              "docker://${image}:${version}" \
+              "docker://${image}:latest"
+            versioned="sha256:$(skopeo inspect --raw "docker://${image}:${version}" |
+              sha256sum | awk '{print $1}')"
+            latest="sha256:$(skopeo inspect --raw "docker://${image}:latest" |
+              sha256sum | awk '{print $1}')"
+            [[ "$latest" == "$versioned" ]] ||
+              { echo "registry changed ${component} latest tag" >&2; exit 1; }
+          done
