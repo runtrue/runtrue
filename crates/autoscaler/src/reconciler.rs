@@ -2,6 +2,7 @@ use crate::{
     AutoscalerError, Clock, ControlPlaneClient, FleetRequest, FleetView, OwnershipLease,
     PoolTemplate, Provider, ProviderInstance, SystemClock, GENERIC_RUNTIME_COMPATIBILITY_DIGEST,
 };
+use futures_util::future::join_all;
 use std::{cmp, collections::BTreeMap};
 
 const LEASE_DURATION_MS: u64 = 45_000;
@@ -131,6 +132,7 @@ where
                 .count() as u64,
         );
         let mut remaining_batch = u64::from(view.policy.scale_up_batch);
+        let mut scale_up = Vec::<PoolTemplate>::new();
         let now = view.observed_unix_ms;
         let mut recent_offline = 0_u64;
         let mut recent_offline_by_digest = BTreeMap::<&str, u64>::new();
@@ -207,7 +209,7 @@ where
                     AutoscalerError::Reconcile(format!("no exact baseline template for {baseline}"))
                 })?;
                 for _ in 0..count {
-                    self.provision(&lease, template).await?;
+                    scale_up.push((*template).clone());
                     current = current.saturating_add(1);
                     remaining_batch = remaining_batch.saturating_sub(1);
                     provider_capacity = provider_capacity.saturating_sub(1);
@@ -268,12 +270,13 @@ where
                 );
             }
             for _ in 0..count {
-                self.provision(&lease, &bound_template).await?;
+                scale_up.push(bound_template.clone());
                 current = current.saturating_add(1);
                 remaining_batch = remaining_batch.saturating_sub(1);
                 provider_capacity = provider_capacity.saturating_sub(1);
             }
         }
+        self.provision_batch(&lease, &scale_up).await?;
         self.reconcile_scale_down(&lease, &view).await
     }
 
@@ -411,6 +414,26 @@ where
             .await
             .map_err(|error| reconcile("create fleet request", error))?;
         self.provision_existing(lease, &request).await
+    }
+
+    async fn provision_batch(
+        &self,
+        lease: &OwnershipLease,
+        templates: &[PoolTemplate],
+    ) -> Result<(), AutoscalerError> {
+        let results = join_all(
+            templates
+                .iter()
+                .map(|template| self.provision(lease, template)),
+        )
+        .await;
+        let mut first_error = None;
+        for result in results {
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     async fn provision_existing(
@@ -724,6 +747,8 @@ mod tests {
         created: AtomicUsize,
         started: AtomicUsize,
         destroyed: AtomicUsize,
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
         capacity: usize,
     }
 
@@ -733,6 +758,8 @@ mod tests {
                 created: AtomicUsize::new(0),
                 started: AtomicUsize::new(0),
                 destroyed: AtomicUsize::new(0),
+                in_flight: AtomicUsize::new(0),
+                max_in_flight: AtomicUsize::new(0),
                 capacity: usize::MAX,
             }
         }
@@ -760,6 +787,10 @@ mod tests {
             _prepared: &PreparedInstance,
         ) -> Result<ProviderInstance, AutoscalerError> {
             self.created.fetch_add(1, Ordering::Relaxed);
+            let in_flight = self.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+            self.max_in_flight.fetch_max(in_flight, Ordering::Relaxed);
+            tokio::task::yield_now().await;
+            self.in_flight.fetch_sub(1, Ordering::Relaxed);
             Ok(ProviderInstance {
                 id: "instance".into(),
                 fleet_request_id: request.id.clone(),
@@ -833,6 +864,7 @@ mod tests {
         reconciler.reconcile().await.unwrap();
         assert_eq!(control.created.load(Ordering::Relaxed), 2);
         assert_eq!(provider.created.load(Ordering::Relaxed), 2);
+        assert_eq!(provider.max_in_flight.load(Ordering::Relaxed), 2);
         assert_eq!(provider.started.load(Ordering::Relaxed), 2);
     }
 

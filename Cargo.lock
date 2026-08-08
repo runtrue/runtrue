@@ -2978,6 +2978,7 @@ name = "runtrue-autoscaler"
 version = "0.1.9"
 dependencies = [
  "async-trait",
+ "futures-util",
  "hex",
  "nix",
  "rand_core 0.6.4",
