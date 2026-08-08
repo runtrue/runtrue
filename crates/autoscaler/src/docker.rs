@@ -19,6 +19,26 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 const MAX_DOCKER_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TEMPLATE_BYTES: u64 = 1024 * 1024;
 
+#[derive(Debug, Deserialize)]
+struct DockerContainerSummary {
+    #[serde(rename = "Labels", default)]
+    labels: BTreeMap<String, String>,
+    #[serde(rename = "State", default)]
+    state: String,
+}
+
+fn reserves_runner_capacity(container: &DockerContainerSummary) -> bool {
+    container
+        .labels
+        .get("dev.runtrue.autoscaled")
+        .map(String::as_str)
+        == Some("true")
+        && matches!(
+            container.state.as_str(),
+            "created" | "running" | "paused" | "restarting"
+        )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DockerTemplate {
@@ -319,22 +339,11 @@ impl Provider for DockerProvider {
             )
             .await?;
         require_success("list managed containers", &containers)?;
-        #[derive(Deserialize)]
-        struct ContainerSummary {
-            #[serde(rename = "Labels", default)]
-            labels: BTreeMap<String, String>,
-        }
-        let containers: Vec<ContainerSummary> = serde_json::from_slice(&containers.body)
+        let containers: Vec<DockerContainerSummary> = serde_json::from_slice(&containers.body)
             .map_err(|_| AutoscalerError::MalformedDockerResponse("list managed containers"))?;
         let existing = containers
             .iter()
-            .filter(|container| {
-                container
-                    .labels
-                    .get("dev.runtrue.autoscaled")
-                    .map(String::as_str)
-                    == Some("true")
-            })
+            .filter(|container| reserves_runner_capacity(container))
             .count() as u64;
 
         capacity_slots(info.memory_bytes, info.cpus, existing, &self.template)
@@ -1082,6 +1091,25 @@ mod tests {
         };
         assert_eq!(capacity_slots(10_000, 8, 1, &template).unwrap(), 2);
         assert_eq!(capacity_slots(1_000, 8, 0, &template).unwrap(), 0);
+    }
+
+    #[test]
+    fn exited_managed_containers_do_not_reserve_capacity() {
+        let managed = |state: &str| DockerContainerSummary {
+            labels: BTreeMap::from([("dev.runtrue.autoscaled".to_owned(), "true".to_owned())]),
+            state: state.to_owned(),
+        };
+        for state in ["created", "running", "paused", "restarting"] {
+            assert!(reserves_runner_capacity(&managed(state)), "state {state}");
+        }
+        for state in ["removing", "exited", "dead", ""] {
+            assert!(!reserves_runner_capacity(&managed(state)), "state {state}");
+        }
+        let unrelated = DockerContainerSummary {
+            labels: BTreeMap::new(),
+            state: "running".to_owned(),
+        };
+        assert!(!reserves_runner_capacity(&unrelated));
     }
 
     #[test]
