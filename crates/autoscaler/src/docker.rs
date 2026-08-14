@@ -441,7 +441,10 @@ impl Provider for DockerProvider {
             "WorkingDir": self.template.working_directory.clone().unwrap_or_default(),
             "HostConfig": {
                 "Mounts": mounts,
-                "AutoRemove": false,
+                // Runner containers are ephemeral. Durable logs, results, and
+                // lifecycle state live in the control plane, so retaining a
+                // stopped Docker container only leaks host capacity and disk.
+                "AutoRemove": true,
                 "NetworkMode": self.template.network,
                 "ReadonlyRootfs": self.template.read_only_rootfs,
                 "Privileged": self.template.privileged,
