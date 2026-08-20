@@ -330,6 +330,10 @@ runner/guest execution bound; authority ends when `now >= hard_deadline`. An
 older v1 server that omits the field is accepted only with the conservative
 fallback `hard_deadline = expires_at`.
 
+Accepted leases continue reporting fenced `preparing` heartbeats while source
+snapshots are hydrated. Bounded source transfers therefore retain their lease
+without weakening the immutable hard deadline or cancellation fence.
+
 [`examples/workflows/wasm-job.yaml`](../../examples/workflows/wasm-job.yaml)
 and its companion lock file show the workflow-side immutable resolution. The
 preloaded signed manifest name for that example is

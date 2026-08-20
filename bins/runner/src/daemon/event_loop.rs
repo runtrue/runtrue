@@ -18,7 +18,10 @@ use std::{
         Arc,
     },
 };
-use tokio::{sync::mpsc as tokio_mpsc, time::MissedTickBehavior};
+use tokio::{
+    sync::mpsc as tokio_mpsc,
+    time::{Interval, MissedTickBehavior},
+};
 
 const LOG_BATCH_FRAMES: usize = 32;
 const MAX_NATIVE_STEPS: usize = 64;
@@ -69,6 +72,14 @@ pub struct RunnerDaemon<T, E> {
     state: RunnerStateStore,
     workspaces: WorkspaceManager,
     admission_gate: Option<LeaseAdmissionGate>,
+}
+
+struct OfferPreparation<'a> {
+    connection_id: &'a str,
+    heartbeat_interval: &'a mut Interval,
+    runner_empty: bool,
+    completion_sender: tokio_mpsc::Sender<ExecutionTaskMessage>,
+    lifecycle_sender: tokio_mpsc::Sender<super::observations::StepLifecycleMessage>,
 }
 
 impl<T, E> RunnerDaemon<T, E>
@@ -221,9 +232,13 @@ where
                                     &admission,
                                     &clock,
                                     *offer,
-                                    active.is_empty(),
-                                    completion_sender.clone(),
-                                    lifecycle_sender.clone(),
+                                    OfferPreparation {
+                                        connection_id: &connection_id,
+                                        heartbeat_interval: &mut interval,
+                                        runner_empty: active.is_empty(),
+                                        completion_sender: completion_sender.clone(),
+                                        lifecycle_sender: lifecycle_sender.clone(),
+                                    },
                                 )
                                 .await?;
                             if let Some(execution) = execution {
@@ -417,10 +432,15 @@ where
         admission: &RunnerAdmission,
         clock: &ServerClock,
         offer: v1::LeaseOffer,
-        runner_empty: bool,
-        completion_sender: tokio_mpsc::Sender<ExecutionTaskMessage>,
-        lifecycle_sender: tokio_mpsc::Sender<super::observations::StepLifecycleMessage>,
+        preparation: OfferPreparation<'_>,
     ) -> Result<Option<ActiveExecution>, RunnerError> {
+        let OfferPreparation {
+            connection_id,
+            heartbeat_interval,
+            runner_empty,
+            completion_sender,
+            lifecycle_sender,
+        } = preparation;
         if offer.runner_id != self.config.runner_id {
             self.reject_offer(&offer, "wrong_runner").await?;
             return Ok(None);
@@ -581,8 +601,16 @@ where
                     )
                 });
             let mut cancelled = false;
-            let hydration = tokio::select! {
-                    result = &mut hydration => result,
+            let hydration = loop {
+                tokio::select! {
+                    result = &mut hydration => break result,
+                    _ = heartbeat_interval.tick() => {
+                        self.send_lease_heartbeat(
+                            connection_id,
+                            &offer,
+                            "preparing",
+                        ).await?;
+                    }
                     control = self.transport.next_control() => {
                         let control = match control {
                             Ok(control) => control,
@@ -605,7 +633,7 @@ where
                                 hydration_cancelled.store(true, Ordering::Release);
                                 self.send_cancellation_ack(&cancel).await?;
                                 cancelled = true;
-                                hydration.await
+                                break hydration.await;
                             }
                             _ => {
                                 hydration_cancelled.store(true, Ordering::Release);
@@ -614,6 +642,7 @@ where
                             }
                         }
                     }
+                }
             };
             let hydrated = match hydration {
                 Ok(Ok(digest)) if !cancelled => digest,
@@ -893,6 +922,32 @@ where
                 state: "running".to_owned(),
             })
             .collect();
+        self.send_heartbeat_message(connection_id, active_leases)
+            .await
+    }
+
+    async fn send_lease_heartbeat(
+        &mut self,
+        connection_id: &str,
+        offer: &v1::LeaseOffer,
+        state: &str,
+    ) -> Result<(), RunnerError> {
+        self.send_heartbeat_message(
+            connection_id,
+            vec![v1::ActiveLease {
+                lease_id: offer.lease_id.clone(),
+                fencing_generation: offer.fencing_generation,
+                state: state.to_owned(),
+            }],
+        )
+        .await
+    }
+
+    async fn send_heartbeat_message(
+        &mut self,
+        connection_id: &str,
+        active_leases: Vec<v1::ActiveLease>,
+    ) -> Result<(), RunnerError> {
         self.transport
             .send(v1::RunnerMessage {
                 body: Some(v1::runner_message::Body::Heartbeat(v1::Heartbeat {
