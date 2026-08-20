@@ -172,6 +172,12 @@ docker compose \
 
 Only the autoscaler receives the Docker socket. Autoscaled runners are created
 as non-root, read-only containers with bounded CPU, memory, and process limits.
+Before an ephemeral runner container is removed, the autoscaler archives its
+timestamped supervisor stdout and stderr to
+`deploy/state/autoscaler/claims/<fleet-request-id>/runner.log`. These files are
+mode `0600` beneath owner-only state directories. If archival fails, container
+deletion fails closed so the original output remains available through
+`docker logs`.
 
 ## Common commands
 

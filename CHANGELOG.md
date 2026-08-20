@@ -8,6 +8,8 @@ may change APIs, but migrations and compatibility requirements remain explicit.
 
 ### Added
 
+- Private, durable supervisor-log archives for autoscaled Docker runners,
+  captured before ephemeral containers are removed.
 - A Runtrue-native container action for release-target synchronization.
 - Browser-based GitHub App installation, repository onboarding, and human OIDC
   flows separated from the runner protocol.
@@ -33,6 +35,7 @@ may change APIs, but migrations and compatibility requirements remain explicit.
   probe for a separately built, digest-pinned GitHub App JWT provider image.
 ### Security
 
+- Updated `h2` to 0.4.16 to bound processing of empty DATA frames.
 - Runner and SCM operations continue to require current installation, lease,
   attempt, certificate, and repository authorization fences.
 

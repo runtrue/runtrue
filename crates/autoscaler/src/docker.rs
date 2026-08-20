@@ -18,6 +18,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 const MAX_DOCKER_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TEMPLATE_BYTES: u64 = 1024 * 1024;
+const RUNNER_LOG_FILE: &str = "runner.log";
+const AUTO_REMOVE_RUNNER_CONTAINERS: bool = false;
 
 #[derive(Debug, Deserialize)]
 struct DockerContainerSummary {
@@ -311,6 +313,34 @@ impl DockerProvider {
             },
         })
     }
+
+    async fn archive_logs(
+        &self,
+        container_id: &str,
+        request_id: &str,
+    ) -> Result<(), AutoscalerError> {
+        validate_request_id(request_id)?;
+        let destination = self.claim_root.join(request_id).join(RUNNER_LOG_FILE);
+        if destination.exists() {
+            require_private_regular_file(&destination, "archived runner log")?;
+            return Ok(());
+        }
+        let response = self
+            .request(
+                "read managed container logs",
+                "GET",
+                &format!(
+                    "/v1.45/containers/{}/logs?stdout=true&stderr=true&timestamps=true",
+                    encode_segment(container_id)
+                ),
+                None,
+            )
+            .await?;
+        require_success("read managed container logs", &response)?;
+        let logs = decode_docker_log_stream(&response.body)?;
+        write_private_atomic(&destination, &logs)?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -441,10 +471,10 @@ impl Provider for DockerProvider {
             "WorkingDir": self.template.working_directory.clone().unwrap_or_default(),
             "HostConfig": {
                 "Mounts": mounts,
-                // Runner containers are ephemeral. Durable logs, results, and
-                // lifecycle state live in the control plane, so retaining a
-                // stopped Docker container only leaks host capacity and disk.
-                "AutoRemove": true,
+                // The autoscaler archives private supervisor stdout/stderr
+                // before removing the container. Docker auto-removal would
+                // erase the only diagnostic evidence for startup failures.
+                "AutoRemove": AUTO_REMOVE_RUNNER_CONTAINERS,
                 "NetworkMode": self.template.network,
                 "ReadonlyRootfs": self.template.read_only_rootfs,
                 "Privileged": self.template.privileged,
@@ -588,20 +618,23 @@ impl Provider for DockerProvider {
                 "refusing to destroy unbound Docker instance".into(),
             ));
         }
-        if self
+        let Some(container_id) = self
             .managed_instance(&instance.id, &instance.fleet_request_id)
             .await?
-            .is_none()
-        {
+        else {
             return Ok(());
-        }
+        };
+        // Fail closed: if logs cannot be durably archived, retain the stopped
+        // container so an operator can still inspect it with `docker logs`.
+        self.archive_logs(&container_id, &instance.fleet_request_id)
+            .await?;
         let response = self
             .request(
                 "destroy managed container",
                 "DELETE",
                 &format!(
                     "/v1.45/containers/{}?force=true&v=true",
-                    encode_segment(&instance.id)
+                    encode_segment(&container_id)
                 ),
                 None,
             )
@@ -707,6 +740,66 @@ fn decode_chunked(operation: &'static str, bytes: &[u8]) -> Result<Vec<u8>, Auto
         }
         remaining = &remaining[size + 2..];
     }
+}
+
+fn decode_docker_log_stream(bytes: &[u8]) -> Result<Vec<u8>, AutoscalerError> {
+    let mut remaining = bytes;
+    let mut decoded = Vec::new();
+    while !remaining.is_empty() {
+        if remaining.len() < 8 || !matches!(remaining[0], 1 | 2) || remaining[1..4] != [0, 0, 0] {
+            return Err(AutoscalerError::MalformedDockerResponse(
+                "read managed container logs",
+            ));
+        }
+        let length =
+            u32::from_be_bytes([remaining[4], remaining[5], remaining[6], remaining[7]]) as usize;
+        if remaining.len() < 8 + length {
+            return Err(AutoscalerError::MalformedDockerResponse(
+                "read managed container logs",
+            ));
+        }
+        decoded.extend_from_slice(&remaining[8..8 + length]);
+        if decoded.len() as u64 > MAX_DOCKER_RESPONSE_BYTES {
+            return Err(AutoscalerError::MalformedDockerResponse(
+                "read managed container logs",
+            ));
+        }
+        remaining = &remaining[8 + length..];
+    }
+    Ok(decoded)
+}
+
+fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), AutoscalerError> {
+    let parent = path.parent().ok_or(AutoscalerError::InvalidConfiguration(
+        "runner log path has no parent",
+    ))?;
+    require_private_directory(parent, "runner log directory")?;
+    let mut nonce = [0_u8; 16];
+    OsRng
+        .try_fill_bytes(&mut nonce)
+        .map_err(|_| AutoscalerError::RandomnessUnavailable)?;
+    let temporary = parent.join(format!(".runner-log-{}", hex::encode(nonce)));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|error| AutoscalerError::file("create runner log", &temporary, error))?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| AutoscalerError::file("write runner log", &temporary, error))?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .map_err(|error| AutoscalerError::file("publish runner log", path, error))?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| AutoscalerError::file("sync runner log directory", parent, error))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn require_success(
@@ -931,6 +1024,24 @@ fn require_private_directory_owner(
     Ok(())
 }
 
+fn require_private_regular_file(path: &Path, name: &'static str) -> Result<(), AutoscalerError> {
+    require_absolute(path, "autoscaler files must be absolute")?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| AutoscalerError::file("inspect private file", path, error))?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.gid() != nix::unistd::getegid().as_raw()
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.len() > MAX_DOCKER_RESPONSE_BYTES
+    {
+        return Err(AutoscalerError::Provider(format!(
+            "{name} must be a bounded owner-only regular file"
+        )));
+    }
+    Ok(())
+}
+
 fn require_absolute(path: &Path, message: &'static str) -> Result<(), AutoscalerError> {
     if path.is_absolute() {
         Ok(())
@@ -1126,5 +1237,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response.body, b"{}");
+    }
+
+    #[test]
+    fn runner_containers_are_retained_until_logs_are_archived() {
+        const { assert!(!AUTO_REMOVE_RUNNER_CONTAINERS) };
+    }
+
+    #[test]
+    fn docker_log_stream_preserves_interleaved_stdout_and_stderr() {
+        let frame = |stream: u8, payload: &[u8]| {
+            let mut value = vec![stream, 0, 0, 0];
+            value.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            value.extend_from_slice(payload);
+            value
+        };
+        let mut encoded = frame(1, b"stdout\n");
+        encoded.extend(frame(2, b"stderr\n"));
+        assert_eq!(
+            decode_docker_log_stream(&encoded).unwrap(),
+            b"stdout\nstderr\n"
+        );
+        assert!(decode_docker_log_stream(b"unframed").is_err());
+        assert!(decode_docker_log_stream(&[1, 0, 0, 0, 0, 0, 0, 2, b'x']).is_err());
+    }
+
+    #[test]
+    fn archived_runner_logs_are_private_and_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let log = root.path().join(RUNNER_LOG_FILE);
+        write_private_atomic(&log, b"runner failed\n").unwrap();
+        require_private_regular_file(&log, "test runner log").unwrap();
+        assert_eq!(fs::read(&log).unwrap(), b"runner failed\n");
+        assert_eq!(
+            fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }
