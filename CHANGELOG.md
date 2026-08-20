@@ -19,6 +19,8 @@ may change APIs, but migrations and compatibility requirements remain explicit.
 
 ### Changed
 
+- Runners continue fenced lease heartbeats while hydrating source snapshots, so
+  bounded source transfers cannot expire an otherwise healthy job assignment.
 - Renamed the public project to **Runtrue** with the `runtrue` CLI, `.runtrue`
   configuration, `RUNTRUE_*` environment variables, `runtrue-*` packages and
   images, and the `@runtrue` JavaScript scope.

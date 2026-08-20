@@ -384,7 +384,18 @@ fn fixture_for(
     v1::LeaseOffer,
     v1::FetchExecutionCapsuleResponse,
 ) {
-    let mut capsule = capsule();
+    fixture_from_capsule(capsule(), isolation, max_concurrent_wasm_jobs)
+}
+
+fn fixture_from_capsule(
+    mut capsule: ExecutionCapsule,
+    isolation: Isolation,
+    max_concurrent_wasm_jobs: u32,
+) -> (
+    RunnerDaemonConfig,
+    v1::LeaseOffer,
+    v1::FetchExecutionCapsuleResponse,
+) {
     capsule.jobs[0].runner.isolation = isolation;
     let signing = CapsuleSigningKey::from_seed([5; 32]);
     let signature = signing.sign_capsule(&capsule).unwrap();
