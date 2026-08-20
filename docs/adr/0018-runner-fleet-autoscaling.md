@@ -107,6 +107,13 @@ autoscaler alone mounts `/var/run/docker.sock`; server and runner services do
 not. Launch claim files live under an autoscaler-owned mode-0700 directory and
 are mounted read-only into runner containers.
 
+Docker does not automatically remove ephemeral runner containers. During
+termination the autoscaler first archives the runner supervisor's timestamped
+stdout and stderr into the request's private provider-state directory, then
+removes the container. Failure to archive prevents removal, preserving the
+container as the fallback diagnostic source. Guest step logs remain governed
+by the control plane's separate durable log protocol.
+
 This provider repairs runner-container failure only. It cannot repair failure
 of the Docker host, its disk, its socket, or the autoscaler container on that
 host. Host-level availability requires a Kubernetes or cloud/VM provider on an

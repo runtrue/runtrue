@@ -8,6 +8,8 @@ may change APIs, but migrations and compatibility requirements remain explicit.
 
 ### Added
 
+- Private, durable supervisor-log archives for autoscaled Docker runners,
+  captured before ephemeral containers are removed.
 - A Runtrue-native container action for release-target synchronization.
 - Browser-based GitHub App installation, repository onboarding, and human OIDC
   flows separated from the runner protocol.
