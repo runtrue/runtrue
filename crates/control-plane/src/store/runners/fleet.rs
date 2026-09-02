@@ -590,7 +590,8 @@ impl ControlPlane {
                     provider_request_id, provider_instance_id, runner_id,
                     failure_code, created_unix_ms, updated_unix_ms
              FROM runner_fleet_requests WHERE pool_id = ?1
-             ORDER BY created_unix_ms, id LIMIT ?2",
+             ORDER BY CASE WHEN state IN ('terminated', 'failed') THEN 1 ELSE 0 END,
+                      created_unix_ms, id LIMIT ?2",
         )?;
         let values = statement
             .query_map(
@@ -1208,6 +1209,60 @@ mod tests {
             control.list_runner_fleet_requests("pool-fleet").unwrap()[0]
                 .runtime_compatibility_digest,
             request.runtime_compatibility_digest
+        );
+    }
+
+    #[test]
+    fn active_requests_are_not_hidden_by_terminal_history() {
+        let control = fleet_control();
+        let template = fleet_template(&control, 10);
+        let connection = control.connection().unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        for index in 0..MAX_FLEET_REQUESTS {
+            transaction
+                .execute(
+                    "INSERT INTO runner_fleet_requests
+                     (id,pool_id,runtime_compatibility_digest,provider,
+                      provider_template_id,runner_template_digest,state,
+                      created_unix_ms,updated_unix_ms)
+                     VALUES(?1,'pool-fleet',?2,'docker','docker-template',?3,
+                            'terminated',?4,?4)",
+                    params![
+                        format!("terminal-{index:04}"),
+                        template.runtime_compatibility_digest.as_str(),
+                        template.runner_template_digest.as_str(),
+                        to_i64(index + 1).unwrap(),
+                    ],
+                )
+                .unwrap();
+        }
+        transaction
+            .execute(
+                "INSERT INTO runner_fleet_requests
+                 (id,pool_id,runtime_compatibility_digest,provider,
+                  provider_template_id,runner_template_digest,state,
+                  created_unix_ms,updated_unix_ms)
+                 VALUES('active','pool-fleet',?1,'docker','docker-template',?2,
+                        'bootstrapping',?3,?3)",
+                params![
+                    template.runtime_compatibility_digest.as_str(),
+                    template.runner_template_digest.as_str(),
+                    to_i64(MAX_FLEET_REQUESTS + 1).unwrap(),
+                ],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
+
+        let requests = control.list_runner_fleet_requests("pool-fleet").unwrap();
+        assert_eq!(requests.len(), MAX_FLEET_REQUESTS as usize);
+        assert_eq!(requests[0].id, "active");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.state == RunnerFleetRequestState::Terminated)
+                .count(),
+            MAX_FLEET_REQUESTS as usize - 1
         );
     }
 
