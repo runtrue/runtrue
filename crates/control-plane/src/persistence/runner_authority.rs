@@ -5463,7 +5463,8 @@ impl RunnerFleetEnrollmentStore for PostgresInstallationStore {
             }
             sqlx::query(
                 "SELECT * FROM runner_fleet_requests WHERE pool_id=$1
-                 ORDER BY created_unix_ms,id LIMIT 10000",
+                 ORDER BY CASE WHEN state IN ('terminated','failed') THEN 1 ELSE 0 END,
+                          created_unix_ms,id LIMIT 10000",
             )
             .bind(pool_id)
             .fetch_all(&self.pool)
