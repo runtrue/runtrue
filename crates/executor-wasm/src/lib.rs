@@ -50,7 +50,7 @@ pub use rooted_fs::RootedFilesystemAdapter;
 pub const WIT_WORLD: &str = "runtrue:action/run@1.0.0";
 
 /// Pinned Wasmtime runtime used to compile and execute components.
-pub const WASMTIME_VERSION: &str = "46.0.2";
+pub const WASMTIME_VERSION: &str = "46.0.3";
 
 /// Final WASI generation linked into the component runtime.
 pub const WASI_VERSION: &str = "0.3.0";
