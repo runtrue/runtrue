@@ -53,8 +53,7 @@ where
     K: Clock,
 {
     pub async fn reconcile(&self) -> Result<(), AutoscalerError> {
-        let lease = self
-            .control_plane
+        self.control_plane
             .acquire_lease(&self.pool_id, &self.owner_id, LEASE_DURATION_MS)
             .await
             .map_err(|error| reconcile("acquire autoscaler lease", error))?;
@@ -66,9 +65,23 @@ where
         if !view.policy.enabled {
             return Ok(());
         }
-        self.reconcile_stale_bootstraps(&lease, &view).await?;
-        self.reconcile_stale_offline_instances(&lease, &view)
+        self.reconcile_stale_bootstraps(&view).await?;
+        self.reconcile_stale_offline_instances(&view).await?;
+        for request in &view.requests {
+            if !matches!(request.state.as_str(), "quarantined" | "terminating")
+                || request.runner_active_jobs != 0
+            {
+                continue;
+            }
+            self.finish_termination(request).await?;
+        }
+        // Recovery can exceed one ownership lease. Refresh both the fence and
+        // the capacity snapshot before making new scaling decisions.
+        let lease = self
+            .control_plane
+            .acquire_lease(&self.pool_id, &self.owner_id, LEASE_DURATION_MS)
             .await?;
+        let view = self.control_plane.fleet(&self.pool_id).await?;
         for request in &view.requests {
             if matches!(
                 request.state.as_str(),
@@ -280,21 +293,23 @@ where
         self.reconcile_scale_down(&lease, &view).await
     }
 
-    async fn reconcile_stale_bootstraps(
-        &self,
-        lease: &OwnershipLease,
-        view: &FleetView,
-    ) -> Result<(), AutoscalerError> {
+    async fn reconcile_stale_bootstraps(&self, view: &FleetView) -> Result<(), AutoscalerError> {
         for request in &view.requests {
-            if request.state != "bootstrapping"
+            if !matches!(request.state.as_str(), "bootstrapping" | "enrolled")
+                || request.runner_active_jobs != 0
                 || request.provider_instance_id.is_empty()
                 || view.observed_unix_ms
                     < request
                         .updated_unix_ms
+                        .max(request.runner_last_heartbeat_unix_ms)
                         .saturating_add(view.policy.offline_grace_ms)
             {
                 continue;
             }
+            let lease = self
+                .control_plane
+                .acquire_lease(&self.pool_id, &self.owner_id, LEASE_DURATION_MS)
+                .await?;
             let quarantined = self
                 .control_plane
                 .transition(
@@ -307,42 +322,18 @@ where
                 .map_err(|error| {
                     reconcile(&format!("quarantine stale bootstrap {}", request.id), error)
                 })?;
-            let terminating = self
-                .control_plane
-                .transition(&quarantined, "terminating", lease.fencing_generation, "")
-                .await
-                .map_err(|error| {
-                    reconcile(&format!("terminate stale bootstrap {}", request.id), error)
-                })?;
-            self.provider
-                .destroy(&ProviderInstance {
-                    id: request.provider_instance_id.clone(),
-                    fleet_request_id: request.id.clone(),
-                    ..ProviderInstance::default()
-                })
-                .await
-                .map_err(|error| {
-                    reconcile(&format!("destroy stale bootstrap {}", request.id), error)
-                })?;
-            self.control_plane
-                .transition(&terminating, "terminated", lease.fencing_generation, "")
-                .await
-                .map_err(|error| {
-                    reconcile(&format!("finish stale bootstrap {}", request.id), error)
-                })?;
-            self.provider.cleanup_claim(request).await?;
+            self.finish_termination(&quarantined).await?;
         }
         Ok(())
     }
 
     async fn reconcile_stale_offline_instances(
         &self,
-        lease: &OwnershipLease,
         view: &FleetView,
     ) -> Result<(), AutoscalerError> {
         for request in &view.requests {
-            if request.state != "online"
-                || request.runner_status != "offline"
+            if !matches!(request.state.as_str(), "online" | "draining")
+                || !matches!(request.runner_status.as_str(), "offline" | "draining")
                 || request.runner_active_jobs != 0
                 || request.runner_last_heartbeat_unix_ms == 0
                 || request.provider_instance_id.is_empty()
@@ -353,6 +344,10 @@ where
             {
                 continue;
             }
+            let lease = self
+                .control_plane
+                .acquire_lease(&self.pool_id, &self.owner_id, LEASE_DURATION_MS)
+                .await?;
             let quarantined = self
                 .control_plane
                 .transition(
@@ -368,39 +363,49 @@ where
                         error,
                     )
                 })?;
-            let terminating = self
-                .control_plane
-                .transition(&quarantined, "terminating", lease.fencing_generation, "")
-                .await
-                .map_err(|error| {
-                    reconcile(
-                        &format!("terminate stale offline instance {}", request.id),
-                        error,
-                    )
-                })?;
-            let instance = ProviderInstance {
-                id: request.provider_instance_id.clone(),
-                fleet_request_id: request.id.clone(),
-                ..ProviderInstance::default()
-            };
-            if let Err(error) = self.provider.destroy(&instance).await {
-                return Err(reconcile(
-                    &format!("destroy stale offline instance {}", request.id),
-                    error,
-                ));
-            }
-            self.control_plane
-                .transition(&terminating, "terminated", lease.fencing_generation, "")
-                .await
-                .map_err(|error| {
-                    reconcile(
-                        &format!("finish stale offline instance {}", request.id),
-                        error,
-                    )
-                })?;
-            self.provider.cleanup_claim(request).await?;
+            self.finish_termination(&quarantined).await?;
         }
         Ok(())
+    }
+
+    async fn finish_termination(&self, request: &FleetRequest) -> Result<(), AutoscalerError> {
+        let lease = self
+            .control_plane
+            .acquire_lease(&self.pool_id, &self.owner_id, LEASE_DURATION_MS)
+            .await?;
+        let terminating = if request.state == "terminating" {
+            request.clone()
+        } else {
+            self.control_plane
+                .transition(request, "terminating", lease.fencing_generation, "")
+                .await?
+        };
+        if !terminating.provider_instance_id.is_empty() {
+            // Provider destruction is idempotent, including an already missing
+            // container. A failed attempt stays terminating for the next tick.
+            self.provider
+                .destroy(&ProviderInstance {
+                    id: terminating.provider_instance_id.clone(),
+                    fleet_request_id: terminating.id.clone(),
+                    ..ProviderInstance::default()
+                })
+                .await
+                .map_err(|error| {
+                    reconcile(
+                        &format!("destroy terminating instance {}", request.id),
+                        error,
+                    )
+                })?;
+        }
+        // Archiving logs and destroying a container can outlast the lease.
+        let lease = self
+            .control_plane
+            .acquire_lease(&self.pool_id, &self.owner_id, LEASE_DURATION_MS)
+            .await?;
+        self.control_plane
+            .transition(&terminating, "terminated", lease.fencing_generation, "")
+            .await?;
+        self.provider.cleanup_claim(&terminating).await
     }
 
     async fn provision(
@@ -648,6 +653,7 @@ mod tests {
         transitions: Mutex<Vec<String>>,
         activated: AtomicUsize,
         planned: Mutex<Option<PlannedReplacement>>,
+        leases: AtomicUsize,
     }
 
     #[async_trait]
@@ -661,7 +667,7 @@ mod tests {
             Ok(OwnershipLease {
                 pool_id: pool.into(),
                 owner_id: owner.into(),
-                fencing_generation: 7,
+                fencing_generation: self.leases.fetch_add(1, Ordering::Relaxed) as u64 + 1,
                 expires_unix_ms: u64::MAX,
             })
         }
@@ -699,9 +705,10 @@ mod tests {
             &self,
             request: &FleetRequest,
             next: &str,
-            _generation: u64,
+            generation: u64,
             _detail: &str,
         ) -> Result<FleetRequest, AutoscalerError> {
+            assert_eq!(generation, self.leases.load(Ordering::Relaxed) as u64);
             self.transitions
                 .lock()
                 .unwrap()
@@ -709,6 +716,17 @@ mod tests {
             let mut changed = request.clone();
             changed.state = next.into();
             changed.provider_instance_id = "instance".into();
+            if let Some(stored) = self
+                .view
+                .lock()
+                .unwrap()
+                .requests
+                .iter_mut()
+                .find(|stored| stored.id == request.id)
+            {
+                assert_eq!(stored.state, request.state);
+                *stored = changed.clone();
+            }
             Ok(changed)
         }
 
@@ -750,6 +768,7 @@ mod tests {
         in_flight: AtomicUsize,
         max_in_flight: AtomicUsize,
         capacity: usize,
+        fail_destroy_once: std::sync::atomic::AtomicBool,
     }
 
     impl Default for FakeProvider {
@@ -761,6 +780,7 @@ mod tests {
                 in_flight: AtomicUsize::new(0),
                 max_in_flight: AtomicUsize::new(0),
                 capacity: usize::MAX,
+                fail_destroy_once: std::sync::atomic::AtomicBool::new(false),
             }
         }
     }
@@ -817,6 +837,11 @@ mod tests {
 
         async fn destroy(&self, _instance: &ProviderInstance) -> Result<(), AutoscalerError> {
             self.destroyed.fetch_add(1, Ordering::Relaxed);
+            if self.fail_destroy_once.swap(false, Ordering::Relaxed) {
+                return Err(AutoscalerError::Provider(
+                    "temporary destroy failure".into(),
+                ));
+            }
             Ok(())
         }
 
@@ -830,6 +855,141 @@ mod tests {
             runtime_compatibility_digest: digest.into(),
             provider: "fake".into(),
             ..PoolTemplate::default()
+        }
+    }
+
+    fn recovery_control(state: &str, status: &str) -> FakeControl {
+        FakeControl {
+            view: Mutex::new(FleetView {
+                observed_unix_ms: 100_000,
+                policy: ScalingPolicy {
+                    enabled: true,
+                    maximum_workers: 1,
+                    scale_up_batch: 1,
+                    offline_grace_ms: 10_000,
+                    ..ScalingPolicy::default()
+                },
+                requests: vec![FleetRequest {
+                    id: "stuck".into(),
+                    pool_id: "pool".into(),
+                    state: state.into(),
+                    runner_status: status.into(),
+                    runner_last_heartbeat_unix_ms: 1,
+                    updated_unix_ms: 1,
+                    provider_instance_id: "instance".into(),
+                    runtime_compatibility_digest: "sha256:exact".into(),
+                    ..FleetRequest::default()
+                }],
+                demand: vec![DemandGroup {
+                    runtime_compatibility_digest: "sha256:exact".into(),
+                    queued_jobs: 1,
+                    ..DemandGroup::default()
+                }],
+                templates: vec![template("sha256:exact")],
+                ..FleetView::default()
+            }),
+            ..FakeControl::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn abandoned_states_release_capacity_and_pick_up_demand() {
+        for (state, status) in [
+            ("enrolled", "offline"),
+            ("online", "draining"),
+            ("draining", "offline"),
+            ("quarantined", "offline"),
+            ("terminating", "offline"),
+        ] {
+            let control = recovery_control(state, status);
+            let provider = FakeProvider::default();
+            Reconciler::with_clock(
+                &control,
+                &provider,
+                "pool".into(),
+                "owner".into(),
+                FixedClock(100_000),
+            )
+            .reconcile()
+            .await
+            .unwrap();
+            assert_eq!(
+                control.view.lock().unwrap().requests[0].state,
+                "terminated",
+                "{state}/{status}"
+            );
+            assert_eq!(provider.destroyed.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                control.created.load(Ordering::Relaxed),
+                1,
+                "{state}/{status}"
+            );
+            assert!(control.leases.load(Ordering::Relaxed) >= 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_destroy_is_retried_on_the_next_tick() {
+        let control = recovery_control("enrolled", "offline");
+        let provider = FakeProvider::default();
+        provider.fail_destroy_once.store(true, Ordering::Relaxed);
+        let reconciler = Reconciler::with_clock(
+            &control,
+            &provider,
+            "pool".into(),
+            "owner".into(),
+            FixedClock(100_000),
+        );
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(
+            control.view.lock().unwrap().requests[0].state,
+            "terminating"
+        );
+        assert_eq!(control.created.load(Ordering::Relaxed), 0);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(control.view.lock().unwrap().requests[0].state, "terminated");
+        assert_eq!(provider.destroyed.load(Ordering::Relaxed), 2);
+        assert_eq!(control.created.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_preserves_busy_and_recently_heartbeating_runners() {
+        for (state, status) in [
+            ("enrolled", "offline"),
+            ("online", "draining"),
+            ("quarantined", "offline"),
+            ("terminating", "offline"),
+        ] {
+            let control = recovery_control(state, status);
+            control.view.lock().unwrap().requests[0].runner_active_jobs = 1;
+            let provider = FakeProvider::default();
+            Reconciler::with_clock(
+                &control,
+                &provider,
+                "pool".into(),
+                "owner".into(),
+                FixedClock(100_000),
+            )
+            .reconcile()
+            .await
+            .unwrap();
+            assert_eq!(provider.destroyed.load(Ordering::Relaxed), 0);
+        }
+        for (state, status) in [("enrolled", "online"), ("online", "draining")] {
+            let control = recovery_control(state, status);
+            control.view.lock().unwrap().requests[0].runner_last_heartbeat_unix_ms = 99_000;
+            let provider = FakeProvider::default();
+            Reconciler::with_clock(
+                &control,
+                &provider,
+                "pool".into(),
+                "owner".into(),
+                FixedClock(100_000),
+            )
+            .reconcile()
+            .await
+            .unwrap();
+            assert_eq!(provider.destroyed.load(Ordering::Relaxed), 0);
         }
     }
 
